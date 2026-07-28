@@ -137,6 +137,30 @@ describe("runCli", () => {
     expect(io.out()).toBe("");
   });
 
+  it("falls back to ANTHROPIC_API_KEY even when the stored OAuth token has not expired", async () => {
+    // Regression test (#42 review): a non-expired stored OAuth token must not shadow a
+    // valid API key env var now that anthropic's wiring never accepts OAuth as a real
+    // request credential (see agent.ts's hidingOAuth).
+    const io = captureOutput();
+    const store = await storeWith({
+      type: "oauth",
+      access: "at-valid",
+      refresh: "rt-valid",
+      expires: Date.now() + ONE_HOUR_MS,
+    });
+
+    const exitCode = await runCli(["hi"], { ANTHROPIC_API_KEY: "sk-ant-test" }, {
+      stdout: io.stdout,
+      stderr: io.stderr,
+      streamFn: fakeStreamFn("hello from mori"),
+      credentialStore: store,
+    });
+
+    expect(exitCode).toBe(0);
+    expect(io.out()).toBe("hello from mori\n");
+    expect(io.err()).toBe("");
+  });
+
   it("falls back to ANTHROPIC_API_KEY when the stored OAuth token is expired", async () => {
     const io = captureOutput();
     const store = await storeWith({
@@ -186,6 +210,69 @@ describe("runCli", () => {
 
     expect(unauthenticatedMessage("openai")).toContain("OPENAI_API_KEY");
     expect(unauthenticatedMessage("openai")).not.toContain("ANTHROPIC_API_KEY");
+  });
+
+  it("streams from the openai provider when MORI_MODEL selects it and OPENAI_API_KEY is set", async () => {
+    const io = captureOutput();
+
+    const exitCode = await runCli(
+      ["hi"],
+      { MORI_MODEL: "openai/gpt-5.4", OPENAI_API_KEY: "sk-oai-test" },
+      {
+        stdout: io.stdout,
+        stderr: io.stderr,
+        streamFn: fakeStreamFn("hello from gpt"),
+        credentialStore: new InMemoryCredentialStore(),
+      },
+    );
+
+    expect(exitCode).toBe(0);
+    expect(io.out()).toBe("hello from gpt\n");
+    expect(io.err()).toBe("");
+  });
+
+  it("fails with OpenAI-specific guidance when MORI_MODEL selects openai but OPENAI_API_KEY is unset", async () => {
+    const io = captureOutput();
+
+    const exitCode = await runCli(["hi"], { MORI_MODEL: "openai/gpt-5.4" }, {
+      stdout: io.stdout,
+      stderr: io.stderr,
+      credentialStore: new InMemoryCredentialStore(),
+    });
+
+    expect(exitCode).toBe(1);
+    expect(io.err()).toContain("OPENAI_API_KEY");
+    expect(io.err()).not.toContain("ANTHROPIC_API_KEY");
+  });
+
+  it("ends with a supported-provider list, not a stack trace, for an unknown provider", async () => {
+    const io = captureOutput();
+
+    const exitCode = await runCli(["hi"], { MORI_MODEL: "bogus/whatever" }, {
+      stdout: io.stdout,
+      stderr: io.stderr,
+    });
+
+    expect(exitCode).toBe(1);
+    expect(io.err()).toContain("bogus");
+    expect(io.err()).toContain("anthropic");
+    expect(io.err()).toContain("openai");
+    expect(io.err()).not.toContain("at ");
+    expect(io.out()).toBe("");
+  });
+
+  it("ends with an available-models list, not a stack trace, for an unknown model on a known provider", async () => {
+    const io = captureOutput();
+
+    const exitCode = await runCli(["hi"], { MORI_MODEL: "anthropic/not-a-real-model", ANTHROPIC_API_KEY: "sk-ant-test" }, {
+      stdout: io.stdout,
+      stderr: io.stderr,
+    });
+
+    expect(exitCode).toBe(1);
+    expect(io.err()).toContain("not-a-real-model");
+    expect(io.err()).not.toContain("    at ");
+    expect(io.out()).toBe("");
   });
 
   describe("with a real, on-disk credential store", () => {

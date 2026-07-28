@@ -37,6 +37,10 @@ export type ResolvedCredentials = OAuthResolvedCredentials | ApiKeyResolvedCrede
  * #16 결정: 구독 OAuth 토큰 직접 사용 금지 — this only *resolves* a stored OAuth token so
  * callers can report auth status; it must never be sent to a provider request. That
  * remains a standing rule, not a placeholder for future wiring.
+ *
+ * Not the CLI auth gate: `runCli` (index.ts) gates through `createMoriModels(...).checkAuth`
+ * (agent.ts) instead, so gate and real request always agree by construction (#42). This
+ * stays as a provider-agnostic status query used outside that request path.
  */
 export async function resolveCredentials(
   env: NodeJS.ProcessEnv,
@@ -58,18 +62,21 @@ export async function resolveCredentials(
 }
 
 /**
- * Wraps a `CredentialStore` so a stored OAuth credential reads as absent once expired,
- * matching `resolveCredentials`'s own priority (① non-expired OAuth ② API key env). pi-ai's
- * own auth resolution has no such fallback: once *anything* is stored for a provider, it
- * owns that provider and ambient/env is not consulted (see agent.ts's `createMoriModels`,
- * which wires this in front of the real request path). Without this wrapper, an expired
- * stored OAuth token would permanently shadow a valid API key env var.
+ * Wraps a `CredentialStore` so a stored OAuth credential always reads as absent,
+ * regardless of expiry. This is for wiring in front of a real pi-ai request path (see
+ * agent.ts's `createMoriModels`) whose registered providers never accept OAuth as a
+ * real-request auth method — anthropic has `auth.oauth` stripped (#16), and openai never
+ * had it. pi-ai's own auth resolution has no env fallback once *anything* is stored for a
+ * provider (once stored, it owns that provider; ambient/env is not consulted — see
+ * `checkProviderAuth`/`resolveProviderAuth` in the installed `@earendil-works/pi-ai`).
+ * Without this wrapper, a stored OAuth credential — expired or not — would permanently
+ * shadow a valid API key env var on any provider wired to reject OAuth requests.
  */
-export function hidingExpiredOAuth(store: CredentialStore): CredentialStore {
+export function hidingOAuth(store: CredentialStore): CredentialStore {
   return {
     read: async (providerId) => {
       const credential = await store.read(providerId);
-      if (credential?.type === "oauth" && Date.now() >= credential.expires) return undefined;
+      if (credential?.type === "oauth") return undefined;
       return credential;
     },
     list: () => store.list(),

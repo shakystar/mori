@@ -7,12 +7,12 @@ import {
   type MutableModels,
 } from "@earendil-works/pi-ai";
 import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
+import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
 import type { MemoryKernel } from "@mori/kernel";
-import { hidingExpiredOAuth } from "./auth/resolve-credentials.js";
+import { hidingOAuth } from "./auth/resolve-credentials.js";
+import { resolveProviderSelection, SUPPORTED_PROVIDER_IDS, unknownProviderMessage } from "./provider-selection.js";
 
 export type MoriKernel = MemoryKernel<AgentMessage, AgentEvent>;
-
-const DEFAULT_MODEL = "claude-sonnet-4-6";
 
 /**
  * pi-ai's `anthropicProvider()` bundles Claude Pro/Max subscription OAuth — a flow that
@@ -44,14 +44,17 @@ function envAuthContext(env: NodeJS.ProcessEnv): AuthContext {
  * pre-flight auth gate (index.ts's `runCli`) and the real agent turn (`createMoriAgent`
  * below) call this and get the same answer, because both go through the same
  * Models/provider/store configuration — there is no separate, hand-rolled resolution logic
- * that could drift out of sync with it.
+ * that could drift out of sync with it. Neither provider wired below supports subscription
+ * OAuth (anthropic has it stripped, openai never had it), so `hidingOAuth` keeps a stored
+ * OAuth credential for either from silently shadowing a valid API key env var.
  */
 export function createMoriModels(env: NodeJS.ProcessEnv, credentialStore: CredentialStore): MutableModels {
   const models = createModels({
-    credentials: hidingExpiredOAuth(credentialStore),
+    credentials: hidingOAuth(credentialStore),
     authContext: envAuthContext(env),
   });
   models.setProvider(apiKeyOnlyAnthropicProvider());
+  models.setProvider(openaiProvider());
   return models;
 }
 
@@ -63,9 +66,21 @@ export function createMoriAgent(
 ): Agent {
   const models = createMoriModels(env, credentialStore);
 
-  const modelId = env.MORI_MODEL ?? DEFAULT_MODEL;
-  const model = models.getModel("anthropic", modelId);
-  if (!model) throw new Error(`Unknown model: anthropic/${modelId}`);
+  const { providerId, modelId } = resolveProviderSelection(env);
+  if (!SUPPORTED_PROVIDER_IDS.includes(providerId)) {
+    throw new Error(unknownProviderMessage(providerId));
+  }
+
+  const model = models.getModel(providerId, modelId);
+  if (!model) {
+    throw new Error(
+      `mori: 알 수 없는 모델 "${modelId}" (프로바이더 "${providerId}").\n` +
+        `사용 가능한 모델: ${models
+          .getModels(providerId)
+          .map((m) => m.id)
+          .join(", ")}\n`,
+    );
+  }
 
   const agent = new Agent({
     initialState: {
