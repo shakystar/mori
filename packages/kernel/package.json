@@ -8,5 +8,13 @@
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
     }
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.4.1",
+    "write-file-atomic": "^7.0.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/write-file-atomic": "^4.0.3"
   }
 }
