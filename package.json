@@ -9,6 +9,7 @@
   "scripts": {
     "build": "tsc -b",
     "dev": "tsx packages/mori/src/index.ts",
+    "pretest": "tsc -b",
     "test": "vitest run"
   },
   "devDependencies": {
