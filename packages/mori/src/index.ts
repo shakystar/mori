@@ -37,6 +37,8 @@ export interface RunCliDeps {
   stderr?: (chunk: string) => void;
   streamFn?: StreamFn;
   credentialStore?: CredentialStore;
+  /** Working root for the agent's tools. Defaults to `process.cwd()`. */
+  root?: string;
 }
 
 export async function runCli(
@@ -75,7 +77,7 @@ export async function runCli(
   const kernel = new BufferKernel<AgentMessage, AgentEvent>();
   let agent;
   try {
-    agent = createMoriAgent(kernel, env, deps.streamFn);
+    agent = createMoriAgent(kernel, env, deps.streamFn, { root: deps.root });
   } catch (err) {
     // Unknown-model errors from createMoriAgent are already a plain, user-facing message
     // (see agent.ts) — surface it as CLI output, not an uncaught stack trace.
