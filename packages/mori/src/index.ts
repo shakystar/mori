@@ -6,18 +6,30 @@ import type { CredentialStore } from "@earendil-works/pi-ai";
 import { BufferKernel } from "@mori/kernel";
 import { createMoriAgent } from "./agent.js";
 import { defaultCredentialsPath, FileCredentialStore } from "./auth/credential-store.js";
-import { resolveCredentials } from "./auth/resolve-credentials.js";
+import { apiKeyEnvVarFor, resolveCredentials } from "./auth/resolve-credentials.js";
 
-const UNAUTHENTICATED_MESSAGE =
-  "mori: 인증이 필요합니다.\n" +
-  "  mori login          # 권장 — 브라우저로 로그인\n" +
-  "또는 API key를 쓰려면:\n" +
-  "  export ANTHROPIC_API_KEY=sk-ant-...\n";
+// agent.ts wires only the anthropic provider for now (see agent.ts); provider selection
+// is a separate, follow-up issue. This stays the single spot that assumption lives.
+const TARGET_PROVIDER_ID = "anthropic";
 
-const LOGIN_NOT_IMPLEMENTED_MESSAGE =
-  "mori: `mori login`은 아직 사용할 수 없습니다.\n" +
-  "지금은 API key를 쓰세요:\n" +
-  "  export ANTHROPIC_API_KEY=sk-ant-...\n";
+export function unauthenticatedMessage(providerId: string): string {
+  const apiKeyEnv = apiKeyEnvVarFor(providerId) ?? "API_KEY";
+  return (
+    "mori: 인증이 필요합니다.\n" +
+    "  mori login          # 권장 — 브라우저로 로그인\n" +
+    "또는 API key를 쓰려면:\n" +
+    `  export ${apiKeyEnv}=...\n`
+  );
+}
+
+export function loginNotImplementedMessage(providerId: string): string {
+  const apiKeyEnv = apiKeyEnvVarFor(providerId) ?? "API_KEY";
+  return (
+    "mori: `mori login`은 아직 사용할 수 없습니다.\n" +
+    "지금은 API key를 쓰세요:\n" +
+    `  export ${apiKeyEnv}=...\n`
+  );
+}
 
 export interface RunCliDeps {
   stdout?: (chunk: string) => void;
@@ -35,7 +47,7 @@ export async function runCli(
   const stderr = deps.stderr ?? ((chunk: string) => process.stderr.write(chunk));
 
   if (argv[0] === "login") {
-    stderr(LOGIN_NOT_IMPLEMENTED_MESSAGE);
+    stderr(loginNotImplementedMessage(TARGET_PROVIDER_ID));
     return 1;
   }
 
@@ -47,9 +59,9 @@ export async function runCli(
 
   const credentialStore =
     deps.credentialStore ?? new FileCredentialStore(defaultCredentialsPath(env), stderr);
-  const credentials = await resolveCredentials(env, credentialStore);
+  const credentials = await resolveCredentials(env, credentialStore, TARGET_PROVIDER_ID);
   if (!credentials) {
-    stderr(UNAUTHENTICATED_MESSAGE);
+    stderr(unauthenticatedMessage(TARGET_PROVIDER_ID));
     return 1;
   }
 
