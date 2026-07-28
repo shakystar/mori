@@ -35,13 +35,28 @@ is attempted first.
 `ANTHROPIC_API_KEY` in the meantime. Until it exists, the only working path is the
 environment variable above.
 
-### Model override
+### Provider and model selection
 
-By default mori uses `claude-sonnet-4-6`. Override it with `MORI_MODEL`:
+mori supports two providers today: `anthropic` (default) and `openai`. Both go through
+their own API key — no subscription/OAuth path for either (see Authentication above).
+
+By default mori uses the anthropic model `claude-sonnet-4-6`. Override the model — and
+optionally the provider — with `MORI_MODEL`:
 
 ```bash
+# anthropic (default provider), just the model id, e.g.:
 MORI_MODEL=claude-opus-5 mori "hi"
+
+# a different provider: "<provider>/<model>"
+export OPENAI_API_KEY=sk-...
+MORI_MODEL=openai/gpt-5.4 mori "hi"
 ```
+
+Rule: if `MORI_MODEL` contains a `/`, everything before it is the provider id and
+everything after is the model id. A bare value (no `/`) has no provider and is read as an
+anthropic model id, so the pre-existing `MORI_MODEL=claude-sonnet-4-6` form keeps working
+unchanged. An unknown provider or model ends with an error listing what's supported —
+no stack trace.
 
 ### Data location
 
