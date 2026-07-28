@@ -57,14 +57,14 @@ describe("createMoriAgent", () => {
   });
 
   it("throws a plain, supported-list error for an unknown provider", () => {
-    expect(() => createMoriAgent(kernel(), { MORI_MODEL: "bogus/whatever" }, fakeStreamFn())).toThrow(
-      /지원하는 프로바이더.*anthropic.*openai/s,
-    );
+    expect(() =>
+      createMoriAgent(kernel(), { MORI_MODEL: "bogus/whatever" }, fakeStreamFn()),
+    ).toThrow(/지원하는 프로바이더.*anthropic.*openai/s);
   });
 
   it("throws a plain, available-models error for an unknown model on a known provider", () => {
-    expect(() => createMoriAgent(kernel(), { MORI_MODEL: "openai/not-a-real-model" }, fakeStreamFn())).toThrow(
-      /openai/,
-    );
+    expect(() =>
+      createMoriAgent(kernel(), { MORI_MODEL: "openai/not-a-real-model" }, fakeStreamFn()),
+    ).toThrow(/openai/);
   });
 });

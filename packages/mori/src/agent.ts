@@ -8,7 +8,11 @@ import { createModels } from "@earendil-works/pi-ai";
 import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
 import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
 import type { MemoryKernel } from "@mori/kernel";
-import { resolveProviderSelection, SUPPORTED_PROVIDER_IDS, unknownProviderMessage } from "./provider-selection.js";
+import {
+  resolveProviderSelection,
+  SUPPORTED_PROVIDER_IDS,
+  unknownProviderMessage,
+} from "./provider-selection.js";
 
 export type MoriKernel = MemoryKernel<AgentMessage, AgentEvent>;
 

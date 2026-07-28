@@ -227,11 +227,15 @@ describe("runCli", () => {
   it("fails with OpenAI-specific guidance when MORI_MODEL selects openai but OPENAI_API_KEY is unset", async () => {
     const io = captureOutput();
 
-    const exitCode = await runCli(["hi"], { MORI_MODEL: "openai/gpt-5.4" }, {
-      stdout: io.stdout,
-      stderr: io.stderr,
-      credentialStore: new InMemoryCredentialStore(),
-    });
+    const exitCode = await runCli(
+      ["hi"],
+      { MORI_MODEL: "openai/gpt-5.4" },
+      {
+        stdout: io.stdout,
+        stderr: io.stderr,
+        credentialStore: new InMemoryCredentialStore(),
+      },
+    );
 
     expect(exitCode).toBe(1);
     expect(io.err()).toContain("OPENAI_API_KEY");
@@ -241,10 +245,14 @@ describe("runCli", () => {
   it("ends with a supported-provider list, not a stack trace, for an unknown provider", async () => {
     const io = captureOutput();
 
-    const exitCode = await runCli(["hi"], { MORI_MODEL: "bogus/whatever" }, {
-      stdout: io.stdout,
-      stderr: io.stderr,
-    });
+    const exitCode = await runCli(
+      ["hi"],
+      { MORI_MODEL: "bogus/whatever" },
+      {
+        stdout: io.stdout,
+        stderr: io.stderr,
+      },
+    );
 
     expect(exitCode).toBe(1);
     expect(io.err()).toContain("bogus");
@@ -257,10 +265,14 @@ describe("runCli", () => {
   it("ends with an available-models list, not a stack trace, for an unknown model on a known provider", async () => {
     const io = captureOutput();
 
-    const exitCode = await runCli(["hi"], { MORI_MODEL: "anthropic/not-a-real-model", ANTHROPIC_API_KEY: "sk-ant-test" }, {
-      stdout: io.stdout,
-      stderr: io.stderr,
-    });
+    const exitCode = await runCli(
+      ["hi"],
+      { MORI_MODEL: "anthropic/not-a-real-model", ANTHROPIC_API_KEY: "sk-ant-test" },
+      {
+        stdout: io.stdout,
+        stderr: io.stderr,
+      },
+    );
 
     expect(exitCode).toBe(1);
     expect(io.err()).toContain("not-a-real-model");
