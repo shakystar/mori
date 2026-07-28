@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import { realpathSync } from "node:fs";
+import { pathToFileURL } from "node:url";
 import type { AgentEvent, AgentMessage, StreamFn } from "@earendil-works/pi-agent-core";
 import { BufferKernel } from "@mori/kernel";
 import { createMoriAgent } from "./agent.js";
@@ -58,7 +60,8 @@ export async function runCli(
   return 0;
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+const entry = process.argv[1];
+if (entry && import.meta.url === pathToFileURL(realpathSync(entry)).href) {
   const exitCode = await runCli(process.argv.slice(2), process.env);
   process.exit(exitCode);
 }
