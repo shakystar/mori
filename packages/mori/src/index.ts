@@ -7,10 +7,11 @@ import { BufferKernel } from "@mori/kernel";
 import { createMoriAgent } from "./agent.js";
 import { defaultCredentialsPath, FileCredentialStore } from "./auth/credential-store.js";
 import { apiKeyEnvVarFor, resolveCredentials } from "./auth/resolve-credentials.js";
-
-// agent.ts wires only the anthropic provider for now (see agent.ts); provider selection
-// is a separate, follow-up issue. This stays the single spot that assumption lives.
-const TARGET_PROVIDER_ID = "anthropic";
+import {
+  resolveProviderSelection,
+  SUPPORTED_PROVIDER_IDS,
+  unknownProviderMessage,
+} from "./provider-selection.js";
 
 export function unauthenticatedMessage(providerId: string): string {
   const apiKeyEnv = apiKeyEnvVarFor(providerId) ?? "API_KEY";
@@ -46,8 +47,14 @@ export async function runCli(
   const stdout = deps.stdout ?? ((chunk: string) => process.stdout.write(chunk));
   const stderr = deps.stderr ?? ((chunk: string) => process.stderr.write(chunk));
 
+  const { providerId } = resolveProviderSelection(env);
+  if (!SUPPORTED_PROVIDER_IDS.includes(providerId)) {
+    stderr(unknownProviderMessage(providerId));
+    return 1;
+  }
+
   if (argv[0] === "login") {
-    stderr(loginNotImplementedMessage(TARGET_PROVIDER_ID));
+    stderr(loginNotImplementedMessage(providerId));
     return 1;
   }
 
@@ -59,14 +66,22 @@ export async function runCli(
 
   const credentialStore =
     deps.credentialStore ?? new FileCredentialStore(defaultCredentialsPath(env), stderr);
-  const credentials = await resolveCredentials(env, credentialStore, TARGET_PROVIDER_ID);
+  const credentials = await resolveCredentials(env, credentialStore, providerId);
   if (!credentials) {
-    stderr(unauthenticatedMessage(TARGET_PROVIDER_ID));
+    stderr(unauthenticatedMessage(providerId));
     return 1;
   }
 
   const kernel = new BufferKernel<AgentMessage, AgentEvent>();
-  const agent = createMoriAgent(kernel, env, deps.streamFn);
+  let agent;
+  try {
+    agent = createMoriAgent(kernel, env, deps.streamFn);
+  } catch (err) {
+    // Unknown-model errors from createMoriAgent are already a plain, user-facing message
+    // (see agent.ts) — surface it as CLI output, not an uncaught stack trace.
+    stderr(`${err instanceof Error ? err.message : String(err)}\n`);
+    return 1;
+  }
 
   agent.subscribe((event) => {
     if (
