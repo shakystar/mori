@@ -108,7 +108,14 @@ describe("runCli", () => {
     expect(io.err()).toBe("");
   });
 
-  it("authenticates and streams from a stored, non-expired OAuth token alone", async () => {
+  it("does not authenticate from a stored OAuth token alone (#16: subscription OAuth never reaches a real request)", async () => {
+    // Regression test for #42: this scenario used to report "authenticated" (the gate
+    // treated a non-expired stored OAuth token as sufficient) while the real turn — which
+    // ignored the credential store entirely and read process.env directly — would in fact
+    // fail. Now that the gate and the real turn share the same Models/credentialStore
+    // configuration (see agent.ts's createMoriModels), and that configuration never wires
+    // Anthropic's built-in subscription-OAuth capability (standing #16 decision), both
+    // consistently report "unauthenticated" instead of diverging.
     const io = captureOutput();
     const store = await storeWith({
       type: "oauth",
@@ -118,6 +125,31 @@ describe("runCli", () => {
     });
 
     const exitCode = await runCli(["hi"], {}, {
+      stdout: io.stdout,
+      stderr: io.stderr,
+      streamFn: fakeStreamFn("hello from mori"),
+      credentialStore: store,
+    });
+
+    expect(exitCode).toBe(1);
+    expect(io.err()).toContain("mori login");
+    expect(io.err()).toContain("export ANTHROPIC_API_KEY=");
+    expect(io.out()).toBe("");
+  });
+
+  it("falls back to ANTHROPIC_API_KEY even when the stored OAuth token has not expired", async () => {
+    // Regression test (#42 review): a non-expired stored OAuth token must not shadow a
+    // valid API key env var now that anthropic's wiring never accepts OAuth as a real
+    // request credential (see agent.ts's hidingOAuth).
+    const io = captureOutput();
+    const store = await storeWith({
+      type: "oauth",
+      access: "at-valid",
+      refresh: "rt-valid",
+      expires: Date.now() + ONE_HOUR_MS,
+    });
+
+    const exitCode = await runCli(["hi"], { ANTHROPIC_API_KEY: "sk-ant-test" }, {
       stdout: io.stdout,
       stderr: io.stderr,
       streamFn: fakeStreamFn("hello from mori"),
