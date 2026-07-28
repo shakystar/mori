@@ -4,9 +4,9 @@ import { pathToFileURL } from "node:url";
 import type { AgentEvent, AgentMessage, StreamFn } from "@earendil-works/pi-agent-core";
 import type { CredentialStore } from "@earendil-works/pi-ai";
 import { BufferKernel } from "@mori/kernel";
-import { createMoriAgent } from "./agent.js";
+import { createMoriAgent, createMoriModels } from "./agent.js";
 import { defaultCredentialsPath, FileCredentialStore } from "./auth/credential-store.js";
-import { apiKeyEnvVarFor, resolveCredentials } from "./auth/resolve-credentials.js";
+import { apiKeyEnvVarFor } from "./auth/resolve-credentials.js";
 import {
   resolveProviderSelection,
   SUPPORTED_PROVIDER_IDS,
@@ -66,8 +66,12 @@ export async function runCli(
 
   const credentialStore =
     deps.credentialStore ?? new FileCredentialStore(defaultCredentialsPath(env), stderr);
-  const credentials = await resolveCredentials(env, credentialStore, providerId);
-  if (!credentials) {
+
+  // Gate through the exact same Models/provider/store configuration the real turn below
+  // uses (see agent.ts's createMoriModels) — the only way "gate passes, turn fails" can't
+  // happen is for both to ask the same question of the same instance.
+  const authCheck = await createMoriModels(env, credentialStore).checkAuth(providerId);
+  if (!authCheck) {
     stderr(unauthenticatedMessage(providerId));
     return 1;
   }
@@ -75,7 +79,7 @@ export async function runCli(
   const kernel = new BufferKernel<AgentMessage, AgentEvent>();
   let agent;
   try {
-    agent = createMoriAgent(kernel, env, deps.streamFn);
+    agent = createMoriAgent(kernel, credentialStore, env, deps.streamFn);
   } catch (err) {
     // Unknown-model errors from createMoriAgent are already a plain, user-facing message
     // (see agent.ts) — surface it as CLI output, not an uncaught stack trace.
