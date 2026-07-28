@@ -5,7 +5,7 @@ import type { AssistantMessage, AssistantMessageEvent, Credential } from "@earen
 import { createAssistantMessageEventStream, InMemoryCredentialStore } from "@earendil-works/pi-ai";
 import type { StreamFn } from "@earendil-works/pi-agent-core";
 import { afterEach, describe, expect, it } from "vitest";
-import { runCli } from "./index.js";
+import { runCli, unauthenticatedMessage } from "./index.js";
 
 const ONE_HOUR_MS = 60 * 60 * 1000;
 
@@ -170,6 +170,14 @@ describe("runCli", () => {
     expect(io.err()).toContain("mori login");
     expect(io.err()).toContain("ANTHROPIC_API_KEY");
     expect(io.out()).toBe("");
+  });
+
+  it("names the target provider's own API key env var in the unauthenticated message", () => {
+    expect(unauthenticatedMessage("anthropic")).toContain("ANTHROPIC_API_KEY");
+    expect(unauthenticatedMessage("anthropic")).not.toContain("OPENAI_API_KEY");
+
+    expect(unauthenticatedMessage("openai")).toContain("OPENAI_API_KEY");
+    expect(unauthenticatedMessage("openai")).not.toContain("ANTHROPIC_API_KEY");
   });
 
   describe("with a real, on-disk credential store", () => {
