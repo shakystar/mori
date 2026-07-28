@@ -4,9 +4,9 @@ import { pathToFileURL } from "node:url";
 import type { AgentEvent, AgentMessage, StreamFn } from "@earendil-works/pi-agent-core";
 import type { CredentialStore } from "@earendil-works/pi-ai";
 import { BufferKernel } from "@mori/kernel";
-import { createMoriAgent } from "./agent.js";
+import { createMoriAgent, createMoriModels } from "./agent.js";
 import { defaultCredentialsPath, FileCredentialStore } from "./auth/credential-store.js";
-import { apiKeyEnvVarFor, resolveCredentials } from "./auth/resolve-credentials.js";
+import { apiKeyEnvVarFor } from "./auth/resolve-credentials.js";
 
 // agent.ts wires only the anthropic provider for now (see agent.ts); provider selection
 // is a separate, follow-up issue. This stays the single spot that assumption lives.
@@ -59,14 +59,18 @@ export async function runCli(
 
   const credentialStore =
     deps.credentialStore ?? new FileCredentialStore(defaultCredentialsPath(env), stderr);
-  const credentials = await resolveCredentials(env, credentialStore, TARGET_PROVIDER_ID);
-  if (!credentials) {
+
+  // Gate through the exact same Models/provider/store configuration the real turn below
+  // uses (see agent.ts's createMoriModels) — the only way "gate passes, turn fails" can't
+  // happen is for both to ask the same question of the same instance.
+  const authCheck = await createMoriModels(env, credentialStore).checkAuth(TARGET_PROVIDER_ID);
+  if (!authCheck) {
     stderr(unauthenticatedMessage(TARGET_PROVIDER_ID));
     return 1;
   }
 
   const kernel = new BufferKernel<AgentMessage, AgentEvent>();
-  const agent = createMoriAgent(kernel, env, deps.streamFn);
+  const agent = createMoriAgent(kernel, credentialStore, env, deps.streamFn);
 
   agent.subscribe((event) => {
     if (

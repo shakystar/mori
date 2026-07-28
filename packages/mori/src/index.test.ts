@@ -108,7 +108,14 @@ describe("runCli", () => {
     expect(io.err()).toBe("");
   });
 
-  it("authenticates and streams from a stored, non-expired OAuth token alone", async () => {
+  it("does not authenticate from a stored OAuth token alone (#16: subscription OAuth never reaches a real request)", async () => {
+    // Regression test for #42: this scenario used to report "authenticated" (the gate
+    // treated a non-expired stored OAuth token as sufficient) while the real turn — which
+    // ignored the credential store entirely and read process.env directly — would in fact
+    // fail. Now that the gate and the real turn share the same Models/credentialStore
+    // configuration (see agent.ts's createMoriModels), and that configuration never wires
+    // Anthropic's built-in subscription-OAuth capability (standing #16 decision), both
+    // consistently report "unauthenticated" instead of diverging.
     const io = captureOutput();
     const store = await storeWith({
       type: "oauth",
@@ -124,9 +131,10 @@ describe("runCli", () => {
       credentialStore: store,
     });
 
-    expect(exitCode).toBe(0);
-    expect(io.out()).toBe("hello from mori\n");
-    expect(io.err()).toBe("");
+    expect(exitCode).toBe(1);
+    expect(io.err()).toContain("mori login");
+    expect(io.err()).toContain("export ANTHROPIC_API_KEY=");
+    expect(io.out()).toBe("");
   });
 
   it("falls back to ANTHROPIC_API_KEY when the stored OAuth token is expired", async () => {

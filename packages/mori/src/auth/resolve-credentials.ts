@@ -56,3 +56,24 @@ export async function resolveCredentials(
 
   return null;
 }
+
+/**
+ * Wraps a `CredentialStore` so a stored OAuth credential reads as absent once expired,
+ * matching `resolveCredentials`'s own priority (① non-expired OAuth ② API key env). pi-ai's
+ * own auth resolution has no such fallback: once *anything* is stored for a provider, it
+ * owns that provider and ambient/env is not consulted (see agent.ts's `createMoriModels`,
+ * which wires this in front of the real request path). Without this wrapper, an expired
+ * stored OAuth token would permanently shadow a valid API key env var.
+ */
+export function hidingExpiredOAuth(store: CredentialStore): CredentialStore {
+  return {
+    read: async (providerId) => {
+      const credential = await store.read(providerId);
+      if (credential?.type === "oauth" && Date.now() >= credential.expires) return undefined;
+      return credential;
+    },
+    list: () => store.list(),
+    modify: (providerId, fn) => store.modify(providerId, fn),
+    delete: (providerId) => store.delete(providerId),
+  };
+}
