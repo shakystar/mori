@@ -9,6 +9,8 @@
  * inversion — no host CLI, no spawn).
  */
 
+export * from './domain/index.js';
+
 /** LLM seam for consolidation. The harness supplies an in-process implementation. */
 export interface ConsolidatorLlm {
   complete(prompt: string): Promise<string>;
