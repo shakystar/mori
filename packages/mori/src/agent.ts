@@ -13,6 +13,9 @@ export function createMoriAgent(
   streamFn?: StreamFn,
 ): Agent {
   const models = createModels();
+  // anthropicProvider() resolves credentials from process.env directly, not from `env`.
+  // Callers that pass a custom `env` still pre-check ANTHROPIC_API_KEY against it (see
+  // index.ts runCli), but the real turn only succeeds if process.env carries the same key.
   models.setProvider(anthropicProvider());
 
   const modelId = env.MORI_MODEL ?? DEFAULT_MODEL;
