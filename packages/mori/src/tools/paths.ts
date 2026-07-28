@@ -1,4 +1,4 @@
-import { existsSync, realpathSync } from "node:fs";
+import { lstatSync, realpathSync } from "node:fs";
 import { dirname, resolve, sep } from "node:path";
 
 /** Successful path resolution: `resolved` is absolute, symlink-resolved, and inside root. */
@@ -35,7 +35,7 @@ export function resolveWithinRoot(root: string, requestedPath: string): PathGuar
   const candidate = resolve(realRoot, requestedPath);
 
   let nearest = candidate;
-  while (!existsSync(nearest)) {
+  while (!existsLstat(nearest)) {
     const parent = dirname(nearest);
     if (parent === nearest) {
       return { ok: false, reason: `path does not resolve to a real location: ${requestedPath}` };
@@ -63,4 +63,24 @@ export function resolveWithinRoot(root: string, requestedPath: string): PathGuar
 /** `target` must equal `root` or be nested under it — a bare prefix match would let `<root>-evil` through. */
 function isWithinRoot(root: string, target: string): boolean {
   return target === root || target.startsWith(root + sep);
+}
+
+/**
+ * Existence check for the "nearest existing ancestor" walk above.
+ *
+ * Must use `lstat`, not `stat`/`existsSync`: those follow symlinks, so a symlink
+ * whose target doesn't exist yet (a "dangling" symlink) would read as *not existing*,
+ * making the walk skip past it to its parent directory and validate the wrong,
+ * unresolved path. `lstat` reports on the link itself, so a dangling symlink is
+ * still treated as the nearest entry — and the `realpathSync` call right after this
+ * loop then fails on it, correctly rejecting the path instead of silently permitting
+ * a write through it.
+ */
+function existsLstat(path: string): boolean {
+  try {
+    lstatSync(path);
+    return true;
+  } catch {
+    return false;
+  }
 }

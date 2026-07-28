@@ -76,6 +76,17 @@ describe("resolveWithinRoot", () => {
     expect(result.ok).toBe(false);
   });
 
+  it("blocks a dangling symlink pointing at a not-yet-existing location outside the root", () => {
+    const outsideDir = join(base, "outside");
+    mkdirSync(outsideDir);
+    // The symlink target (outsideDir/not-yet-there) does not exist yet.
+    symlinkSync(join(outsideDir, "not-yet-there"), join(root, "escape"));
+
+    const result = resolveWithinRoot(root, "escape");
+
+    expect(result.ok).toBe(false);
+  });
+
   it("does not let a sibling directory that merely shares a prefix through", () => {
     const evilSibling = `${root}-evil`;
     mkdirSync(evilSibling);
