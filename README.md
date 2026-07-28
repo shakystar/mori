@@ -42,3 +42,10 @@ By default mori uses `claude-sonnet-4-6`. Override it with `MORI_MODEL`:
 ```bash
 MORI_MODEL=claude-opus-5 mori "hi"
 ```
+
+### Data location
+
+mori's memory kernel keeps its on-disk state under `~/.mori` (override with
+`MEMORIZE_ROOT`) — no per-account nesting, since mori has no CLI account
+concept. Each project's `better-sqlite3` database lives at
+`~/.mori/projects/<projectId>/mori.db`.
