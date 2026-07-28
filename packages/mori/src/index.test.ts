@@ -1,8 +1,21 @@
-import type { AssistantMessage, AssistantMessageEvent } from "@earendil-works/pi-ai";
-import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { AssistantMessage, AssistantMessageEvent, Credential } from "@earendil-works/pi-ai";
+import { createAssistantMessageEventStream, InMemoryCredentialStore } from "@earendil-works/pi-ai";
 import type { StreamFn } from "@earendil-works/pi-agent-core";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { runCli } from "./index.js";
+
+const ONE_HOUR_MS = 60 * 60 * 1000;
+
+/** An InMemoryCredentialStore pre-seeded with an "anthropic" credential. */
+async function storeWith(credential: Credential): Promise<InMemoryCredentialStore> {
+  const store = new InMemoryCredentialStore();
+  // `modify` is the only write path (see pi-ai's CredentialStore contract).
+  await store.modify("anthropic", async () => credential);
+  return store;
+}
 
 /** Fake streamFn that emits `text` as a sequence of text deltas, then completes. */
 function fakeStreamFn(text: string): StreamFn {
@@ -65,29 +78,75 @@ function captureOutput() {
 }
 
 describe("runCli", () => {
-  it("fails fast with setup guidance when ANTHROPIC_API_KEY is unset", async () => {
+  it("fails fast with OAuth-first setup guidance when no credentials are available", async () => {
     const io = captureOutput();
 
-    const exitCode = await runCli(["hi"], {}, { stdout: io.stdout, stderr: io.stderr });
+    const exitCode = await runCli(["hi"], {}, {
+      stdout: io.stdout,
+      stderr: io.stderr,
+      credentialStore: new InMemoryCredentialStore(),
+    });
 
     expect(exitCode).toBe(1);
-    expect(io.err()).toContain("ANTHROPIC_API_KEY");
+    expect(io.err()).toContain("mori login");
     expect(io.err()).toContain("export ANTHROPIC_API_KEY=");
     expect(io.out()).toBe("");
   });
 
-  it("streams assistant text deltas to stdout when authenticated", async () => {
+  it("streams assistant text deltas to stdout when ANTHROPIC_API_KEY is set", async () => {
     const io = captureOutput();
 
     const exitCode = await runCli(["hi"], { ANTHROPIC_API_KEY: "sk-ant-test" }, {
       stdout: io.stdout,
       stderr: io.stderr,
       streamFn: fakeStreamFn("hello from mori"),
+      credentialStore: new InMemoryCredentialStore(),
     });
 
     expect(exitCode).toBe(0);
     expect(io.out()).toBe("hello from mori\n");
     expect(io.err()).toBe("");
+  });
+
+  it("authenticates and streams from a stored, non-expired OAuth token alone", async () => {
+    const io = captureOutput();
+    const store = await storeWith({
+      type: "oauth",
+      access: "at-valid",
+      refresh: "rt-valid",
+      expires: Date.now() + ONE_HOUR_MS,
+    });
+
+    const exitCode = await runCli(["hi"], {}, {
+      stdout: io.stdout,
+      stderr: io.stderr,
+      streamFn: fakeStreamFn("hello from mori"),
+      credentialStore: store,
+    });
+
+    expect(exitCode).toBe(0);
+    expect(io.out()).toBe("hello from mori\n");
+    expect(io.err()).toBe("");
+  });
+
+  it("falls back to ANTHROPIC_API_KEY when the stored OAuth token is expired", async () => {
+    const io = captureOutput();
+    const store = await storeWith({
+      type: "oauth",
+      access: "at-expired",
+      refresh: "rt-expired",
+      expires: Date.now() - ONE_HOUR_MS,
+    });
+
+    const exitCode = await runCli(["hi"], { ANTHROPIC_API_KEY: "sk-ant-test" }, {
+      stdout: io.stdout,
+      stderr: io.stderr,
+      streamFn: fakeStreamFn("hello from mori"),
+      credentialStore: store,
+    });
+
+    expect(exitCode).toBe(0);
+    expect(io.out()).toBe("hello from mori\n");
   });
 
   it("prints usage and fails when no prompt is given", async () => {
@@ -100,5 +159,42 @@ describe("runCli", () => {
 
     expect(exitCode).toBe(1);
     expect(io.err()).toContain("usage: mori");
+  });
+
+  it("`mori login` reports it isn't implemented yet and points to the API key fallback", async () => {
+    const io = captureOutput();
+
+    const exitCode = await runCli(["login"], {}, { stdout: io.stdout, stderr: io.stderr });
+
+    expect(exitCode).toBe(1);
+    expect(io.err()).toContain("mori login");
+    expect(io.err()).toContain("ANTHROPIC_API_KEY");
+    expect(io.out()).toBe("");
+  });
+
+  describe("with a real, on-disk credential store", () => {
+    let configDir: string;
+
+    afterEach(() => {
+      if (configDir) rmSync(configDir, { recursive: true, force: true });
+    });
+
+    it("doesn't crash on a corrupt credentials.json and falls back to ANTHROPIC_API_KEY", async () => {
+      configDir = mkdtempSync(join(tmpdir(), "mori-xdg-"));
+      const credentialsDir = join(configDir, "mori");
+      mkdirSync(credentialsDir, { recursive: true });
+      writeFileSync(join(credentialsDir, "credentials.json"), "{ not valid json", "utf8");
+
+      const io = captureOutput();
+      const exitCode = await runCli(
+        ["hi"],
+        { XDG_CONFIG_HOME: configDir, ANTHROPIC_API_KEY: "sk-ant-test" },
+        { stdout: io.stdout, stderr: io.stderr, streamFn: fakeStreamFn("hello from mori") },
+      );
+
+      expect(exitCode).toBe(0);
+      expect(io.out()).toBe("hello from mori\n");
+      expect(io.err()).toContain("invalid JSON");
+    });
   });
 });
