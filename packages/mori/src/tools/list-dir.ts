@@ -54,7 +54,11 @@ export function listDir(root: string, requestedPath = "."): ListDirResult {
   const entries: DirEntry[] = dirents
     .map((dirent) => ({
       name: dirent.name,
-      type: (dirent.isDirectory() ? "directory" : dirent.isFile() ? "file" : "other") as DirEntry["type"],
+      type: (dirent.isDirectory()
+        ? "directory"
+        : dirent.isFile()
+          ? "file"
+          : "other") as DirEntry["type"],
     }))
     .sort((a, b) => a.name.localeCompare(b.name));
 
@@ -71,15 +75,20 @@ export function listDir(root: string, requestedPath = "."): ListDirResult {
 
 const listDirParameters = Type.Object({
   path: Type.Optional(
-    Type.String({ description: "Directory path, relative to the working root. Defaults to the root itself." }),
+    Type.String({
+      description: "Directory path, relative to the working root. Defaults to the root itself.",
+    }),
   ),
 });
 
-export function createListDirTool(root: string = process.cwd()): AgentTool<typeof listDirParameters, ListDirResult> {
+export function createListDirTool(
+  root: string = process.cwd(),
+): AgentTool<typeof listDirParameters, ListDirResult> {
   return {
     name: "list_dir",
     label: "List Directory",
-    description: "Lists the entries (files and subdirectories) of a directory within the working root.",
+    description:
+      "Lists the entries (files and subdirectories) of a directory within the working root.",
     parameters: listDirParameters,
     execute: async (_toolCallId, params: Static<typeof listDirParameters>) => {
       const result = listDir(root, params.path ?? ".");
@@ -88,7 +97,9 @@ export function createListDirTool(root: string = process.cwd()): AgentTool<typeo
         return { content: [{ type: "text", text: `Error: ${result.reason}` }], details: result };
       }
 
-      const lines = result.entries.map((entry) => (entry.type === "directory" ? `${entry.name}/` : entry.name));
+      const lines = result.entries.map((entry) =>
+        entry.type === "directory" ? `${entry.name}/` : entry.name,
+      );
       const notice = result.truncated
         ? `\n\n[truncated: showing first ${LIST_DIR_MAX_ENTRIES} of ${result.totalEntries} entries]`
         : "";

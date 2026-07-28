@@ -1,6 +1,6 @@
-import type { BaseEntity, EntityId, ISODateString } from '../common.js';
+import type { BaseEntity, EntityId, ISODateString } from "../common.js";
 
-export type SyncStatus = 'idle' | 'syncing' | 'conflicted' | 'offline';
+export type SyncStatus = "idle" | "syncing" | "conflicted" | "offline";
 
 /**
  * Persisted transport location so background auto-sync (P3-b) knows WHERE to
@@ -10,8 +10,7 @@ export type SyncStatus = 'idle' | 'syncing' | 'conflicted' | 'offline';
  * relay is OPTIONAL (local-first preserved — no transport = single-machine).
  */
 export type SyncTransportConfig =
-  | { type: 'file'; location: string }
-  | { type: 'http'; url: string; token?: string };
+  { type: "file"; location: string } | { type: "http"; url: string; token?: string };
 
 export interface ProjectSyncState extends BaseEntity {
   projectId: EntityId;
@@ -30,7 +29,7 @@ export interface ProjectSyncState extends BaseEntity {
    * gateway on sync and never authoritative, never event-sourced. Absent for a
    * plain `proj_` relay sync (their presence is what marks a workspace binding).
    */
-  workspaceRole?: 'owner' | 'member';
+  workspaceRole?: "owner" | "member";
   inviteReachable?: boolean;
   /**
    * The `wsp_` this project's `proj_` id was last registered into as a source

@@ -59,7 +59,12 @@ function fakeStreamFn(text: string): StreamFn {
     }
 
     const final: AssistantMessage = { ...base, content: [{ type: "text", text: acc }] };
-    stream.push({ type: "text_end", contentIndex: 0, content: acc, partial: final } satisfies AssistantMessageEvent);
+    stream.push({
+      type: "text_end",
+      contentIndex: 0,
+      content: acc,
+      partial: final,
+    } satisfies AssistantMessageEvent);
     stream.push({ type: "done", reason: "stop", message: final } satisfies AssistantMessageEvent);
 
     return stream;
@@ -81,11 +86,15 @@ describe("runCli", () => {
   it("fails fast with OAuth-first setup guidance when no credentials are available", async () => {
     const io = captureOutput();
 
-    const exitCode = await runCli(["hi"], {}, {
-      stdout: io.stdout,
-      stderr: io.stderr,
-      credentialStore: new InMemoryCredentialStore(),
-    });
+    const exitCode = await runCli(
+      ["hi"],
+      {},
+      {
+        stdout: io.stdout,
+        stderr: io.stderr,
+        credentialStore: new InMemoryCredentialStore(),
+      },
+    );
 
     expect(exitCode).toBe(1);
     expect(io.err()).toContain("mori login");
@@ -96,12 +105,16 @@ describe("runCli", () => {
   it("streams assistant text deltas to stdout when ANTHROPIC_API_KEY is set", async () => {
     const io = captureOutput();
 
-    const exitCode = await runCli(["hi"], { ANTHROPIC_API_KEY: "sk-ant-test" }, {
-      stdout: io.stdout,
-      stderr: io.stderr,
-      streamFn: fakeStreamFn("hello from mori"),
-      credentialStore: new InMemoryCredentialStore(),
-    });
+    const exitCode = await runCli(
+      ["hi"],
+      { ANTHROPIC_API_KEY: "sk-ant-test" },
+      {
+        stdout: io.stdout,
+        stderr: io.stderr,
+        streamFn: fakeStreamFn("hello from mori"),
+        credentialStore: new InMemoryCredentialStore(),
+      },
+    );
 
     expect(exitCode).toBe(0);
     expect(io.out()).toBe("hello from mori\n");
@@ -117,12 +130,16 @@ describe("runCli", () => {
       expires: Date.now() + ONE_HOUR_MS,
     });
 
-    const exitCode = await runCli(["hi"], {}, {
-      stdout: io.stdout,
-      stderr: io.stderr,
-      streamFn: fakeStreamFn("hello from mori"),
-      credentialStore: store,
-    });
+    const exitCode = await runCli(
+      ["hi"],
+      {},
+      {
+        stdout: io.stdout,
+        stderr: io.stderr,
+        streamFn: fakeStreamFn("hello from mori"),
+        credentialStore: store,
+      },
+    );
 
     expect(exitCode).toBe(0);
     expect(io.out()).toBe("hello from mori\n");
@@ -138,12 +155,16 @@ describe("runCli", () => {
       expires: Date.now() - ONE_HOUR_MS,
     });
 
-    const exitCode = await runCli(["hi"], { ANTHROPIC_API_KEY: "sk-ant-test" }, {
-      stdout: io.stdout,
-      stderr: io.stderr,
-      streamFn: fakeStreamFn("hello from mori"),
-      credentialStore: store,
-    });
+    const exitCode = await runCli(
+      ["hi"],
+      { ANTHROPIC_API_KEY: "sk-ant-test" },
+      {
+        stdout: io.stdout,
+        stderr: io.stderr,
+        streamFn: fakeStreamFn("hello from mori"),
+        credentialStore: store,
+      },
+    );
 
     expect(exitCode).toBe(0);
     expect(io.out()).toBe("hello from mori\n");
@@ -152,10 +173,14 @@ describe("runCli", () => {
   it("prints usage and fails when no prompt is given", async () => {
     const io = captureOutput();
 
-    const exitCode = await runCli([], { ANTHROPIC_API_KEY: "sk-ant-test" }, {
-      stdout: io.stdout,
-      stderr: io.stderr,
-    });
+    const exitCode = await runCli(
+      [],
+      { ANTHROPIC_API_KEY: "sk-ant-test" },
+      {
+        stdout: io.stdout,
+        stderr: io.stderr,
+      },
+    );
 
     expect(exitCode).toBe(1);
     expect(io.err()).toContain("usage: mori");

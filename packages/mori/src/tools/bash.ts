@@ -24,7 +24,11 @@
  */
 import { spawn } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
-import type { AgentTool, BeforeToolCallContext, BeforeToolCallResult } from "@earendil-works/pi-agent-core";
+import type {
+  AgentTool,
+  BeforeToolCallContext,
+  BeforeToolCallResult,
+} from "@earendil-works/pi-agent-core";
 import { Type, type Static } from "@earendil-works/pi-ai";
 
 /** Tool name as the model sees it. The preflight hook matches on this. */
@@ -83,7 +87,8 @@ export const BASH_BLOCKED_PATTERNS: readonly BlockedCommandPattern[] = [
     id: "rm-root",
     description: "deletes the filesystem root or the home directory",
     // `rm` with any flags, targeting `/`, `/*`, `~`, `~/*`, `$HOME` or `${HOME}`.
-    pattern: /\brm\b(?:\s+-{1,2}\S+)*\s+(?:--\s+)?(?:\/|\/\*|~|~\/\*|\$HOME|\$\{HOME\})(?=\s|$|;|&|\|)/,
+    pattern:
+      /\brm\b(?:\s+-{1,2}\S+)*\s+(?:--\s+)?(?:\/|\/\*|~|~\/\*|\$HOME|\$\{HOME\})(?=\s|$|;|&|\|)/,
   },
   {
     id: "rm-no-preserve-root",
@@ -116,7 +121,8 @@ export const BASH_BLOCKED_PATTERNS: readonly BlockedCommandPattern[] = [
     description: "fork bomb — spawns processes until the machine stops responding",
     // `:(){ :|:& };:` and renamed variants; the backreference ties the three uses
     // of the same function name together.
-    pattern: /(?:^|[\s;&|])([A-Za-z_.:][\w.:]*)\s*\(\s*\)\s*\{\s*\1\s*\|\s*\1\s*&\s*;?\s*\}\s*;?\s*\1/,
+    pattern:
+      /(?:^|[\s;&|])([A-Za-z_.:][\w.:]*)\s*\(\s*\)\s*\{\s*\1\s*\|\s*\1\s*&\s*;?\s*\}\s*;?\s*\1/,
   },
 ];
 
@@ -205,7 +211,10 @@ function killProcessGroup(pid: number, signal: NodeJS.Signals): void {
 }
 
 /** Runs `command` under a shell with cwd pinned to the working root. Never throws. */
-export async function runBash(command: string, options: RunBashOptions = {}): Promise<BashRunResult> {
+export async function runBash(
+  command: string,
+  options: RunBashOptions = {},
+): Promise<BashRunResult> {
   const blocked = findBlockedPattern(command);
   if (blocked) {
     // Defence in depth: the preflight hook is the real gate, but a caller that wires
@@ -355,10 +364,14 @@ export function formatBashResult(result: BashRunResult): string {
     sections.push(result.stdout + (result.stdoutTruncated ? truncationNotice("stdout") : ""));
   }
   if (result.stderr || result.stderrTruncated) {
-    sections.push(`[stderr]\n${result.stderr}` + (result.stderrTruncated ? truncationNotice("stderr") : ""));
+    sections.push(
+      `[stderr]\n${result.stderr}` + (result.stderrTruncated ? truncationNotice("stderr") : ""),
+    );
   }
   if (result.timedOut) {
-    sections.push(`[timed out after ${result.timeoutMs}ms — process killed, output above is partial]`);
+    sections.push(
+      `[timed out after ${result.timeoutMs}ms — process killed, output above is partial]`,
+    );
   }
   sections.push(
     result.exitCode === null
@@ -438,7 +451,10 @@ export function createBashTool(
  */
 export function createBashBeforeToolCall(
   toolName: string = BASH_TOOL_NAME,
-): (context: BeforeToolCallContext, signal?: AbortSignal) => Promise<BeforeToolCallResult | undefined> {
+): (
+  context: BeforeToolCallContext,
+  signal?: AbortSignal,
+) => Promise<BeforeToolCallResult | undefined> {
   return async (context) => {
     if (context.toolCall.name !== toolName) return undefined;
 

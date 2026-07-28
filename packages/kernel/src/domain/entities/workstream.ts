@@ -1,7 +1,7 @@
-import type { BaseEntity, EntityId } from '../common.js';
-import { baseEntity } from './base.js';
+import type { BaseEntity, EntityId } from "../common.js";
+import { baseEntity } from "./base.js";
 
-export type WorkstreamStatus = 'active' | 'paused' | 'closed';
+export type WorkstreamStatus = "active" | "paused" | "closed";
 
 export interface Workstream extends BaseEntity {
   projectId: EntityId;
@@ -18,11 +18,11 @@ export function createWorkstream(input: {
   locator?: string;
 }): Workstream {
   return {
-    ...baseEntity('ws'),
+    ...baseEntity("ws"),
     projectId: input.projectId,
     title: input.title,
     summary: input.summary ?? input.title,
-    status: 'active',
+    status: "active",
     ...(input.locator ? { locator: input.locator } : {}),
   };
 }

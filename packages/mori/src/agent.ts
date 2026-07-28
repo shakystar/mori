@@ -1,4 +1,9 @@
-import { Agent, type AgentEvent, type AgentMessage, type StreamFn } from "@earendil-works/pi-agent-core";
+import {
+  Agent,
+  type AgentEvent,
+  type AgentMessage,
+  type StreamFn,
+} from "@earendil-works/pi-agent-core";
 import { createModels } from "@earendil-works/pi-ai";
 import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
 import type { MemoryKernel } from "@mori/kernel";

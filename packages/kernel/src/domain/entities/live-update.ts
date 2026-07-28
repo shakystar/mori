@@ -1,4 +1,4 @@
-import type { ConsolidatedMemoryKind, ObservationSignal } from './memory.js';
+import type { ConsolidatedMemoryKind, ObservationSignal } from "./memory.js";
 
 /**
  * CLS Phase 2 — real-time share payload (transport DTO).

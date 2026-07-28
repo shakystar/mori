@@ -1,5 +1,5 @@
-import type { BaseEntity, EntityId } from '../common.js';
-import { baseEntity } from './base.js';
+import type { BaseEntity, EntityId } from "../common.js";
+import { baseEntity } from "./base.js";
 
 /**
  * CLS two-layer memory (Phase 1) — short-term layer.
@@ -14,10 +14,7 @@ import { baseEntity } from './base.js';
 
 /** Which filter rule admitted this observation (capture-service). */
 export type ObservationSignal =
-  | 'write-tool'
-  | 'mutating-bash'
-  | 'decision-keyword'
-  | 'task-transition';
+  "write-tool" | "mutating-bash" | "decision-keyword" | "task-transition";
 
 export interface Observation extends BaseEntity {
   projectId: EntityId;
@@ -62,7 +59,7 @@ export function createObservation(input: {
   toolUseId?: string;
 }): Observation {
   return {
-    ...baseEntity('obs'),
+    ...baseEntity("obs"),
     projectId: input.projectId,
     signal: input.signal,
     ...(input.sessionId ? { sessionId: input.sessionId } : {}),
@@ -87,7 +84,7 @@ export function createObservation(input: {
  * episodes it summarizes (invariant: append-only, forgetting without
  * deletion).
  */
-export type ConsolidatedMemoryKind = 'decision' | 'rationale' | 'progress';
+export type ConsolidatedMemoryKind = "decision" | "rationale" | "progress";
 
 export const MIN_SALIENCE = 1;
 export const MAX_SALIENCE = 10;
@@ -146,7 +143,7 @@ export function createConsolidatedMemory(input: {
   importSource?: string;
 }): ConsolidatedMemory {
   return {
-    ...baseEntity('mem'),
+    ...baseEntity("mem"),
     projectId: input.projectId,
     kind: input.kind,
     text: input.text,
@@ -204,5 +201,5 @@ export interface MemoryRetractedPayload {
    * union bytes it is a trusted-membership claim, not a cryptographic proof
    * (H030's accepted trade-off).
    */
-  writerRole?: 'owner' | 'member';
+  writerRole?: "owner" | "member";
 }

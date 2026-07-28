@@ -69,10 +69,7 @@ export async function runCli(
   const agent = createMoriAgent(kernel, env, deps.streamFn);
 
   agent.subscribe((event) => {
-    if (
-      event.type === "message_update" &&
-      event.assistantMessageEvent.type === "text_delta"
-    ) {
+    if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
       stdout(event.assistantMessageEvent.delta);
     }
   });

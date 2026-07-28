@@ -1,22 +1,18 @@
-import path from 'node:path';
+import path from "node:path";
 
-import type Database from 'better-sqlite3';
+import type Database from "better-sqlite3";
 
-import { createId, CURRENT_SCHEMA_VERSION, nowIso } from '../domain/common.js';
-import type {
-  DomainEvent,
-  DomainEventPayload,
-  DomainEventType,
-} from '../domain/events.js';
-import { MemorizeError } from '../shared/errors.js';
-import { getDb } from './db.js';
-import { ensureDir } from './fs-utils.js';
-import { getProjectRoot } from './path-resolver.js';
+import { createId, CURRENT_SCHEMA_VERSION, nowIso } from "../domain/common.js";
+import type { DomainEvent, DomainEventPayload, DomainEventType } from "../domain/events.js";
+import { MemorizeError } from "../shared/errors.js";
+import { getDb } from "./db.js";
+import { ensureDir } from "./fs-utils.js";
+import { getProjectRoot } from "./path-resolver.js";
 
 export interface AppendEventInput<TPayload extends DomainEventPayload> {
   type: DomainEventType;
   projectId: string;
-  scopeType: DomainEvent['scopeType'];
+  scopeType: DomainEvent["scopeType"];
   scopeId: string;
   actor: string;
   /**
@@ -37,11 +33,9 @@ export async function ensureProjectDirectories(projectId: string): Promise<void>
   // written to disk remain: `topics/` (topic `.md` files) and `sync/` (remote
   // sync state).
   await Promise.all(
-    [
-      projectRoot,
-      path.join(projectRoot, 'topics'),
-      path.join(projectRoot, 'sync'),
-    ].map((dirPath) => ensureDir(dirPath)),
+    [projectRoot, path.join(projectRoot, "topics"), path.join(projectRoot, "sync")].map((dirPath) =>
+      ensureDir(dirPath),
+    ),
   );
 }
 
@@ -50,12 +44,9 @@ export async function ensureProjectDirectories(projectId: string): Promise<void>
  * backfill uses this to date a reconstructed `project.created` at the store's
  * true start (its first captured event) rather than at repair time.
  */
-export function getEarliestEventCreatedAt(
-  projectId: string,
-): string | undefined {
-  const row = getDb(projectId)
-    .prepare('SELECT MIN(created_at) AS t FROM events')
-    .get() as { t: string | null } | undefined;
+export function getEarliestEventCreatedAt(projectId: string): string | undefined {
+  const row = getDb(projectId).prepare("SELECT MIN(created_at) AS t FROM events").get() as
+    { t: string | null } | undefined;
   return row?.t ?? undefined;
 }
 
@@ -109,7 +100,7 @@ export async function appendEvent<TPayload extends DomainEventPayload>(
 ): Promise<DomainEvent<TPayload>> {
   const timestamp = nowIso();
   const event: DomainEvent<TPayload> = {
-    id: createId('evt'),
+    id: createId("evt"),
     schemaVersion: CURRENT_SCHEMA_VERSION,
     createdAt: timestamp,
     updatedAt: timestamp,
@@ -148,7 +139,7 @@ export async function appendEvents<TPayload extends DomainEventPayload>(
   const events: DomainEvent<TPayload>[] = inputs.map((input) => {
     const timestamp = nowIso();
     return {
-      id: createId('evt'),
+      id: createId("evt"),
       schemaVersion: CURRENT_SCHEMA_VERSION,
       createdAt: timestamp,
       updatedAt: timestamp,
@@ -179,7 +170,7 @@ interface EventRow {
   updated_at: string;
   type: DomainEventType;
   project_id: string;
-  scope_type: DomainEvent['scopeType'];
+  scope_type: DomainEvent["scopeType"];
   scope_id: string;
   actor: string;
   writer: string | null;
@@ -201,9 +192,7 @@ function rowToEvent(row: EventRow): DomainEvent {
     // Spread (not assign) so absent provenance stays absent under
     // exactOptionalPropertyTypes rather than becoming an explicit `undefined`.
     ...(row.writer != null ? { writer: row.writer } : {}),
-    ...(row.source_project_id != null
-      ? { sourceProjectId: row.source_project_id }
-      : {}),
+    ...(row.source_project_id != null ? { sourceProjectId: row.source_project_id } : {}),
     payload: JSON.parse(row.payload) as unknown,
   };
 }
@@ -212,16 +201,12 @@ export interface EventIntegrity {
   events: DomainEvent[];
 }
 
-export async function readEventsWithIntegrity(
-  projectId: string,
-): Promise<EventIntegrity> {
+export async function readEventsWithIntegrity(projectId: string): Promise<EventIntegrity> {
   // `seq` (autoincrement primary key) is the deterministic replay order,
   // replacing the old filename + line ordering. SQLite stores whole rows,
   // so there is no partial-line corruption to report. Whole-DB corruption is
   // covered by `PRAGMA integrity_check` in repair-service's doctor.
-  const rows = getDb(projectId)
-    .prepare('SELECT * FROM events ORDER BY seq')
-    .all() as EventRow[];
+  const rows = getDb(projectId).prepare("SELECT * FROM events ORDER BY seq").all() as EventRow[];
   return { events: rows.map(rowToEvent) };
 }
 
@@ -241,22 +226,17 @@ export async function readEventsSince(
 ): Promise<DomainEvent[]> {
   const db = getDb(projectId);
   if (!sinceEventId) {
-    return (db.prepare('SELECT * FROM events ORDER BY seq').all() as EventRow[]).map(
-      rowToEvent,
-    );
+    return (db.prepare("SELECT * FROM events ORDER BY seq").all() as EventRow[]).map(rowToEvent);
   }
-  const watermark = db
-    .prepare('SELECT seq FROM events WHERE id = ?')
-    .get(sinceEventId) as { seq: number } | undefined;
+  const watermark = db.prepare("SELECT seq FROM events WHERE id = ?").get(sinceEventId) as
+    { seq: number } | undefined;
   if (!watermark) {
     // Unknown watermark — fall back to "everything", as the old findIndex
     // did when the id was not present in the log.
-    return (db.prepare('SELECT * FROM events ORDER BY seq').all() as EventRow[]).map(
-      rowToEvent,
-    );
+    return (db.prepare("SELECT * FROM events ORDER BY seq").all() as EventRow[]).map(rowToEvent);
   }
   const rows = db
-    .prepare('SELECT * FROM events WHERE seq > ? ORDER BY seq')
+    .prepare("SELECT * FROM events WHERE seq > ? ORDER BY seq")
     .all(watermark.seq) as EventRow[];
   return rows.map(rowToEvent);
 }
@@ -265,12 +245,9 @@ export async function readEventsSince(
  *  Cheap local head probe — a watcher's push gate can compare this against a
  *  persisted push watermark so an idle tick never builds the full event array
  *  just to learn nothing changed. */
-export async function readHeadEventId(
-  projectId: string,
-): Promise<string | undefined> {
-  const row = getDb(projectId)
-    .prepare('SELECT id FROM events ORDER BY seq DESC LIMIT 1')
-    .get() as { id: string } | undefined;
+export async function readHeadEventId(projectId: string): Promise<string | undefined> {
+  const row = getDb(projectId).prepare("SELECT id FROM events ORDER BY seq DESC LIMIT 1").get() as
+    { id: string } | undefined;
   return row?.id;
 }
 
@@ -287,16 +264,13 @@ export async function readEventsUpTo(
   upToEventId: string,
 ): Promise<DomainEvent[]> {
   const db = getDb(projectId);
-  const watermark = db
-    .prepare('SELECT seq FROM events WHERE id = ?')
-    .get(upToEventId) as { seq: number } | undefined;
+  const watermark = db.prepare("SELECT seq FROM events WHERE id = ?").get(upToEventId) as
+    { seq: number } | undefined;
   if (!watermark) {
-    throw new MemorizeError(
-      `Revision ${upToEventId} not found in project ${projectId}.`,
-    );
+    throw new MemorizeError(`Revision ${upToEventId} not found in project ${projectId}.`);
   }
   const rows = db
-    .prepare('SELECT * FROM events WHERE seq <= ? ORDER BY seq')
+    .prepare("SELECT * FROM events WHERE seq <= ? ORDER BY seq")
     .all(watermark.seq) as EventRow[];
   return rows.map(rowToEvent);
 }

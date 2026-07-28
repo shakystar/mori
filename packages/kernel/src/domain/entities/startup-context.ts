@@ -1,9 +1,9 @@
-import type { ISODateString } from '../common.js';
-import type { Checkpoint } from './checkpoint.js';
-import type { Conflict } from './conflict.js';
-import type { Handoff } from './handoff.js';
-import type { ConsolidatedMemoryKind, ObservationSignal } from './memory.js';
-import type { Task, TaskStatus } from './task.js';
+import type { ISODateString } from "../common.js";
+import type { Checkpoint } from "./checkpoint.js";
+import type { Conflict } from "./conflict.js";
+import type { Handoff } from "./handoff.js";
+import type { ConsolidatedMemoryKind, ObservationSignal } from "./memory.js";
+import type { Task, TaskStatus } from "./task.js";
 
 export interface OtherActiveTaskAssignment {
   sessionId: string;

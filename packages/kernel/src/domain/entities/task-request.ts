@@ -1,7 +1,7 @@
-import type { BaseEntity, EntityId } from '../common.js';
-import { baseEntity } from './base.js';
+import type { BaseEntity, EntityId } from "../common.js";
+import { baseEntity } from "./base.js";
 
-export type TaskRequestStatus = 'pending' | 'accepted' | 'declined';
+export type TaskRequestStatus = "pending" | "accepted" | "declined";
 
 /**
  * Cross-project delegation request (SoT-041). Lives in the REQUESTER's lane;
@@ -42,15 +42,15 @@ export function createTaskRequest(input: {
   acceptanceCriteria?: string[];
 }): TaskRequest {
   return {
-    ...baseEntity('taskreq'),
+    ...baseEntity("taskreq"),
     projectId: input.projectId,
     targetProjectId: input.targetProjectId,
     title: input.title,
     // No title fallback: an absent description/goal stays empty rather than
     // masquerading as filled — consumers treat '' as absent (same as Task).
-    description: input.description ?? '',
-    goal: input.goal ?? '',
+    description: input.description ?? "",
+    goal: input.goal ?? "",
     acceptanceCriteria: input.acceptanceCriteria ?? [],
-    status: 'pending',
+    status: "pending",
   };
 }
