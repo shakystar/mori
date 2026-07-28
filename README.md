@@ -92,3 +92,8 @@ What the tool actually guarantees:
 
 **Do not run mori with the `bash` tool enabled on untrusted prompts or untrusted
 content.** Real isolation (container, seccomp, a permission system) is not implemented.
+
+## Development
+
+See [TESTING.md](./TESTING.md) for this repo's testing conventions before adding or
+changing tests.
