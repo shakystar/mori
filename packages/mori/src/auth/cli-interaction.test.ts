@@ -19,15 +19,25 @@ function fakeIo(answers: string[]) {
 }
 
 describe("createCliAuthInteraction — prompt", () => {
-  it("text: asks the question and returns the typed answer", async () => {
-    const io = fakeIo(["hello"]);
-    const interaction = createCliAuthInteraction(io);
+  // text/secret/manual_code all resolve through the same io.question() call in
+  // cli-interaction.ts's promptFor switch (fallthrough case) — one table covers the
+  // shared code path for all three instead of three near-identical it()s.
+  it.each([
+    { type: "text", message: "이름을 입력하세요", answer: "hello" },
+    { type: "secret", message: "비밀번호", answer: "s3cr3t" },
+    { type: "manual_code", message: "코드를 입력하세요", answer: "ABCD-1234" },
+  ] as const)(
+    "$type: asks the question and returns the typed answer",
+    async ({ type, message, answer: typed }) => {
+      const io = fakeIo([typed]);
+      const interaction = createCliAuthInteraction(io);
 
-    const answer = await interaction.prompt({ type: "text", message: "이름을 입력하세요" });
+      const answer = await interaction.prompt({ type, message });
 
-    expect(answer).toBe("hello");
-    expect(io.questions).toEqual(["이름을 입력하세요: "]);
-  });
+      expect(answer).toBe(typed);
+      expect(io.questions).toEqual([`${message}: `]);
+    },
+  );
 
   it("text: includes the placeholder in the question line", async () => {
     const io = fakeIo(["value"]);
@@ -36,24 +46,6 @@ describe("createCliAuthInteraction — prompt", () => {
     await interaction.prompt({ type: "text", message: "값", placeholder: "예시" });
 
     expect(io.questions).toEqual(["값 (예시): "]);
-  });
-
-  it("secret: asks the question and returns the typed answer", async () => {
-    const io = fakeIo(["s3cr3t"]);
-    const interaction = createCliAuthInteraction(io);
-
-    const answer = await interaction.prompt({ type: "secret", message: "비밀번호" });
-
-    expect(answer).toBe("s3cr3t");
-  });
-
-  it("manual_code: asks the question and returns the typed answer", async () => {
-    const io = fakeIo(["ABCD-1234"]);
-    const interaction = createCliAuthInteraction(io);
-
-    const answer = await interaction.prompt({ type: "manual_code", message: "코드를 입력하세요" });
-
-    expect(answer).toBe("ABCD-1234");
   });
 
   it("select: lists options and returns the id for a valid selection", async () => {
