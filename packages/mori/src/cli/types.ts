@@ -1,5 +1,5 @@
 import type { StreamFn } from "@earendil-works/pi-agent-core";
-import type { CredentialStore } from "@earendil-works/pi-ai";
+import type { CredentialStore, MutableModels } from "@earendil-works/pi-ai";
 
 export interface RunCliDeps {
   stdout?: (chunk: string) => void;
@@ -8,4 +8,23 @@ export interface RunCliDeps {
   credentialStore?: CredentialStore;
   /** Working root for the agent's tools. Defaults to `process.cwd()`. */
   root?: string;
+  /**
+   * Reads one line of input during `mori login`. Defaults to a readline prompt on the
+   * process's stdin (cli/login.ts).
+   */
+  question?: (prompt: string) => Promise<string>;
+  /**
+   * Opens an OAuth authorization URL. Unset — the default — means the URL is printed and
+   * the user opens it themselves; mori never spawns a browser on its own.
+   */
+  openBrowser?: (url: string) => void;
+  /**
+   * Test seam for `mori login`/`mori logout` only: the pi-ai `Models` those two commands
+   * drive, in place of `createMoriModels(env, credentialStore)`. Substituting a provider
+   * whose `auth.oauth.login` returns a canned credential is what lets the login flow be
+   * tested end to end — credential persistence and auth resolution included — without a
+   * real OAuth round trip. The prompt path builds its own `Models` (cli/runtime.ts,
+   * agent.ts) and is unaffected by this.
+   */
+  loginModels?: MutableModels;
 }
