@@ -14,7 +14,12 @@ import {
 } from "../../src/services/embeddings-service.js";
 import { getEmbedding, listEmbeddings } from "../../src/services/embeddings-store.js";
 import { rebuildProjectProjection } from "../../src/services/projection-store.js";
-import { hybridSearch, searchProject, semanticSearch } from "../../src/services/search-service.js";
+import {
+  hybridSearch,
+  searchProject,
+  semanticScoresForKind,
+  semanticSearch,
+} from "../../src/services/search-service.js";
 import { closeAll, getDb } from "../../src/storage/db.js";
 import { appendEvent } from "../../src/storage/event-store.js";
 
@@ -187,6 +192,62 @@ describe("semantic search (P3-c)", () => {
     const lexical = searchProject(projectId, "postgresql");
     expect(hybrid.map((h) => h.entityId)).toEqual(lexical.map((h) => h.entityId));
     expect(hybrid.map((h) => h.entityId)).toEqual([idA]);
+  });
+
+  it("mori#73: a corpus embedded under a stale model is excluded, semantic search falls back to lexical", async () => {
+    const projectId = await seedProject();
+    const idA = await seedMemory(projectId, MEM_A); // "PostgreSQL" — also an FTS hit
+    await seedMemory(projectId, MEM_B);
+    await rebuildProjectProjection(projectId);
+
+    // Corpus embedded under model "old-model".
+    const oldEmbedder = fakeEmbedder(VECTORS, "old-model");
+    await ensureEmbeddings(projectId, oldEmbedder);
+    expect(listEmbeddings(projectId, "memory")).toHaveLength(2);
+
+    // MEMORIZE_EMBEDDINGS_MODEL has since changed — the active embedder is a
+    // different model. Corpus rows for the old model must not be treated as
+    // semantic candidates against the new model's query vector.
+    const newEmbedder = fakeEmbedder(VECTORS, "new-model");
+    expect(await semanticSearch(projectId, "postgresql", 10, newEmbedder)).toEqual([]);
+
+    // Falls back to lexical (FTS) results — search doesn't fail, it just
+    // loses the semantic boost until ensureEmbeddings catches up.
+    const lexical = searchProject(projectId, "postgresql");
+    const hybrid = await hybridSearch(projectId, "postgresql", 10, newEmbedder);
+    expect(hybrid.map((h) => h.entityId)).toEqual(lexical.map((h) => h.entityId));
+    expect(hybrid.map((h) => h.entityId)).toEqual([idA]);
+
+    // listEmbeddings itself filters in SQL, not JS: the model-scoped query
+    // returns nothing for a model that was never stored.
+    expect(listEmbeddings(projectId, "memory", "new-model")).toHaveLength(0);
+    expect(listEmbeddings(projectId, "memory", "old-model")).toHaveLength(2);
+  });
+
+  it("mori#73: a same-model row with a mismatched vector length is dropped, not scored 0", async () => {
+    const projectId = await seedProject();
+    await seedMemory(projectId, MEM_A);
+    await rebuildProjectProjection(projectId);
+
+    // Corpus stored under model "m1" with 3-dim vectors.
+    const corpusEmbedder = fakeEmbedder(VECTORS, "m1");
+    await ensureEmbeddings(projectId, corpusEmbedder);
+
+    // Same model name, but this call's query vector is 2-dim (e.g. the
+    // provider changed the output shape for that model id) — the model
+    // filter alone would let the row through; the length guard must still
+    // drop it rather than let cosineSimilarity hand back a spurious 0.
+    const mismatchedEmbedder: Embedder = {
+      model: "m1",
+      embed: () => Promise.resolve([[1, 0]]),
+    };
+    const scores = await semanticScoresForKind(
+      projectId,
+      "postgresql",
+      "memory",
+      mismatchedEmbedder,
+    );
+    expect(scores.size).toBe(0);
   });
 
   it("ensureEmbeddings never throws when the embedder fails", async () => {
