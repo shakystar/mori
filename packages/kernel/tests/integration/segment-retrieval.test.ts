@@ -166,9 +166,9 @@ describe("segment search + retrieval", () => {
       createdAt: new Date(0).toISOString(),
     });
 
-    // No embedder configured (MEMORIZE_EMBEDDINGS_* unset in this sandbox) and
-    // none passed explicitly — only a precomputed queryVec, mirroring
-    // retrieveSegments reusing one embed call across corpora.
+    // No embedder passed (and since #82 the kernel never builds one from env) —
+    // only a precomputed queryVec, mirroring retrieveSegments reusing one embed
+    // call across corpora.
     const hits = await hybridSearchSegments(
       projectId,
       "totally unrelated words",
