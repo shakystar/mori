@@ -1,10 +1,10 @@
-import fs from 'node:fs';
-import path from 'node:path';
+import fs from "node:fs";
+import path from "node:path";
 
-import Database from 'better-sqlite3';
+import Database from "better-sqlite3";
 
-import { getMemorizeRoot, getProjectDbFile } from './path-resolver.js';
-import { resolveNativeBinding } from './native-addon.js';
+import { getMemorizeRoot, getProjectDbFile } from "./path-resolver.js";
+import { resolveNativeBinding } from "./native-addon.js";
 
 /**
  * Ordered DDL migrations applied via `PRAGMA user_version`. The user_version
@@ -193,7 +193,7 @@ const MIGRATIONS: ReadonlyArray<(db: Database.Database) => void> = [
   // backfills it deterministically. Separate ALTER (not folded into the v6
   // CREATE) so DBs already at v6 get the column on upgrade.
   (db) => {
-    db.exec('ALTER TABLE memories ADD COLUMN deduped_by TEXT;');
+    db.exec("ALTER TABLE memories ADD COLUMN deduped_by TEXT;");
   },
   // v8 — semantic-search embeddings (P3-c). A DERIVED, best-effort auxiliary
   // index keyed by the memory id: one row per consolidated memory text, holding
@@ -225,9 +225,7 @@ const MIGRATIONS: ReadonlyArray<(db: Database.Database) => void> = [
   // from-scratch replay — and read by NO ranking/injection consumer; only
   // the `consolidate --report` evidence dump aggregates it.
   (db) => {
-    db.exec(
-      'ALTER TABLE memories ADD COLUMN injection_count INTEGER NOT NULL DEFAULT 0;',
-    );
+    db.exec("ALTER TABLE memories ADD COLUMN injection_count INTEGER NOT NULL DEFAULT 0;");
   },
   // v10 — raw transcript segments: a DERIVED, bounded short-term detail buffer
   // that makes the original conversation content retrievable ALONGSIDE the
@@ -329,7 +327,7 @@ function runMigrations(db: Database.Database): void {
   // front and the second re-runs the v4 `CREATE VIRTUAL TABLE search_fts`
   // (which lacks IF NOT EXISTS), throwing "table search_fts already exists".
   const runAll = db.transaction(() => {
-    const current = db.pragma('user_version', { simple: true }) as number;
+    const current = db.pragma("user_version", { simple: true }) as number;
     for (let version = current; version < MIGRATIONS.length; version++) {
       const migrate = MIGRATIONS[version]!;
       migrate(db);
@@ -353,11 +351,10 @@ function enableWalWithRetry(db: Database.Database): void {
   const deadline = Date.now() + 5000;
   for (;;) {
     try {
-      db.pragma('journal_mode = WAL');
+      db.pragma("journal_mode = WAL");
       return;
     } catch (error) {
-      const busy =
-        error instanceof Error && /database is locked|SQLITE_BUSY/.test(error.message);
+      const busy = error instanceof Error && /database is locked|SQLITE_BUSY/.test(error.message);
       if (!busy || Date.now() >= deadline) throw error;
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
     }
@@ -375,10 +372,10 @@ export function isDataDirUnwritable(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
   const code = (error as NodeJS.ErrnoException).code;
   return (
-    code === 'EACCES' ||
-    code === 'EROFS' ||
-    code === 'EPERM' ||
-    code === 'SQLITE_CANTOPEN' ||
+    code === "EACCES" ||
+    code === "EROFS" ||
+    code === "EPERM" ||
+    code === "SQLITE_CANTOPEN" ||
     /unable to open database file/i.test(error.message)
   );
 }
@@ -403,12 +400,10 @@ function open(dbFile: string): Database.Database {
   try {
     fs.mkdirSync(path.dirname(dbFile), { recursive: true });
     const nativeBinding = resolveNativeBinding();
-    const db = nativeBinding
-      ? new Database(dbFile, { nativeBinding })
-      : new Database(dbFile);
+    const db = nativeBinding ? new Database(dbFile, { nativeBinding }) : new Database(dbFile);
     // Set busy_timeout first so ordinary statements + the IMMEDIATE migration
     // lock wait rather than error; the WAL switch needs its own retry (above).
-    db.pragma('busy_timeout = 5000');
+    db.pragma("busy_timeout = 5000");
     enableWalWithRetry(db);
     runMigrations(db);
     return db;
@@ -447,4 +442,4 @@ export function openDbAt(dbFile: string): Database.Database {
   return open(dbFile);
 }
 
-process.once('exit', closeAll);
+process.once("exit", closeAll);

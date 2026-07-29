@@ -20,7 +20,11 @@ export * from "./bash.js";
  * cwd, so a path that the guard allows and a relative path a shell command resolves
  * agree on what "inside the working root" means.
  */
-export function createMoriTools(root: string = process.cwd(), env: NodeJS.ProcessEnv = process.env): AgentTool<any>[] {
+export function createMoriTools(
+  root: string = process.cwd(),
+  env: NodeJS.ProcessEnv = process.env,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- AgentTool<TArgs> erasure for a heterogeneous tool array
+): AgentTool<any>[] {
   return [
     createReadFileTool(root),
     createListDirTool(root),

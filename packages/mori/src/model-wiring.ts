@@ -43,7 +43,10 @@ function envAuthContext(env: NodeJS.ProcessEnv): AuthContext {
  * OAuth (anthropic has it stripped, openai never had it), so `hidingOAuth` keeps a stored
  * OAuth credential for either from silently shadowing a valid API key env var.
  */
-export function createMoriModels(env: NodeJS.ProcessEnv, credentialStore: CredentialStore): MutableModels {
+export function createMoriModels(
+  env: NodeJS.ProcessEnv,
+  credentialStore: CredentialStore,
+): MutableModels {
   const models = createModels({
     credentials: hidingOAuth(credentialStore),
     authContext: envAuthContext(env),

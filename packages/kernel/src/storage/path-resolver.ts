@@ -1,8 +1,8 @@
-import os from 'node:os';
-import path from 'node:path';
+import os from "node:os";
+import path from "node:path";
 
-import { assertValidId } from '../domain/common.js';
-import { isPersonalStoreId } from '../domain/identity/personal-store.js';
+import { assertValidId } from "../domain/common.js";
+import { isPersonalStoreId } from "../domain/identity/personal-store.js";
 
 /**
  * Root of mori's on-disk kernel state. Ported from memorize's
@@ -15,25 +15,20 @@ import { isPersonalStoreId } from '../domain/identity/personal-store.js';
  * across each port.
  */
 export function getMemorizeRoot(): string {
-  return process.env.MEMORIZE_ROOT ?? path.join(os.homedir(), '.mori');
+  return process.env.MEMORIZE_ROOT ?? path.join(os.homedir(), ".mori");
 }
 
 function ensureWithinRoot(candidate: string, root: string): string {
   const candidateAbs = path.resolve(candidate);
   const rootAbs = path.resolve(root);
-  if (
-    candidateAbs !== rootAbs &&
-    !candidateAbs.startsWith(rootAbs + path.sep)
-  ) {
-    throw new Error(
-      `Path escapes expected root: ${candidateAbs} is outside ${rootAbs}`,
-    );
+  if (candidateAbs !== rootAbs && !candidateAbs.startsWith(rootAbs + path.sep)) {
+    throw new Error(`Path escapes expected root: ${candidateAbs} is outside ${rootAbs}`);
   }
   return candidateAbs;
 }
 
 export function getProjectsRoot(): string {
-  return path.join(getMemorizeRoot(), 'projects');
+  return path.join(getMemorizeRoot(), "projects");
 }
 
 /**
@@ -44,11 +39,11 @@ export function getProjectsRoot(): string {
  * account.
  */
 export function getPersonalRoot(): string {
-  return path.join(getMemorizeRoot(), 'personal');
+  return path.join(getMemorizeRoot(), "personal");
 }
 
 export function getProjectRoot(projectId: string): string {
-  assertValidId(projectId, 'projectId');
+  assertValidId(projectId, "projectId");
   // The personal store routes to the single personal dir regardless of which
   // account's id family it belongs to — mori has no account concept to
   // disambiguate further. Every derived path (db file, sync, topics, locks)
@@ -63,24 +58,21 @@ export function getProjectRoot(projectId: string): string {
 
 export function getProjectDbFile(projectId: string): string {
   const projectRoot = getProjectRoot(projectId);
-  return ensureWithinRoot(path.join(projectRoot, 'mori.db'), projectRoot);
+  return ensureWithinRoot(path.join(projectRoot, "mori.db"), projectRoot);
 }
 
 export function getTopicsDir(projectId: string): string {
   const projectRoot = getProjectRoot(projectId);
-  return ensureWithinRoot(path.join(projectRoot, 'topics'), projectRoot);
+  return ensureWithinRoot(path.join(projectRoot, "topics"), projectRoot);
 }
 
 export function getTopicFile(projectId: string, topicId: string): string {
-  assertValidId(topicId, 'topicId');
+  assertValidId(topicId, "topicId");
   const topicsDir = getTopicsDir(projectId);
   return ensureWithinRoot(path.join(topicsDir, `${topicId}.md`), topicsDir);
 }
 
 export function getSyncFile(projectId: string): string {
   const projectRoot = getProjectRoot(projectId);
-  return ensureWithinRoot(
-    path.join(projectRoot, 'sync', 'remote.json'),
-    projectRoot,
-  );
+  return ensureWithinRoot(path.join(projectRoot, "sync", "remote.json"), projectRoot);
 }

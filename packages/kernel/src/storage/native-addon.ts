@@ -1,9 +1,9 @@
-import { createHash } from 'node:crypto';
-import fs from 'node:fs';
-import { createRequire } from 'node:module';
-import path from 'node:path';
+import { createHash } from "node:crypto";
+import fs from "node:fs";
+import { createRequire } from "node:module";
+import path from "node:path";
 
-import { getMemorizeRoot } from './path-resolver.js';
+import { getMemorizeRoot } from "./path-resolver.js";
 
 const require = createRequire(import.meta.url);
 
@@ -17,7 +17,7 @@ const require = createRequire(import.meta.url);
  * memorize's mid-session self-update design.
  */
 
-export const NATIVE_SHADOW_DISABLED_ENV_VAR = 'MEMORIZE_NATIVE_SHADOW_DISABLED';
+export const NATIVE_SHADOW_DISABLED_ENV_VAR = "MEMORIZE_NATIVE_SHADOW_DISABLED";
 
 export interface NativeAddonDeps {
   /** Whether shadow-loading is active (win32 AND not suite-disabled). */
@@ -31,20 +31,15 @@ export interface NativeAddonDeps {
 }
 
 function packageVersion(): string {
-  const pkg = require('../../package.json') as { version: string };
+  const pkg = require("../../package.json") as { version: string };
   return pkg.version;
 }
 
 /** Locate the installed better-sqlite3 native addon (build/Release form). */
 function installedAddonPath(): string | null {
   try {
-    const pkgJson = require.resolve('better-sqlite3/package.json');
-    const candidate = path.join(
-      path.dirname(pkgJson),
-      'build',
-      'Release',
-      'better_sqlite3.node',
-    );
+    const pkgJson = require.resolve("better-sqlite3/package.json");
+    const candidate = path.join(path.dirname(pkgJson), "build", "Release", "better_sqlite3.node");
     return fs.existsSync(candidate) ? candidate : null;
   } catch {
     return null;
@@ -53,9 +48,7 @@ function installedAddonPath(): string | null {
 
 export function defaultNativeAddonDeps(): NativeAddonDeps {
   return {
-    enabled:
-      process.platform === 'win32' &&
-      process.env[NATIVE_SHADOW_DISABLED_ENV_VAR] !== '1',
+    enabled: process.platform === "win32" && process.env[NATIVE_SHADOW_DISABLED_ENV_VAR] !== "1",
     sourcePath: installedAddonPath,
     version: packageVersion,
     root: getMemorizeRoot,
@@ -63,7 +56,7 @@ export function defaultNativeAddonDeps(): NativeAddonDeps {
 }
 
 function sha256(file: string): string {
-  return createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+  return createHash("sha256").update(fs.readFileSync(file)).digest("hex");
 }
 
 /**
@@ -79,16 +72,15 @@ export function resolveNativeBinding(
     const source = deps.sourcePath();
     if (!source) return null;
 
-    const runtimeDir = path.join(deps.root(), 'runtime', deps.version());
-    const target = path.join(runtimeDir, 'better_sqlite3.node');
+    const runtimeDir = path.join(deps.root(), "runtime", deps.version());
+    const target = path.join(runtimeDir, "better_sqlite3.node");
 
-    const needsCopy =
-      !fs.existsSync(target) || sha256(target) !== sha256(source);
+    const needsCopy = !fs.existsSync(target) || sha256(target) !== sha256(source);
     if (needsCopy) {
       fs.mkdirSync(runtimeDir, { recursive: true });
       const tmp = path.join(runtimeDir, `.better_sqlite3.node.${process.pid}.tmp`);
       fs.copyFileSync(source, tmp);
-      const fd = fs.openSync(tmp, 'r+');
+      const fd = fs.openSync(tmp, "r+");
       fs.fsyncSync(fd);
       fs.closeSync(fd);
       fs.renameSync(tmp, target); // atomic swap into place
@@ -133,7 +125,7 @@ function pruneStaleRuntime(currentDir: string): void {
   // and renameSync leaves a multi-MB .better_sqlite3.node.<pid>.tmp behind).
   try {
     for (const entry of fs.readdirSync(currentDir)) {
-      if (!entry.startsWith('.better_sqlite3.node.') || !entry.endsWith('.tmp')) {
+      if (!entry.startsWith(".better_sqlite3.node.") || !entry.endsWith(".tmp")) {
         continue;
       }
       try {

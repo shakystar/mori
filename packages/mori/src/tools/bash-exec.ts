@@ -139,7 +139,10 @@ class TruncatingBuffer {
 }
 
 /** Runs `command` under a shell with cwd pinned to the working root. Never throws. */
-export async function runBash(command: string, options: RunBashOptions = {}): Promise<BashRunResult> {
+export async function runBash(
+  command: string,
+  options: RunBashOptions = {},
+): Promise<BashRunResult> {
   const blocked = findBlockedPattern(command);
   if (blocked) {
     // Defence in depth: the preflight hook is the real gate, but a caller that wires
@@ -263,17 +266,22 @@ export async function runBash(command: string, options: RunBashOptions = {}): Pr
 export function formatBashResult(result: BashRunResult): string {
   if (!result.ok) return `Error: ${result.reason}`;
 
-  const truncationNotice = (stream: string) => `\n[${stream} truncated at ${result.maxOutputChars} characters]`;
+  const truncationNotice = (stream: string) =>
+    `\n[${stream} truncated at ${result.maxOutputChars} characters]`;
 
   const sections: string[] = [];
   if (result.stdout || result.stdoutTruncated) {
     sections.push(result.stdout + (result.stdoutTruncated ? truncationNotice("stdout") : ""));
   }
   if (result.stderr || result.stderrTruncated) {
-    sections.push(`[stderr]\n${result.stderr}` + (result.stderrTruncated ? truncationNotice("stderr") : ""));
+    sections.push(
+      `[stderr]\n${result.stderr}` + (result.stderrTruncated ? truncationNotice("stderr") : ""),
+    );
   }
   if (result.timedOut) {
-    sections.push(`[timed out after ${result.timeoutMs}ms — process killed, output above is partial]`);
+    sections.push(
+      `[timed out after ${result.timeoutMs}ms — process killed, output above is partial]`,
+    );
   }
   sections.push(
     result.exitCode === null

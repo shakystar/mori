@@ -14,7 +14,7 @@ export interface CreateTaskInput {
   title: string;
   description?: string;
   goal?: string;
-  priority?: 'low' | 'medium' | 'high';
+  priority?: "low" | "medium" | "high";
   acceptanceCriteria?: string[];
   actor?: string;
 }
@@ -31,7 +31,7 @@ export interface CreateHandoffInput {
   requiredContextRefs?: string[];
   warnings?: string[];
   unresolvedQuestions?: string[];
-  confidence?: 'low' | 'medium' | 'high';
+  confidence?: "low" | "medium" | "high";
 }
 
 export interface CreateCheckpointInput {

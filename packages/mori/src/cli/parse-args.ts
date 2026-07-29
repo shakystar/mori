@@ -1,7 +1,5 @@
 export type CliCommand =
-  | { kind: "login" }
-  | { kind: "no-prompt" }
-  | { kind: "prompt"; prompt: string };
+  { kind: "login" } | { kind: "no-prompt" } | { kind: "prompt"; prompt: string };
 
 export function parseCliCommand(argv: string[]): CliCommand {
   if (argv[0] === "login") {

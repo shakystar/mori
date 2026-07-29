@@ -1,5 +1,5 @@
-import { PERSONAL_STORE_ID } from '../common.js';
-import { DEFAULT_ACCOUNT_ID, isDefaultAccount } from './account.js';
+import { PERSONAL_STORE_ID } from "../common.js";
+import { DEFAULT_ACCOUNT_ID, isDefaultAccount } from "./account.js";
 
 /**
  * The reserved namespace prefix for personal stores. Every account's personal
@@ -7,7 +7,7 @@ import { DEFAULT_ACCOUNT_ID, isDefaultAccount } from './account.js';
  * fixed id `personal_self` (which is itself in the family) so existing on-disk
  * data needs no re-keying.
  */
-const PERSONAL_STORE_PREFIX = 'personal_';
+const PERSONAL_STORE_PREFIX = "personal_";
 
 /**
  * The personal-store id for an account. Default account → the legacy
@@ -17,9 +17,7 @@ const PERSONAL_STORE_PREFIX = 'personal_';
  * account, Hub SoT H050) so a later sync binding (W1) is purely additive.
  */
 export function getPersonalStoreId(accountId: string): string {
-  return isDefaultAccount(accountId)
-    ? PERSONAL_STORE_ID
-    : `${PERSONAL_STORE_PREFIX}${accountId}`;
+  return isDefaultAccount(accountId) ? PERSONAL_STORE_ID : `${PERSONAL_STORE_PREFIX}${accountId}`;
 }
 
 /**
@@ -29,7 +27,7 @@ export function getPersonalStoreId(accountId: string): string {
  * old single-id equality now that personal stores are per-account.
  */
 export function isPersonalStoreId(id: unknown): boolean {
-  return typeof id === 'string' && id.startsWith(PERSONAL_STORE_PREFIX);
+  return typeof id === "string" && id.startsWith(PERSONAL_STORE_PREFIX);
 }
 
 /**

@@ -1,17 +1,13 @@
-import type { BaseEntity, EntityId, ISODateString } from '../common.js';
-import { baseEntity } from './base.js';
+import type { BaseEntity, EntityId, ISODateString } from "../common.js";
+import { baseEntity } from "./base.js";
 
-export type ConflictType = 'state' | 'decision' | 'rule' | 'ownership';
+export type ConflictType = "state" | "decision" | "rule" | "ownership";
 
-export type ConflictStatus =
-  | 'detected'
-  | 'auto_resolved'
-  | 'escalated'
-  | 'resolved';
+export type ConflictStatus = "detected" | "auto_resolved" | "escalated" | "resolved";
 
 export interface Conflict extends BaseEntity {
   projectId: EntityId;
-  scopeType: 'workstream' | 'task' | 'decision' | 'rule';
+  scopeType: "workstream" | "task" | "decision" | "rule";
   scopeId: EntityId;
   fieldPath: string;
   leftVersion: string;
@@ -33,7 +29,7 @@ export interface Conflict extends BaseEntity {
 
 export function createConflict(input: {
   projectId: string;
-  scopeType: 'workstream' | 'task' | 'decision' | 'rule';
+  scopeType: "workstream" | "task" | "decision" | "rule";
   scopeId: string;
   fieldPath: string;
   leftVersion: string;
@@ -42,7 +38,7 @@ export function createConflict(input: {
   concurrent?: boolean;
 }): Conflict {
   return {
-    ...baseEntity('conflict'),
+    ...baseEntity("conflict"),
     projectId: input.projectId,
     scopeType: input.scopeType,
     scopeId: input.scopeId,
@@ -51,6 +47,6 @@ export function createConflict(input: {
     rightVersion: input.rightVersion,
     conflictType: input.conflictType,
     ...(input.concurrent ? { concurrent: true } : {}),
-    status: 'detected',
+    status: "detected",
   };
 }

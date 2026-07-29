@@ -35,23 +35,43 @@ describe("createMoriModels", () => {
     // request never saw the credential store at all. Both now come from the same
     // `Models` instance (checkAuth/getAuth resolve auth via the identical
     // provider+store+authContext config), so they cannot diverge by construction.
-    const cases: Array<{ name: string; env: NodeJS.ProcessEnv; credential?: Credential; expectAuthenticated: boolean }> = [
+    const cases: Array<{
+      name: string;
+      env: NodeJS.ProcessEnv;
+      credential?: Credential;
+      expectAuthenticated: boolean;
+    }> = [
       {
         name: "non-expired OAuth alone, no API key env",
         env: {},
-        credential: { type: "oauth", access: "at-valid", refresh: "rt-valid", expires: Date.now() + ONE_HOUR_MS },
+        credential: {
+          type: "oauth",
+          access: "at-valid",
+          refresh: "rt-valid",
+          expires: Date.now() + ONE_HOUR_MS,
+        },
         expectAuthenticated: false, // #16: subscription OAuth is never wired into a real request
       },
       {
         name: "non-expired OAuth, valid API key env",
         env: { ANTHROPIC_API_KEY: "sk-ant-test" },
-        credential: { type: "oauth", access: "at-valid", refresh: "rt-valid", expires: Date.now() + ONE_HOUR_MS },
+        credential: {
+          type: "oauth",
+          access: "at-valid",
+          refresh: "rt-valid",
+          expires: Date.now() + ONE_HOUR_MS,
+        },
         expectAuthenticated: true, // stored OAuth must never shadow a valid API key (#42 review)
       },
       {
         name: "expired OAuth, valid API key env",
         env: { ANTHROPIC_API_KEY: "sk-ant-test" },
-        credential: { type: "oauth", access: "at-expired", refresh: "rt-expired", expires: Date.now() - ONE_HOUR_MS },
+        credential: {
+          type: "oauth",
+          access: "at-expired",
+          refresh: "rt-expired",
+          expires: Date.now() - ONE_HOUR_MS,
+        },
         expectAuthenticated: true,
       },
       {
@@ -129,7 +149,8 @@ const USAGE = {
   cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 };
 
-type FakeTurn = { toolCall: { name: string; arguments: Record<string, unknown> } } | { text: string };
+type FakeTurn =
+  { toolCall: { name: string; arguments: Record<string, unknown> } } | { text: string };
 
 /**
  * Fake streamFn that plays back one scripted turn per call — a single tool call or a
@@ -164,7 +185,11 @@ function scriptedStreamFn(turns: FakeTurn[]): StreamFn {
       stream.push({ type: "start", partial: message } satisfies AssistantMessageEvent);
       stream.push({ type: "done", reason: "toolUse", message } satisfies AssistantMessageEvent);
     } else {
-      const message: AssistantMessage = { ...base, content: [{ type: "text", text: turn.text }], stopReason: "stop" };
+      const message: AssistantMessage = {
+        ...base,
+        content: [{ type: "text", text: turn.text }],
+        stopReason: "stop",
+      };
       stream.push({ type: "start", partial: message } satisfies AssistantMessageEvent);
       stream.push({ type: "done", reason: "stop", message } satisfies AssistantMessageEvent);
     }
@@ -187,13 +212,23 @@ describe("createMoriAgent", () => {
   });
 
   it("reads a bare MORI_MODEL as an anthropic model id (pre-existing form)", () => {
-    const agent = createMoriAgent(kernel(), store(), { MORI_MODEL: "claude-opus-5" }, fakeStreamFn());
+    const agent = createMoriAgent(
+      kernel(),
+      store(),
+      { MORI_MODEL: "claude-opus-5" },
+      fakeStreamFn(),
+    );
     expect(agent.state.model.provider).toBe("anthropic");
     expect(agent.state.model.id).toBe("claude-opus-5");
   });
 
   it("selects the openai provider and model from 'openai/<model>'", () => {
-    const agent = createMoriAgent(kernel(), store(), { MORI_MODEL: "openai/gpt-5.4" }, fakeStreamFn());
+    const agent = createMoriAgent(
+      kernel(),
+      store(),
+      { MORI_MODEL: "openai/gpt-5.4" },
+      fakeStreamFn(),
+    );
     expect(agent.state.model.provider).toBe("openai");
     expect(agent.state.model.id).toBe("gpt-5.4");
   });
@@ -240,7 +275,10 @@ describe("createMoriAgent toolset wiring", () => {
     const [toolResult] = toolResultsOf(agent);
     expect(toolResult?.toolName).toBe("read_file");
     expect(toolResult?.isError).toBe(false);
-    expect(toolResult?.content[0]).toMatchObject({ type: "text", text: expect.stringContaining("hello from disk") });
+    expect(toolResult?.content[0]).toMatchObject({
+      type: "text",
+      text: expect.stringContaining("hello from disk"),
+    });
 
     const last = agent.state.messages.at(-1);
     expect(last).toMatchObject({ role: "assistant", stopReason: "stop" });
@@ -262,7 +300,10 @@ describe("createMoriAgent toolset wiring", () => {
 
     const [toolResult] = toolResultsOf(agent);
     expect(toolResult?.isError).toBe(true);
-    expect(toolResult?.content[0]).toMatchObject({ type: "text", text: expect.stringContaining("rm-root") });
+    expect(toolResult?.content[0]).toMatchObject({
+      type: "text",
+      text: expect.stringContaining("rm-root"),
+    });
 
     const last = agent.state.messages.at(-1);
     expect(last).toMatchObject({ role: "assistant", stopReason: "stop" });
@@ -283,7 +324,10 @@ describe("createMoriAgent toolset wiring", () => {
     await agent.prompt("read a missing file");
 
     const [toolResult] = toolResultsOf(agent);
-    expect(toolResult?.content[0]).toMatchObject({ type: "text", text: expect.stringContaining("file not found") });
+    expect(toolResult?.content[0]).toMatchObject({
+      type: "text",
+      text: expect.stringContaining("file not found"),
+    });
 
     const last = agent.state.messages.at(-1);
     expect(last).toMatchObject({ role: "assistant", stopReason: "stop" });
@@ -294,14 +338,20 @@ describe("createMoriAgent toolset wiring", () => {
       kernel(),
       store(),
       {},
-      scriptedStreamFn([{ toolCall: { name: "bash", arguments: { command: "pwd" } } }, { text: "done" }]),
+      scriptedStreamFn([
+        { toolCall: { name: "bash", arguments: { command: "pwd" } } },
+        { text: "done" },
+      ]),
       { root },
     );
 
     await agent.prompt("where are we running");
 
     const [toolResult] = toolResultsOf(agent);
-    expect(toolResult?.content[0]).toMatchObject({ type: "text", text: expect.stringContaining(root) });
+    expect(toolResult?.content[0]).toMatchObject({
+      type: "text",
+      text: expect.stringContaining(root),
+    });
   });
 
   it("surfaces tool_execution_start/tool_execution_end events to kernel.observe()", async () => {
@@ -326,10 +376,16 @@ describe("createMoriAgent toolset wiring", () => {
   });
 
   it("registering an empty tool list preserves single-prompt behavior (regression)", async () => {
-    const agent = createMoriAgent(kernel(), store(), {}, scriptedStreamFn([{ text: "just talking, no tools" }]), {
-      root,
-      tools: [],
-    });
+    const agent = createMoriAgent(
+      kernel(),
+      store(),
+      {},
+      scriptedStreamFn([{ text: "just talking, no tools" }]),
+      {
+        root,
+        tools: [],
+      },
+    );
 
     await agent.prompt("hi");
 

@@ -1,17 +1,17 @@
-import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { CURRENT_SCHEMA_VERSION } from '../../src/domain/common.js';
+import { CURRENT_SCHEMA_VERSION } from "../../src/domain/common.js";
 import {
   listTasks,
   listValidMemories,
   rebuildProjectProjection,
-} from '../../src/services/projection-store.js';
-import { closeAll, getDb } from '../../src/storage/db.js';
-import { appendEvent } from '../../src/storage/event-store.js';
+} from "../../src/services/projection-store.js";
+import { closeAll, getDb } from "../../src/storage/db.js";
+import { appendEvent } from "../../src/storage/event-store.js";
 
 // M2 `(entity, writer)` projection, persistence + selector side: a foreign
 // origin store's rows (simulated via the `sourceProjectId` provenance override)
@@ -23,9 +23,9 @@ import { appendEvent } from '../../src/storage/event-store.js';
 // searchProject/hybridSearch (search-service.ts) — that service layer is
 // #11 scope, not yet ported, so those cases are deferred there.
 
-const projectId = 'proj_lane_self';
-const FOREIGN = 'proj_lane_bob';
-const ts = '2026-06-01T00:00:00.000Z';
+const projectId = "proj_lane_self";
+const FOREIGN = "proj_lane_bob";
+const ts = "2026-06-01T00:00:00.000Z";
 
 let sandbox: string;
 
@@ -36,13 +36,13 @@ function taskPayload(id: string, title: string) {
     createdAt: ts,
     updatedAt: ts,
     projectId,
-    workstreamId: 'ws_1',
+    workstreamId: "ws_1",
     title,
-    description: 'desc',
-    status: 'in_progress',
-    priority: 'high',
-    ownerType: 'unassigned',
-    goal: 'g',
+    description: "desc",
+    status: "in_progress",
+    priority: "high",
+    ownerType: "unassigned",
+    goal: "g",
     acceptanceCriteria: [],
     dependsOn: [],
     contextRefIds: [],
@@ -60,7 +60,7 @@ function memoryPayload(id: string, text: string) {
     createdAt: ts,
     updatedAt: ts,
     projectId,
-    kind: 'insight',
+    kind: "insight",
     text,
     salience: 3,
     sourceObservationIds: [],
@@ -68,25 +68,25 @@ function memoryPayload(id: string, text: string) {
 }
 
 beforeEach(async () => {
-  sandbox = await mkdtemp(join(tmpdir(), 'mori-lane-'));
+  sandbox = await mkdtemp(join(tmpdir(), "mori-lane-"));
   process.env.MEMORIZE_ROOT = sandbox;
 
   await appendEvent({
-    type: 'project.created',
+    type: "project.created",
     projectId,
-    scopeType: 'project',
+    scopeType: "project",
     scopeId: projectId,
-    actor: 'test',
+    actor: "test",
     payload: {
       id: projectId,
       schemaVersion: CURRENT_SCHEMA_VERSION,
       createdAt: ts,
       updatedAt: ts,
-      title: 'Self',
-      summary: 'self store',
+      title: "Self",
+      summary: "self store",
       goals: [],
-      status: 'active',
-      rootPath: '/tmp/self',
+      status: "active",
+      rootPath: "/tmp/self",
       activeWorkstreamIds: [],
       activeTaskIds: [],
       acceptedDecisionIds: [],
@@ -95,39 +95,39 @@ beforeEach(async () => {
   });
   // Self task + memory (no provenance override → self lane, NULL column).
   await appendEvent({
-    type: 'task.created',
+    type: "task.created",
     projectId,
-    scopeType: 'task',
-    scopeId: 'task_self',
-    actor: 'test',
-    payload: taskPayload('task_self', 'alpha self task') as never,
+    scopeType: "task",
+    scopeId: "task_self",
+    actor: "test",
+    payload: taskPayload("task_self", "alpha self task") as never,
   });
   await appendEvent({
-    type: 'memory.consolidated',
+    type: "memory.consolidated",
     projectId,
-    scopeType: 'project',
+    scopeType: "project",
     scopeId: projectId,
-    actor: 'test',
-    payload: memoryPayload('mem_self', 'alpha self memory') as never,
+    actor: "test",
+    payload: memoryPayload("mem_self", "alpha self memory") as never,
   });
   // Foreign task + memory carried in by a union: same store, foreign lane.
   await appendEvent({
-    type: 'task.created',
+    type: "task.created",
     projectId,
-    scopeType: 'task',
-    scopeId: 'task_bob',
-    actor: 'test',
+    scopeType: "task",
+    scopeId: "task_bob",
+    actor: "test",
     sourceProjectId: FOREIGN,
-    payload: taskPayload('task_bob', 'alpha bob task') as never,
+    payload: taskPayload("task_bob", "alpha bob task") as never,
   });
   await appendEvent({
-    type: 'memory.consolidated',
+    type: "memory.consolidated",
     projectId,
-    scopeType: 'project',
+    scopeType: "project",
     scopeId: projectId,
-    actor: 'test',
+    actor: "test",
     sourceProjectId: FOREIGN,
-    payload: memoryPayload('mem_bob', 'alpha bob memory') as never,
+    payload: memoryPayload("mem_bob", "alpha bob memory") as never,
   });
 
   await rebuildProjectProjection(projectId);
@@ -139,34 +139,32 @@ afterEach(async () => {
   await rm(sandbox, { recursive: true, force: true });
 });
 
-describe('projection lane selector (M2)', () => {
-  it('stores the lane in source_project_id: NULL for self, origin id for foreign', () => {
+describe("projection lane selector (M2)", () => {
+  it("stores the lane in source_project_id: NULL for self, origin id for foreign", () => {
     const rows = getDb(projectId)
-      .prepare('SELECT id, source_project_id AS lane FROM tasks ORDER BY id')
+      .prepare("SELECT id, source_project_id AS lane FROM tasks ORDER BY id")
       .all() as Array<{ id: string; lane: string | null }>;
     expect(rows).toEqual([
-      { id: 'task_bob', lane: FOREIGN },
-      { id: 'task_self', lane: null },
+      { id: "task_bob", lane: FOREIGN },
+      { id: "task_self", lane: null },
     ]);
   });
 
-  it('listTasks defaults to self; union surfaces both without folding', () => {
-    expect(listTasks(projectId).map((t) => t.id)).toEqual(['task_self']);
+  it("listTasks defaults to self; union surfaces both without folding", () => {
+    expect(listTasks(projectId).map((t) => t.id)).toEqual(["task_self"]);
     expect(
-      listTasks(projectId, {}, 'union')
+      listTasks(projectId, {}, "union")
         .map((t) => t.id)
         .sort(),
-    ).toEqual(['task_bob', 'task_self']);
+    ).toEqual(["task_bob", "task_self"]);
   });
 
-  it('listValidMemories defaults to self; union surfaces both', () => {
-    expect(listValidMemories(projectId).map((r) => r.memory.id)).toEqual([
-      'mem_self',
-    ]);
+  it("listValidMemories defaults to self; union surfaces both", () => {
+    expect(listValidMemories(projectId).map((r) => r.memory.id)).toEqual(["mem_self"]);
     expect(
-      listValidMemories(projectId, 'union')
+      listValidMemories(projectId, "union")
         .map((r) => r.memory.id)
         .sort(),
-    ).toEqual(['mem_bob', 'mem_self']);
+    ).toEqual(["mem_bob", "mem_self"]);
   });
 });

@@ -1,6 +1,6 @@
-import { CURRENT_SCHEMA_VERSION, nowIso } from '../domain/common.js';
-import type { DomainEvent } from '../domain/events.js';
-import { TASK_APPENDABLE_FIELDS } from '../domain/entities.js';
+import { CURRENT_SCHEMA_VERSION, nowIso } from "../domain/common.js";
+import type { DomainEvent } from "../domain/events.js";
+import { TASK_APPENDABLE_FIELDS } from "../domain/entities.js";
 import type {
   Checkpoint,
   Conflict,
@@ -22,7 +22,7 @@ import type {
   TaskRequestAcceptedPayload,
   TaskRequestDeclinedPayload,
   Workstream,
-} from '../domain/entities.js';
+} from "../domain/entities.js";
 
 /**
  * A consolidated memory plus its replay-derived validity window. The
@@ -78,7 +78,7 @@ export interface MemoryRecord extends ConsolidatedMemory {
  * user's current task follows them across devices; only a different store (a
  * teammate, or a different folder/db) is a distinct lane. See docs/SoT/040.
  */
-export const SELF_LANE = 'self';
+export const SELF_LANE = "self";
 
 /**
  * Joins lane + id in a composite state-map key. Entity ids and project ids are
@@ -123,11 +123,7 @@ function isSelfKey(key: string): boolean {
  * land in the self lane (it tripped doctor's one-SELF-identity check and
  * misattributed foreign memories as self during the 3.0.0 dogfood).
  */
-function laneOf(
-  event: DomainEvent,
-  selfProjectId: string | undefined,
-  isUnion: boolean,
-): string {
+function laneOf(event: DomainEvent, selfProjectId: string | undefined, isUnion: boolean): string {
   const source = event.sourceProjectId;
   if (source != null) {
     return source === selfProjectId ? SELF_LANE : source;
@@ -188,7 +184,7 @@ function dedupeMemoriesBySource(memories: Record<string, MemoryRecord>): void {
     // (SoT-040). '\n' cannot appear in a lane id, observation id, or `kind`, so
     // the key parts can never collide across positions.
     const lane = memory.sourceProjectId ?? SELF_LANE;
-    const key = `${lane}\n${[...ids].sort().join(',')}\n${memory.kind}\n${memory.text.trim().toLowerCase()}`;
+    const key = `${lane}\n${[...ids].sort().join(",")}\n${memory.kind}\n${memory.text.trim().toLowerCase()}`;
     const bucket = groups.get(key);
     if (bucket) bucket.push(memory);
     else groups.set(key, [memory]);
@@ -196,13 +192,7 @@ function dedupeMemoriesBySource(memories: Record<string, MemoryRecord>): void {
   for (const members of groups.values()) {
     if (members.length < 2) continue;
     members.sort((a, b) =>
-      a.createdAt !== b.createdAt
-        ? a.createdAt < b.createdAt
-          ? -1
-          : 1
-        : a.id < b.id
-          ? -1
-          : 1,
+      a.createdAt !== b.createdAt ? (a.createdAt < b.createdAt ? -1 : 1) : a.id < b.id ? -1 : 1,
     );
     const winner = members[0]!;
     for (const loser of members.slice(1)) {
@@ -215,10 +205,7 @@ function dedupeMemoriesBySource(memories: Record<string, MemoryRecord>): void {
   }
 }
 
-export function reduceProjectState(
-  events: DomainEvent[],
-  selfProjectId?: string,
-): ProjectState {
+export function reduceProjectState(events: DomainEvent[], selfProjectId?: string): ProjectState {
   const state: ProjectState = {
     project: undefined,
     workstreams: {},
@@ -259,7 +246,7 @@ export function reduceProjectState(
   const genesisIds = new Set<string>();
   let firstGenesisId: string | undefined;
   for (const event of events) {
-    if (event.type === 'project.created') {
+    if (event.type === "project.created") {
       const id = (event.payload as Project).id;
       if (firstGenesisId === undefined) firstGenesisId = id;
       genesisIds.add(id);
@@ -271,7 +258,7 @@ export function reduceProjectState(
   for (const event of events) {
     const eventLane = laneOf(event, selfId, isUnion);
     switch (event.type) {
-      case 'project.created': {
+      case "project.created": {
         const incoming = event.payload as Project;
         // SoT-041 roster: every genesis in the union names a member project.
         // Recorded before the foreign-genesis skip so provenance labels still
@@ -307,7 +294,7 @@ export function reduceProjectState(
         state.project = incoming;
         break;
       }
-      case 'project.updated':
+      case "project.updated":
         if (state.project) {
           state.project = {
             ...state.project,
@@ -315,13 +302,13 @@ export function reduceProjectState(
           };
         }
         break;
-      case 'workstream.created':
+      case "workstream.created":
         state.workstreams[event.scopeId] = event.payload as Workstream;
         break;
-      case 'task.created':
+      case "task.created":
         state.tasks[laneKey(eventLane, event.scopeId)] = event.payload as Task;
         break;
-      case 'task.updated':
+      case "task.updated":
         {
           const key = laneKey(eventLane, event.scopeId);
           const existingTask = state.tasks[key];
@@ -333,7 +320,7 @@ export function reduceProjectState(
           );
         }
         break;
-      case 'task.item-appended':
+      case "task.item-appended":
         {
           const key = laneKey(eventLane, event.scopeId);
           const existingTask = state.tasks[key];
@@ -342,7 +329,7 @@ export function reduceProjectState(
           // Closed allowlist: a synced event from another writer must not be
           // able to append into an arbitrary Task property.
           if (!TASK_APPENDABLE_FIELDS.includes(payload.field)) break;
-          if (typeof payload.text !== 'string') break;
+          if (typeof payload.text !== "string") break;
           state.tasks[key] = {
             ...existingTask,
             [payload.field]: [...existingTask[payload.field], payload.text],
@@ -350,11 +337,10 @@ export function reduceProjectState(
           };
         }
         break;
-      case 'task.requested':
-        state.taskRequests[laneKey(eventLane, event.scopeId)] =
-          event.payload as TaskRequest;
+      case "task.requested":
+        state.taskRequests[laneKey(eventLane, event.scopeId)] = event.payload as TaskRequest;
         break;
-      case 'task.request-accepted': {
+      case "task.request-accepted": {
         // Cross-lane fold: the accept lives in the TARGET's lane but resolves
         // a request stored under the REQUESTER's lane key — match by id.
         const payload = event.payload as TaskRequestAcceptedPayload;
@@ -364,13 +350,13 @@ export function reduceProjectState(
         if (!key) break;
         state.taskRequests[key] = {
           ...state.taskRequests[key]!,
-          status: 'accepted',
+          status: "accepted",
           resolvedByTaskId: payload.taskId,
           updatedAt: event.createdAt,
         };
         break;
       }
-      case 'task.request-declined': {
+      case "task.request-declined": {
         const payload = event.payload as TaskRequestDeclinedPayload;
         const key = Object.keys(state.taskRequests).find(
           (k) => parseLaneKey(k).id === payload.requestId,
@@ -378,29 +364,29 @@ export function reduceProjectState(
         if (!key) break;
         state.taskRequests[key] = {
           ...state.taskRequests[key]!,
-          status: 'declined',
+          status: "declined",
           declineReason: payload.reason,
           updatedAt: event.createdAt,
         };
         break;
       }
-      case 'handoff.created':
+      case "handoff.created":
         {
           const handoff = event.payload as Handoff;
           state.handoffs[laneKey(eventLane, handoff.id)] = handoff;
         }
         break;
-      case 'checkpoint.created':
+      case "checkpoint.created":
         {
           const checkpoint = event.payload as Checkpoint;
           state.checkpoints[checkpoint.id] = checkpoint;
         }
         break;
-      case 'decision.proposed':
-      case 'decision.accepted':
+      case "decision.proposed":
+      case "decision.accepted":
         state.decisions[event.scopeId] = event.payload as Decision;
         break;
-      case 'decision.superseded':
+      case "decision.superseded":
         {
           // Invalidate-not-delete (mirror memory.superseded): mark the old
           // decision superseded so acceptedDecisionIds drops it, but keep the
@@ -411,40 +397,40 @@ export function reduceProjectState(
           if (!existing) break;
           state.decisions[payload.supersedes] = {
             ...existing,
-            status: 'superseded',
+            status: "superseded",
             supersededBy: payload.supersededBy,
           };
         }
         break;
-      case 'rule.upserted':
+      case "rule.upserted":
         state.rules[(event.payload as Rule).id] = event.payload as Rule;
         break;
-      case 'conflict.detected':
-      case 'conflict.resolved':
+      case "conflict.detected":
+      case "conflict.resolved":
         state.conflicts[event.scopeId] = event.payload as Conflict;
         break;
-      case 'session.started':
+      case "session.started":
         {
           const session = event.payload as Session;
           state.sessions[laneKey(eventLane, session.id)] = session;
         }
         break;
-      case 'session.completed':
-      case 'session.abandoned':
+      case "session.completed":
+      case "session.abandoned":
         {
           const key = laneKey(eventLane, event.scopeId);
           const existing = state.sessions[key];
           if (!existing) break;
           state.sessions[key] = {
             ...existing,
-            status: event.type === 'session.completed' ? 'completed' : 'abandoned',
+            status: event.type === "session.completed" ? "completed" : "abandoned",
             endedAt: event.createdAt,
             lastSeenAt: event.createdAt,
             updatedAt: event.createdAt,
           };
         }
         break;
-      case 'session.paused':
+      case "session.paused":
         {
           // Agent CLI exited cleanly (Claude SessionEnd) but the
           // session is intentionally kept resumable. The cwd pointer
@@ -456,13 +442,13 @@ export function reduceProjectState(
           if (!existing) break;
           state.sessions[key] = {
             ...existing,
-            status: 'paused',
+            status: "paused",
             lastSeenAt: event.createdAt,
             updatedAt: event.createdAt,
           };
         }
         break;
-      case 'session.resumed':
+      case "session.resumed":
         {
           // Same agent session re-attached (Claude --resume on the
           // same UUID, codex resume). Flip back to 'active' if we had
@@ -473,13 +459,13 @@ export function reduceProjectState(
           if (!existing) break;
           state.sessions[key] = {
             ...existing,
-            status: 'active',
+            status: "active",
             lastSeenAt: event.createdAt,
             updatedAt: event.createdAt,
           };
         }
         break;
-      case 'session.heartbeat':
+      case "session.heartbeat":
         {
           const payload = event.payload as SessionHeartbeatPayload;
           const key = laneKey(eventLane, payload.sessionId);
@@ -492,13 +478,13 @@ export function reduceProjectState(
           };
         }
         break;
-      case 'observation.captured':
+      case "observation.captured":
         {
           const observation = event.payload as Observation;
           state.observations[observation.id] = observation;
         }
         break;
-      case 'memory.consolidated':
+      case "memory.consolidated":
         {
           const memory = event.payload as ConsolidatedMemory;
           // Memories are id-keyed (ids are globally unique), but a foreign
@@ -506,12 +492,10 @@ export function reduceProjectState(
           // without folding it into local truth. Self memories stay untagged
           // → byte-identical to the pre-M2 record.
           state.memories[memory.id] =
-            eventLane === SELF_LANE
-              ? memory
-              : { ...memory, sourceProjectId: eventLane };
+            eventLane === SELF_LANE ? memory : { ...memory, sourceProjectId: eventLane };
         }
         break;
-      case 'memory.superseded':
+      case "memory.superseded":
         {
           // Invalidate-not-delete: close the old memory's validity window
           // at the superseding event's timestamp. The original entry stays
@@ -526,7 +510,7 @@ export function reduceProjectState(
           };
         }
         break;
-      case 'memory.retracted':
+      case "memory.retracted":
         {
           // Tombstone (SoT-050): close the memory's validity window like a
           // supersede, but with NO replacement and a distinct `retractedAt`
@@ -543,7 +527,7 @@ export function reduceProjectState(
           const existing = state.memories[payload.retracts];
           if (!existing) break;
           const targetLane = existing.sourceProjectId ?? SELF_LANE;
-          if (eventLane !== targetLane && payload.writerRole !== 'owner') break;
+          if (eventLane !== targetLane && payload.writerRole !== "owner") break;
           state.memories[payload.retracts] = {
             ...existing,
             // Keep an earlier supersede/dedup window if one already closed it;
@@ -571,21 +555,18 @@ export function reduceProjectState(
     state.project = {
       ...state.project,
       activeWorkstreamIds: Object.values(state.workstreams)
-        .filter((workstream) => workstream.status !== 'closed')
+        .filter((workstream) => workstream.status !== "closed")
         .map((workstream) => workstream.id),
       // Self-scoped: a foreign writer's tasks (workspace union) must never be
       // foldable into THIS store's "current task" (SoT-040). isSelfKey drops
       // foreign-lane entries; single-writer stores are unaffected.
       activeTaskIds: Object.entries(state.tasks)
         .filter(
-          ([key, task]) =>
-            isSelfKey(key) &&
-            task.status !== 'done' &&
-            task.status !== 'cancelled',
+          ([key, task]) => isSelfKey(key) && task.status !== "done" && task.status !== "cancelled",
         )
         .map(([, task]) => task.id),
       acceptedDecisionIds: Object.values(state.decisions)
-        .filter((decision) => decision.status === 'accepted')
+        .filter((decision) => decision.status === "accepted")
         .map((decision) => decision.id),
       ruleIds: Object.values(state.rules).map((rule) => rule.id),
     };
@@ -594,11 +575,7 @@ export function reduceProjectState(
   return state;
 }
 
-function applyTaskUpdate(
-  task: Task,
-  patch: Partial<Task>,
-  eventCreatedAt: string,
-): Task {
+function applyTaskUpdate(task: Task, patch: Partial<Task>, eventCreatedAt: string): Task {
   return {
     ...task,
     ...patch,
@@ -617,7 +594,7 @@ function byUpdatedAtDesc<T extends { updatedAt: string }>(a: T, b: T): number {
 
 export function buildMemoryIndex(state: ProjectState): MemoryIndex {
   if (!state.project) {
-    throw new Error('Cannot build memory index without a project');
+    throw new Error("Cannot build memory index without a project");
   }
 
   return {
@@ -625,7 +602,7 @@ export function buildMemoryIndex(state: ProjectState): MemoryIndex {
     projectId: state.project.id,
     shortSummary: state.project.summary,
     activeWorkstreams: Object.values(state.workstreams)
-      .filter((workstream) => workstream.status !== 'closed')
+      .filter((workstream) => workstream.status !== "closed")
       .map((workstream) => ({
         id: workstream.id,
         title: workstream.title,
@@ -637,10 +614,7 @@ export function buildMemoryIndex(state: ProjectState): MemoryIndex {
     // channel (W3), never the local top-tasks fold (SoT-040).
     topTasks: Object.entries(state.tasks)
       .filter(
-        ([key, task]) =>
-          isSelfKey(key) &&
-          task.status !== 'done' &&
-          task.status !== 'cancelled',
+        ([key, task]) => isSelfKey(key) && task.status !== "done" && task.status !== "cancelled",
       )
       .map(([, task]) => task)
       .sort(byUpdatedAtDesc)
@@ -650,12 +624,10 @@ export function buildMemoryIndex(state: ProjectState): MemoryIndex {
         title: task.title,
         status: task.status,
         priority: task.priority,
-        ...(task.latestHandoffId
-          ? { latestHandoffId: task.latestHandoffId }
-          : {}),
+        ...(task.latestHandoffId ? { latestHandoffId: task.latestHandoffId } : {}),
       })),
     recentDecisions: Object.values(state.decisions)
-      .filter((decision) => decision.status === 'accepted')
+      .filter((decision) => decision.status === "accepted")
       .sort(byUpdatedAtDesc)
       .slice(0, MAX_RECENT_DECISIONS)
       .map((decision) => ({
@@ -670,7 +642,7 @@ export function buildMemoryIndex(state: ProjectState): MemoryIndex {
       status: conflict.status,
     })),
     mustReadTopics: Object.values(state.rules)
-      .filter((rule) => rule.source === 'imported')
+      .filter((rule) => rule.source === "imported")
       .map((rule) => ({
         id: rule.id,
         title: rule.title,
