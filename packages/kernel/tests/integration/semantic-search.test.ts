@@ -6,12 +6,11 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { createConsolidatedMemory, createProject } from "../../src/domain/entities.js";
 import type { ConsolidatedMemoryKind } from "../../src/domain/entities/memory.js";
+import type { Embedder } from "../../src/index.js";
 import {
   cosineSimilarity,
   ensureEmbeddings,
   reciprocalRankFusion,
-  resolveEmbeddingsConfig,
-  type Embedder,
 } from "../../src/services/embeddings-service.js";
 import { getEmbedding, listEmbeddings } from "../../src/services/embeddings-store.js";
 import { rebuildProjectProjection } from "../../src/services/projection-store.js";
@@ -35,9 +34,8 @@ beforeEach(async () => {
 afterEach(async () => {
   closeAll();
   delete process.env.MEMORIZE_ROOT;
-  delete process.env.MEMORIZE_EMBEDDINGS_ENDPOINT;
-  delete process.env.MEMORIZE_EMBEDDINGS_API_KEY;
-  delete process.env.MEMORIZE_EMBEDDINGS_MODEL;
+  // No MEMORIZE_EMBEDDINGS_* cleanup: since #82 the kernel never reads that
+  // config — the embedder is injected, so these tests cannot be influenced by it.
   await rm(sandbox, { recursive: true, force: true });
 });
 
@@ -123,13 +121,13 @@ describe("semantic search (P3-c)", () => {
     await rebuildProjectProjection(projectId);
 
     const embedder = fakeEmbedder(VECTORS);
-    const first = await ensureEmbeddings(projectId, { embedder });
+    const first = await ensureEmbeddings(projectId, embedder);
     expect(first.embedded).toBe(2);
     expect(listEmbeddings(projectId, "memory")).toHaveLength(2);
     expect(getEmbedding(projectId, idA)?.vector).toEqual(VECTORS[MEM_A]);
 
     // Second call: nothing changed → no re-embedding (text_hash + model match).
-    const second = await ensureEmbeddings(projectId, { embedder });
+    const second = await ensureEmbeddings(projectId, embedder);
     expect(second.embedded).toBe(0);
   });
 
@@ -141,7 +139,7 @@ describe("semantic search (P3-c)", () => {
     await rebuildProjectProjection(projectId);
 
     const embedder = fakeEmbedder(VECTORS);
-    await ensureEmbeddings(projectId, { embedder });
+    await ensureEmbeddings(projectId, embedder);
 
     const hits = await semanticSearch(projectId, "postgresql", 10, embedder);
     // MEM_B (cos 1.0) and MEM_A (cos ~0.994) lead; MEM_C (cos 0) trails.
@@ -159,7 +157,7 @@ describe("semantic search (P3-c)", () => {
     await rebuildProjectProjection(projectId);
 
     const embedder = fakeEmbedder(VECTORS);
-    await ensureEmbeddings(projectId, { embedder });
+    await ensureEmbeddings(projectId, embedder);
 
     // Pure FTS finds only MEM_A for "postgresql".
     const lexical = searchProject(projectId, "postgresql");
@@ -175,14 +173,14 @@ describe("semantic search (P3-c)", () => {
     expect(bHit.snippet).toContain("relational");
   });
 
-  it("degrades gracefully to FTS when embeddings are unconfigured", async () => {
+  it("degrades gracefully to FTS when no embedder is injected", async () => {
     const projectId = await seedProject();
     const idA = await seedMemory(projectId, MEM_A);
     await seedMemory(projectId, MEM_B);
     await rebuildProjectProjection(projectId);
 
-    // No embedder configured, no embeddings stored.
-    expect((await ensureEmbeddings(projectId)).embedded).toBe(0);
+    // No embedder injected, no embeddings stored.
+    expect((await ensureEmbeddings(projectId, undefined)).embedded).toBe(0);
     expect(await semanticSearch(projectId, "postgresql")).toEqual([]);
 
     const hybrid = await hybridSearch(projectId, "postgresql");
@@ -200,13 +198,13 @@ describe("semantic search (P3-c)", () => {
       model: "boom",
       embed: () => Promise.reject(new Error("network down")),
     };
-    const result = await ensureEmbeddings(projectId, { embedder: throwingEmbedder });
+    const result = await ensureEmbeddings(projectId, throwingEmbedder);
     expect(result.embedded).toBe(0);
     expect(listEmbeddings(projectId, "memory")).toHaveLength(0);
   });
 });
 
-describe("embeddings math + config (unit)", () => {
+describe("embeddings math (unit)", () => {
   it("cosineSimilarity: identical=1, orthogonal=0, mismatched-length=0", () => {
     expect(cosineSimilarity([1, 0], [1, 0])).toBeCloseTo(1, 6);
     expect(cosineSimilarity([1, 0], [0, 1])).toBeCloseTo(0, 6);
@@ -224,18 +222,5 @@ describe("embeddings math + config (unit)", () => {
     const ranked = [...fused.entries()].sort((x, y) => y[1] - x[1]).map((e) => e[0]);
     expect(ranked.slice(0, 2).sort()).toEqual(["a", "b"]);
     expect(fused.get("a")!).toBeGreaterThan(fused.get("c")!);
-  });
-
-  it("resolveEmbeddingsConfig: enabled by endpoint OR key, else off", () => {
-    expect(resolveEmbeddingsConfig({})).toBeUndefined();
-    expect(resolveEmbeddingsConfig({ MEMORIZE_EMBEDDINGS_API_KEY: "k" })).toMatchObject({
-      apiKey: "k",
-    });
-    // Keyless local server: endpoint alone enables it (no apiKey field).
-    const local = resolveEmbeddingsConfig({
-      MEMORIZE_EMBEDDINGS_ENDPOINT: "http://localhost:11434/v1",
-    });
-    expect(local?.endpoint).toBe("http://localhost:11434/v1");
-    expect(local?.apiKey).toBeUndefined();
   });
 });

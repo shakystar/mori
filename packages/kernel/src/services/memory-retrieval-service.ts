@@ -1,5 +1,6 @@
 import type { Observation } from "../domain/entities.js";
 import { nowIso } from "../domain/common.js";
+import type { Embedder } from "../index.js";
 import type { MemoryRecord } from "../projections/projector.js";
 import {
   listRecentObservations,
@@ -8,7 +9,6 @@ import {
 } from "./projection-store.js";
 import { hybridSearchSegments, searchProject } from "./search-service.js";
 import { listSegmentTexts } from "./segment-store.js";
-import type { Embedder } from "./embeddings-service.js";
 
 /**
  * CLS Phase 1 — retrieval-time ranking for startup injection (decision ②,

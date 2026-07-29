@@ -5,7 +5,8 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { CURRENT_SCHEMA_VERSION } from "../../src/domain/common.js";
-import { hashText, type Embedder } from "../../src/services/embeddings-service.js";
+import type { Embedder } from "../../src/index.js";
+import { hashText } from "../../src/services/embeddings-service.js";
 import { upsertEmbedding } from "../../src/services/embeddings-store.js";
 import {
   listTasks,

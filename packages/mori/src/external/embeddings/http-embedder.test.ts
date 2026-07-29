@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { HttpEmbedder, MIN_EMBED_INPUT_CHARS } from "../../src/services/embeddings-service.js";
+import { HttpEmbedder, MIN_EMBED_INPUT_CHARS } from "./http-embedder.js";
 
 // A fake OpenAI-compatible /embeddings endpoint that mimics a context-window
 // limit: it returns HTTP 400 when a request's combined input length exceeds

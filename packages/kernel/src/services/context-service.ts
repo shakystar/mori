@@ -1,5 +1,5 @@
 import type { StartupContextPayload } from "../domain/entities.js";
-import { getEmbedder, resolveEmbeddingsConfig } from "./embeddings-service.js";
+import type { Embedder } from "../index.js";
 import {
   reinforceInjectedMemories,
   retrieveMemoryContext,
@@ -7,7 +7,14 @@ import {
 } from "./memory-retrieval-service.js";
 import { semanticMemoryScores } from "./search-service.js";
 
-/** Tight embed timeout at SessionStart — the network must never block boot. */
+/**
+ * Tight embed budget at SessionStart — the network must never block boot.
+ *
+ * Declared here (it is a kernel-boundary policy, not a transport detail) but
+ * APPLIED by the harness: the kernel no longer builds embedders (#82), so the
+ * caller is the one that must construct the SessionStart `Embedder` with this
+ * timeout baked in before passing it to `buildMemoryContext`.
+ */
 export const SESSION_START_EMBED_TIMEOUT_MS = 5_000;
 
 export type MemoryContext = Pick<
@@ -28,7 +35,7 @@ export type MemoryContext = Pick<
  */
 export async function buildMemoryContext(
   projectId: string,
-  opts: { taskTitle?: string } = {},
+  opts: { taskTitle?: string; embedder?: Embedder } = {},
 ): Promise<MemoryContext> {
   // Embed the task title ONCE, up front, and reuse the vector across both
   // the memory (P3-c) and segment (raw-detail) retrieval paths below. The
@@ -38,10 +45,11 @@ export async function buildMemoryContext(
   // could block SessionStart for roughly double the stated timeout (mori#63
   // review). Sharing one embedder + one query vector (or none, on failure —
   // no retry) keeps the wall-clock bound to a single embed call.
-  const config = opts.taskTitle ? resolveEmbeddingsConfig() : undefined;
-  const embedder = config
-    ? getEmbedder({ ...config, timeoutMs: SESSION_START_EMBED_TIMEOUT_MS })
-    : undefined;
+  //
+  // The embedder is INJECTED (#82) rather than resolved from env here: absence
+  // is a caller decision and degrades both channels to FTS-only, which is the
+  // exact behavior the old unconfigured-env path produced.
+  const embedder = opts.taskTitle ? opts.embedder : undefined;
   let queryVec: number[] | undefined;
   if (opts.taskTitle && embedder) {
     try {
@@ -53,8 +61,8 @@ export async function buildMemoryContext(
 
   // P3-c — semantic relevance boost: score memories by cosine similarity to
   // the shared query vector (graded boost in retrieveMemoryContext).
-  // Best-effort; degrades to FTS-only when no embeddings endpoint is
-  // configured or the embed above failed/timed out.
+  // Best-effort; degrades to FTS-only when no embedder was injected or the
+  // embed above failed/timed out.
   let semanticScores: Map<string, number> | undefined;
   if (opts.taskTitle && queryVec) {
     try {

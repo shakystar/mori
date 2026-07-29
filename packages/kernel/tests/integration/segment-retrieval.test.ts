@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { createProject } from "../../src/domain/entities.js";
-import type { Embedder } from "../../src/services/embeddings-service.js";
+import type { Embedder } from "../../src/index.js";
 import { ensureSegmentEmbeddings } from "../../src/services/embeddings-service.js";
 import { upsertEmbedding } from "../../src/services/embeddings-store.js";
 import { retrieveSegments } from "../../src/services/memory-retrieval-service.js";
@@ -108,7 +108,9 @@ describe("segment embeddings stay self-scoped (#72)", () => {
       },
     };
 
-    const result = await ensureSegmentEmbeddings(projectId, { embedder: stubEmbedder });
+    // Positional embedder since #82 — the options-object form this test used on
+    // main disappeared with the env fallback it existed to override.
+    const result = await ensureSegmentEmbeddings(projectId, stubEmbedder);
 
     expect(result.embedded).toBe(1);
     expect(seenTexts).toEqual(["self transcript text"]);
@@ -254,9 +256,9 @@ describe("segment search + retrieval", () => {
       createdAt: new Date(0).toISOString(),
     });
 
-    // No embedder configured (MEMORIZE_EMBEDDINGS_* unset in this sandbox) and
-    // none passed explicitly — only a precomputed queryVec, mirroring
-    // retrieveSegments reusing one embed call across corpora.
+    // No embedder passed (and since #82 the kernel never builds one from env) —
+    // only a precomputed queryVec, mirroring retrieveSegments reusing one embed
+    // call across corpora.
     const hits = await hybridSearchSegments(
       projectId,
       "totally unrelated words",

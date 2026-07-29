@@ -6,8 +6,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { CURRENT_SCHEMA_VERSION, nowIso } from "../../src/domain/common.js";
 import { createProject } from "../../src/domain/entities.js";
+import type { Embedder } from "../../src/index.js";
 import { buildMemoryContext } from "../../src/services/context-service.js";
-import { HttpEmbedder } from "../../src/services/embeddings-service.js";
 import {
   listValidMemories,
   rebuildProjectProjection,
@@ -18,11 +18,14 @@ import { appendEvent } from "../../src/storage/event-store.js";
 /**
  * `buildMemoryContext` is the kernel-scope slice of upstream memorize's
  * `loadStartContext` (mori#63 body): the freshness/relevance-ranked memory
- * assembly only. Embeddings are left unconfigured in every case here (no
- * MEMORIZE_EMBEDDINGS_* env) — the semantic-scoring path itself
- * (semanticMemoryScores/resolveEmbeddingsConfig/getEmbedder) already has
- * dedicated coverage in semantic-search.test.ts; this suite covers the
- * composition contract, which degrades to FTS-only exactly like upstream.
+ * assembly only. No embedder is injected in most cases here — the
+ * semantic-scoring path itself (semanticMemoryScores) already has dedicated
+ * coverage in semantic-search.test.ts; this suite covers the composition
+ * contract, which degrades to FTS-only exactly like upstream.
+ *
+ * Since #82 the embedder is a parameter, never resolved from env, so the
+ * single semantic case below injects a fake `Embedder` instead of stubbing an
+ * HTTP client — nothing in this file touches MEMORIZE_EMBEDDINGS_*.
  */
 let sandbox: string;
 let projectId: string;
@@ -47,8 +50,6 @@ beforeEach(async () => {
 afterEach(async () => {
   closeAll();
   delete process.env.MEMORIZE_ROOT;
-  delete process.env.MEMORIZE_EMBEDDINGS_ENDPOINT;
-  delete process.env.MEMORIZE_EMBEDDINGS_API_KEY;
   await rm(sandbox, { recursive: true, force: true });
 });
 
@@ -154,20 +155,26 @@ describe("buildMemoryContext", () => {
     insertSegment("seg_a", "zephyr deploy runbook notes", "2026-01-01T00:00:00.000Z");
     await rebuildProjectProjection(projectId, { reindexSearch: true });
 
-    process.env.MEMORIZE_EMBEDDINGS_ENDPOINT = "http://localhost:11434/v1";
     const calls: string[][] = [];
-    const embedSpy = vi
-      .spyOn(HttpEmbedder.prototype, "embed")
-      .mockImplementation(async (texts: string[]) => {
-        calls.push(texts);
-        return texts.map(() => [1, 0, 0]);
-      });
+    const embed = vi.fn(async (texts: string[]) => {
+      calls.push(texts);
+      return texts.map(() => [1, 0, 0]);
+    });
+    const embedder: Embedder = { embed, model: "fake-embed" };
 
-    await buildMemoryContext(projectId, { taskTitle: "zephyr deploy" });
+    await buildMemoryContext(projectId, { taskTitle: "zephyr deploy", embedder });
 
-    expect(embedSpy).toHaveBeenCalledTimes(1);
+    expect(embed).toHaveBeenCalledTimes(1);
     expect(calls).toEqual([["zephyr deploy"]]);
+  });
 
-    embedSpy.mockRestore();
+  it("ignores an injected embedder without a task title — nothing to embed", async () => {
+    await seedMemory("mem_hot", "chose zephyr as the deploy target", 9, NOW);
+    await rebuildProjectProjection(projectId, { reindexSearch: true });
+
+    const embed = vi.fn(async (texts: string[]) => texts.map(() => [1, 0, 0]));
+    await buildMemoryContext(projectId, { embedder: { embed, model: "fake-embed" } });
+
+    expect(embed).not.toHaveBeenCalled();
   });
 });

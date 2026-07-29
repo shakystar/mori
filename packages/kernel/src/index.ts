@@ -16,6 +16,23 @@ export interface ConsolidatorLlm {
   complete(prompt: string): Promise<string>;
 }
 
+/**
+ * Embedding seam for semantic search. The harness supplies an in-process
+ * implementation (mori: `HttpEmbedder`, an OpenAI-compatible `/embeddings`
+ * client configured from `MEMORIZE_EMBEDDINGS_*`) — the kernel never builds one
+ * and never reads that config, exactly as with `ConsolidatorLlm`.
+ *
+ * OPTIONAL throughout: every kernel entry point that takes an `Embedder` accepts
+ * `undefined` and degrades to FTS5 lexical search, which is the "works without a
+ * key" guarantee. Absence is a caller decision, not an env lookup.
+ */
+export interface Embedder {
+  /** Embed a batch of texts → one vector per input, in input order. */
+  embed(texts: string[]): Promise<number[][]>;
+  /** Identifies the vector space; a change invalidates stored embeddings. */
+  readonly model: string;
+}
+
 export interface MemoryKernel<M, E> {
   /** Per-turn retrieval: runs right before each LLM call. */
   transformContext(messages: M[], signal?: AbortSignal): Promise<M[]>;

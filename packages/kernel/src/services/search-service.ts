@@ -1,10 +1,6 @@
+import type { Embedder } from "../index.js";
 import { getDb } from "../storage/db.js";
-import {
-  cosineSimilarity,
-  getEmbedder,
-  reciprocalRankFusion,
-  type Embedder,
-} from "./embeddings-service.js";
+import { cosineSimilarity, reciprocalRankFusion } from "./embeddings-service.js";
 import { listEmbeddings } from "./embeddings-store.js";
 import { listSegmentTexts } from "./segment-store.js";
 import {
@@ -103,16 +99,20 @@ function snippetFromText(text: string, max = 120): string {
 
 /**
  * Cosine similarity of `query` against every valid-memory embedding, as an
- * id→score map (score in [-1, 1]). Empty when embeddings are unconfigured, the
+ * id→score map (score in [-1, 1]). Empty when no embedder is injected, the
  * corpus is unembedded, or the query embed fails (best-effort — the caller then
  * degrades to lexical-only). This is the shared core for both semanticSearch and
  * the injection-time relevance boost.
+ *
+ * `embedder` is optional but never defaulted: the kernel does not construct one
+ * (see the `Embedder` seam in index.ts). Omitting it = lexical-only, which is the
+ * same behavior the old env-driven default produced when unconfigured.
  */
 export async function semanticScoresForKind(
   projectId: string,
   query: string,
   kind: string,
-  embedder: Embedder | undefined = getEmbedder(),
+  embedder?: Embedder,
   queryVec?: number[],
 ): Promise<Map<string, number>> {
   // embedder/query.trim() are only needed to PRODUCE a vector — a caller that
@@ -141,7 +141,7 @@ export async function semanticScoresForKind(
 export async function semanticMemoryScores(
   projectId: string,
   query: string,
-  embedder: Embedder | undefined = getEmbedder(),
+  embedder?: Embedder,
   queryVec?: number[],
 ): Promise<Map<string, number>> {
   return semanticScoresForKind(projectId, query, "memory", embedder, queryVec);
@@ -152,7 +152,7 @@ export async function semanticSearch(
   projectId: string,
   query: string,
   limit: number = DEFAULT_SEARCH_LIMIT,
-  embedder: Embedder | undefined = getEmbedder(),
+  embedder?: Embedder,
 ): Promise<SearchHit[]> {
   const scores = await semanticMemoryScores(projectId, query, embedder);
   if (scores.size === 0) return [];
@@ -189,7 +189,7 @@ export async function hybridSearch(
   projectId: string,
   query: string,
   limit: number = DEFAULT_SEARCH_LIMIT,
-  embedder: Embedder | undefined = getEmbedder(),
+  embedder?: Embedder,
   lane: ProjectionLane = "self",
 ): Promise<SearchHit[]> {
   // Pull a wider slice from each ranker so fusion has overlap to reward.
@@ -274,7 +274,7 @@ export async function hybridSearchSegments(
   projectId: string,
   query: string,
   limit: number = DEFAULT_SEARCH_LIMIT,
-  embedder: Embedder | undefined = getEmbedder(),
+  embedder?: Embedder,
   queryVec?: number[],
 ): Promise<SearchHit[]> {
   const poolSize = Math.max(limit * 2, DEFAULT_SEARCH_LIMIT);
