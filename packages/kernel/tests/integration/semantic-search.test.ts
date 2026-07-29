@@ -243,7 +243,12 @@ describe("semantic search (P3-c)", () => {
       model: "m1",
       embed: () => Promise.resolve([[1, 0]]),
     };
-    const scores = await semanticScoresForKind(projectId, "postgresql", "memory", mismatchedEmbedder);
+    const scores = await semanticScoresForKind(
+      projectId,
+      "postgresql",
+      "memory",
+      mismatchedEmbedder,
+    );
     expect(scores.size).toBe(0);
   });
 
