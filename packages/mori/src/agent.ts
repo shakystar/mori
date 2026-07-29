@@ -1,18 +1,8 @@
-import {
-  Agent,
-  type AgentEvent,
-  type AgentMessage,
-  type AgentTool,
-  type StreamFn,
-} from "@earendil-works/pi-agent-core";
+import { Agent, type AgentEvent, type AgentMessage, type AgentTool, type StreamFn } from "@earendil-works/pi-agent-core";
 import type { CredentialStore } from "@earendil-works/pi-ai";
 import type { MemoryKernel } from "@mori/kernel";
 import { createMoriModels } from "./model-wiring.js";
-import {
-  resolveProviderSelection,
-  SUPPORTED_PROVIDER_IDS,
-  unknownProviderMessage,
-} from "./provider-selection.js";
+import { resolveProviderSelection, supportedProviderIds, unknownProviderMessage } from "./provider-selection.js";
 import { createBashBeforeToolCall, createMoriTools } from "./tools/index.js";
 
 export { createMoriModels };
@@ -30,7 +20,6 @@ export interface CreateMoriAgentOptions {
    * Tools to register, in place of the default toolset built from `root`. Pass `[]` to
    * get the pre-toolset single-prompt behavior back (e.g. for regression tests).
    */
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- AgentTool<TArgs> erasure for a heterogeneous tool array
   tools?: AgentTool<any>[];
 }
 
@@ -44,8 +33,8 @@ export function createMoriAgent(
   const models = createMoriModels(env, credentialStore);
 
   const { providerId, modelId } = resolveProviderSelection(env);
-  if (!SUPPORTED_PROVIDER_IDS.includes(providerId)) {
-    throw new Error(unknownProviderMessage(providerId));
+  if (!supportedProviderIds(env).includes(providerId)) {
+    throw new Error(unknownProviderMessage(providerId, env));
   }
 
   const model = models.getModel(providerId, modelId);

@@ -1,10 +1,17 @@
-import { PROVIDER_API_KEY_ENV } from "./auth/resolve-credentials.js";
+import { moriProviderIds } from "./model-wiring.js";
 
 export const DEFAULT_PROVIDER_ID = "anthropic";
 export const DEFAULT_MODEL_ID = "claude-sonnet-4-6";
 
-/** Providers mori knows an API-key env var for — the same set resolveCredentials can serve. */
-export const SUPPORTED_PROVIDER_IDS = Object.keys(PROVIDER_API_KEY_ENV);
+/**
+ * Providers a user may select with `MORI_MODEL` or name to `mori login`/`mori logout`, for
+ * this environment. Derived from the registration itself rather than from a hand-kept list:
+ * an experimental provider that is not registered (see `moriProviders`) is not selectable
+ * and not a login target, with no second place to remember to filter it out of.
+ */
+export function supportedProviderIds(env: NodeJS.ProcessEnv): readonly string[] {
+  return moriProviderIds(env);
+}
 
 export interface ProviderSelection {
   providerId: string;
@@ -32,9 +39,9 @@ export function resolveProviderSelection(env: NodeJS.ProcessEnv): ProviderSelect
   return { providerId: raw.slice(0, slash), modelId: raw.slice(slash + 1) };
 }
 
-export function unknownProviderMessage(providerId: string): string {
+export function unknownProviderMessage(providerId: string, env: NodeJS.ProcessEnv): string {
   return (
     `mori: 알 수 없는 프로바이더 "${providerId}".\n` +
-    `지원하는 프로바이더: ${SUPPORTED_PROVIDER_IDS.join(", ")}\n`
+    `지원하는 프로바이더: ${supportedProviderIds(env).join(", ")}\n`
   );
 }
