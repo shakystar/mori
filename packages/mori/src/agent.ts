@@ -2,7 +2,7 @@ import { Agent, type AgentEvent, type AgentMessage, type AgentTool, type StreamF
 import type { CredentialStore } from "@earendil-works/pi-ai";
 import type { MemoryKernel } from "@mori/kernel";
 import { createMoriModels } from "./model-wiring.js";
-import { resolveProviderSelection, SUPPORTED_PROVIDER_IDS, unknownProviderMessage } from "./provider-selection.js";
+import { resolveProviderSelection, supportedProviderIds, unknownProviderMessage } from "./provider-selection.js";
 import { createBashBeforeToolCall, createMoriTools } from "./tools/index.js";
 
 export { createMoriModels };
@@ -33,8 +33,8 @@ export function createMoriAgent(
   const models = createMoriModels(env, credentialStore);
 
   const { providerId, modelId } = resolveProviderSelection(env);
-  if (!SUPPORTED_PROVIDER_IDS.includes(providerId)) {
-    throw new Error(unknownProviderMessage(providerId));
+  if (!supportedProviderIds(env).includes(providerId)) {
+    throw new Error(unknownProviderMessage(providerId, env));
   }
 
   const model = models.getModel(providerId, modelId);
