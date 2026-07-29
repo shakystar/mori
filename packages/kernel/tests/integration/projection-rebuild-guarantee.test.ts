@@ -274,7 +274,7 @@ describe("projection rebuild guarantee (event log is source of truth)", () => {
     const observation = createObservation({
       projectId,
       sessionId: session.id,
-      signal: "tool-use",
+      signal: "write-tool",
       summary: "ran a build",
     });
     await appendEvent({

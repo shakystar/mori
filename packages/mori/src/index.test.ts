@@ -4,12 +4,13 @@ import { join } from "node:path";
 import type {
   AssistantMessage,
   AssistantMessageEvent,
+  Context,
   Credential,
   OAuthCredential,
   Provider,
 } from "@earendil-works/pi-ai";
 import { createAssistantMessageEventStream, InMemoryCredentialStore } from "@earendil-works/pi-ai";
-import type { Context, StreamFn } from "@earendil-works/pi-agent-core";
+import type { StreamFn } from "@earendil-works/pi-agent-core";
 import { afterEach, describe, expect, it } from "vitest";
 import { EXPERIMENTAL_OPENAI_OAUTH_ENV, OPENAI_OAUTH_PROVIDER_ID } from "./auth/experimental.js";
 import type { ReplInputSource, ReplLine } from "./cli/repl-input.js";

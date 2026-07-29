@@ -13,7 +13,8 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "pretest": "tsc -b",
-    "test": "vitest run"
+    "test": "vitest run",
+    "typecheck:test": "tsc -p packages/kernel/tsconfig.test.json && tsc -p packages/mori/tsconfig.test.json"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
