@@ -2,7 +2,9 @@ import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 import { Type, type Static } from "@earendil-works/pi-ai";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
-import { resolveWithinRoot } from "./paths.js";
+import { isBinary } from "./binary.js";
+import { resolveWithinRoot, type Failure } from "./paths.js";
+import { errorResult, textResult } from "./tool-result.js";
 
 /** Match cap: searches stop early once this many matches are collected. */
 export const GREP_MAX_MATCHES = 500;
@@ -23,10 +25,7 @@ export interface GrepSuccess {
   truncated: boolean;
 }
 
-export interface GrepFailure {
-  ok: false;
-  reason: string;
-}
+export type GrepFailure = Failure;
 
 export type GrepResult = GrepSuccess | GrepFailure;
 
@@ -40,7 +39,7 @@ export interface GrepOptions {
 export function grep(root: string, pattern: string, options: GrepOptions = {}): GrepResult {
   const scopePath = options.path ?? ".";
   const resolved = resolveWithinRoot(root, scopePath);
-  if (!resolved.ok) return { ok: false, reason: resolved.reason };
+  if (!resolved.ok) return resolved;
 
   let matcher: (line: string) => boolean;
   if (options.regex) {
@@ -125,14 +124,6 @@ export function grep(root: string, pattern: string, options: GrepOptions = {}): 
   return { ok: true, matches, truncated };
 }
 
-function isBinary(buffer: Buffer): boolean {
-  const sampleSize = Math.min(buffer.length, 8000);
-  for (let i = 0; i < sampleSize; i++) {
-    if (buffer[i] === 0) return true;
-  }
-  return false;
-}
-
 const grepParameters = Type.Object({
   pattern: Type.String({ description: "Fixed string (or regular expression, if regex=true) to search for." }),
   path: Type.Optional(
@@ -151,16 +142,13 @@ export function createGrepTool(root: string = process.cwd()): AgentTool<typeof g
     parameters: grepParameters,
     execute: async (_toolCallId, params: Static<typeof grepParameters>) => {
       const result = grep(root, params.pattern, { path: params.path, regex: params.regex });
-
-      if (!result.ok) {
-        return { content: [{ type: "text", text: `Error: ${result.reason}` }], details: result };
-      }
+      if (!result.ok) return errorResult(result);
 
       const lines = result.matches.map((match) => `${match.file}:${match.line}:${match.text}`);
       const notice = result.truncated ? `\n\n[truncated: showing first ${GREP_MAX_MATCHES} matches]` : "";
       const text = lines.length > 0 ? lines.join("\n") + notice : "No matches found.";
 
-      return { content: [{ type: "text", text }], details: result };
+      return textResult(text, result);
     },
   };
 }
