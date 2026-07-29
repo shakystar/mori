@@ -21,6 +21,7 @@ import {
   consolidate,
   getConsolidateWatermark,
   parseExtractedMemories,
+  readLastConsolidateAttempt,
   setConsolidateWatermark,
   type Consolidator,
 } from "../../src/services/consolidate-service.js";
@@ -356,11 +357,13 @@ describe("consolidate — conversation seam", () => {
       },
     });
 
-    // No observations were processed, so the attempt is a 'noop' by the #127
-    // outcome definition — but the memory and the segment were still written.
-    expect(result).toMatchObject({ observationsProcessed: 0, consolidated: 1, outcome: "noop" });
+    // No observations were processed, but the conversation slice was — #103
+    // widened the outcome to cover that, so this boundary is 'ok', and the
+    // last-attempt telemetry (#51) records the memory it produced.
+    expect(result).toMatchObject({ observationsProcessed: 0, consolidated: 1, outcome: "ok" });
     expect(listValidMemories(projectId)).toHaveLength(1);
     expect(listSegments(projectId)).toHaveLength(1);
+    expect(readLastConsolidateAttempt(projectId)).toMatchObject({ outcome: "ok", consolidated: 1 });
   });
 
   it("is an observation-only boundary when the source yields nothing", async () => {

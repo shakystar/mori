@@ -901,6 +901,17 @@ export async function consolidate(params: ConsolidateParams): Promise<Consolidat
     // `segment` records ALONGSIDE the consolidated memories, so verbatim detail
     // the extractor compressed away stays findable. Derived/best-effort: never
     // block consolidation on it. Gated by MEMORIZE_RAW_SEGMENTS (default on).
+    //
+    // #103: this runs BEFORE appendEvents below, deliberately left unordered
+    // relative to it. If appendEvents throws, these segments are already
+    // durable but the conversation offset (written only after appendEvents
+    // succeeds, near the end of this function) does not advance — the next
+    // boundary re-reads and re-chunks the same slice, writing duplicate
+    // segments. Not reordered: segments are a derived, prunable buffer
+    // (pruneSegments caps the total below), so that duplication is bounded
+    // and self-healing. Writing events first would trade it for the opposite
+    // failure mode — memories durably recorded while a later insertSegments
+    // failure silently drops their raw detail — for no correctness gain.
     let segmentsWritten = 0;
     if (process.env.MEMORIZE_RAW_SEGMENTS !== "0" && slice && slice.text.length > 0) {
       try {
@@ -1001,7 +1012,13 @@ export async function consolidate(params: ConsolidateParams): Promise<Consolidat
       observationsProcessed: observations.length,
       extractor: extractorKind,
       backend: backendLabel,
-      outcome: observations.length > 0 ? "ok" : "noop",
+      // #103: matches the ConsolidateResult.outcome doc comment above — "ok"
+      // when this boundary processed observations OR a conversation slice,
+      // not just observations. The early noop return above already exits
+      // when both are absent, but the check is repeated here (rather than
+      // hard-coding "ok") so this line stays correct on its own if that
+      // early return is ever restructured.
+      outcome: observations.length > 0 || transcriptTail !== undefined ? "ok" : "noop",
       segmentsWritten,
     };
   };
@@ -1017,9 +1034,12 @@ export async function consolidate(params: ConsolidateParams): Promise<Consolidat
     throw error;
   }
 
+  // #103: mirror result.outcome exactly rather than re-deriving it from
+  // observationsProcessed — a conversation-only boundary (0 observations,
+  // outcome "ok") must still get its `consolidated` count recorded.
   recordAttempt(
-    result.observationsProcessed > 0 ? "ok" : "noop",
-    result.observationsProcessed > 0 ? { consolidated: result.consolidated } : {},
+    result.outcome,
+    result.outcome === "ok" ? { consolidated: result.consolidated } : {},
   );
   return result;
 }
