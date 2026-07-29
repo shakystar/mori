@@ -23,22 +23,29 @@ mori "hi"
 
 mori resolves credentials in this order:
 
-1. An OAuth token from a prior `mori login` (stored at
-   `$XDG_CONFIG_HOME/mori/credentials.json`, or `~/.config/mori/credentials.json`).
-2. The `ANTHROPIC_API_KEY` environment variable.
+1. A credential stored by a prior `mori login` (at `$XDG_CONFIG_HOME/mori/credentials.json`,
+   or `~/.config/mori/credentials.json`, written `0600`).
+2. The provider's API key environment variable — `ANTHROPIC_API_KEY` or `OPENAI_API_KEY`.
 
-If neither is available, `mori` exits immediately with an error pointing at
-`mori login` first and `ANTHROPIC_API_KEY` as the fallback — no network round trip
-is attempted first.
+If neither is available, `mori` exits immediately with an error naming both options — no
+network round trip is attempted first.
 
-`mori login` is not implemented yet — running it prints guidance to use
-`ANTHROPIC_API_KEY` in the meantime. Until it exists, the only working path is the
-environment variable above.
+```bash
+mori login             # stores a key for the provider MORI_MODEL selects (anthropic by default)
+mori login openai      # ...or for a provider you name
+mori logout openai     # drops that provider's stored credential
+```
+
+For `anthropic` and `openai`, `mori login` prompts for an API key and stores it; it is a
+convenience over exporting the environment variable, not a different kind of credential.
+Neither provider has a subscription/OAuth login: Claude Pro/Max OAuth is deliberately not
+implemented (it requires impersonating another client, which its terms forbid), and mori
+strips that capability out of the provider it registers.
 
 ### Provider and model selection
 
-mori supports two providers today: `anthropic` (default) and `openai`. Both go through
-their own API key — no subscription/OAuth path for either (see Authentication above).
+mori supports two providers by default: `anthropic` (default) and `openai`. Both go through
+their own API key (see Authentication above).
 
 By default mori uses the anthropic model `claude-sonnet-4-6`. Override the model — and
 optionally the provider — with `MORI_MODEL`:
@@ -57,6 +64,28 @@ everything after is the model id. A bare value (no `/`) has no provider and is r
 anthropic model id, so the pre-existing `MORI_MODEL=claude-sonnet-4-6` form keeps working
 unchanged. An unknown provider or model ends with an error listing what's supported —
 no stack trace.
+
+### Experimental: ChatGPT subscription login (unofficial, off by default)
+
+> **This is not a supported feature, and using it may get your OpenAI account restricted or
+> suspended.** OpenAI has never stated in its auth documentation that third-party clients
+> may sign in with a ChatGPT subscription. This route exists as an unofficial development
+> path only. If you need something that keeps working, use `OPENAI_API_KEY` with the
+> `openai` provider above.
+
+It is off unless you set the gate to exactly `1`, and while it is off the provider is not
+registered at all — it does not appear in the supported-provider list, it cannot be selected
+by `MORI_MODEL`, and `mori login` will not accept it as a target:
+
+```bash
+export MORI_EXPERIMENTAL_OPENAI_OAUTH=1
+mori login openai-codex        # prints the risk notice on success
+MORI_MODEL=openai-codex/gpt-5.1-codex mori "hi"
+```
+
+Note that `openai-codex` is a *different provider* from `openai`: it talks to
+`chatgpt.com/backend-api` and has no API key path at all, so `OPENAI_API_KEY` does not
+apply to it.
 
 ### Data location
 
