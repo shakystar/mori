@@ -1,45 +1,13 @@
 #!/usr/bin/env node
-import { realpathSync } from "node:fs";
-import { pathToFileURL } from "node:url";
-import type { AgentEvent, AgentMessage, StreamFn } from "@earendil-works/pi-agent-core";
-import type { CredentialStore } from "@earendil-works/pi-ai";
-import { BufferKernel } from "@mori/kernel";
-import { createMoriAgent, createMoriModels } from "./agent.js";
-import { defaultCredentialsPath, FileCredentialStore } from "./auth/credential-store.js";
-import { apiKeyEnvVarFor } from "./auth/resolve-credentials.js";
-import {
-  resolveProviderSelection,
-  SUPPORTED_PROVIDER_IDS,
-  unknownProviderMessage,
-} from "./provider-selection.js";
+import { isMainEntry } from "./cli/entrypoint.js";
+import { loginNotImplementedMessage, unauthenticatedMessage, usageMessage } from "./cli/messages.js";
+import { parseCliCommand } from "./cli/parse-args.js";
+import { runPrompt } from "./cli/runtime.js";
+import type { RunCliDeps } from "./cli/types.js";
+import { resolveProviderSelection, SUPPORTED_PROVIDER_IDS, unknownProviderMessage } from "./provider-selection.js";
 
-export function unauthenticatedMessage(providerId: string): string {
-  const apiKeyEnv = apiKeyEnvVarFor(providerId) ?? "API_KEY";
-  return (
-    "mori: 인증이 필요합니다.\n" +
-    "  mori login          # 권장 — 브라우저로 로그인\n" +
-    "또는 API key를 쓰려면:\n" +
-    `  export ${apiKeyEnv}=...\n`
-  );
-}
-
-export function loginNotImplementedMessage(providerId: string): string {
-  const apiKeyEnv = apiKeyEnvVarFor(providerId) ?? "API_KEY";
-  return (
-    "mori: `mori login`은 아직 사용할 수 없습니다.\n" +
-    "지금은 API key를 쓰세요:\n" +
-    `  export ${apiKeyEnv}=...\n`
-  );
-}
-
-export interface RunCliDeps {
-  stdout?: (chunk: string) => void;
-  stderr?: (chunk: string) => void;
-  streamFn?: StreamFn;
-  credentialStore?: CredentialStore;
-  /** Working root for the agent's tools. Defaults to `process.cwd()`. */
-  root?: string;
-}
+export { unauthenticatedMessage, loginNotImplementedMessage };
+export type { RunCliDeps };
 
 export async function runCli(
   argv: string[],
@@ -55,63 +23,21 @@ export async function runCli(
     return 1;
   }
 
-  if (argv[0] === "login") {
+  const command = parseCliCommand(argv);
+  if (command.kind === "login") {
     stderr(loginNotImplementedMessage(providerId));
     return 1;
   }
-
-  const prompt = argv.join(" ").trim();
-  if (!prompt) {
-    stderr("usage: mori <prompt>\n");
+  if (command.kind === "no-prompt") {
+    stderr(usageMessage);
     return 1;
   }
 
-  const credentialStore =
-    deps.credentialStore ?? new FileCredentialStore(defaultCredentialsPath(env), stderr);
-
-  // Gate through the exact same Models/provider/store configuration the real turn below
-  // uses (see agent.ts's createMoriModels) — the only way "gate passes, turn fails" can't
-  // happen is for both to ask the same question of the same instance.
-  const authCheck = await createMoriModels(env, credentialStore).checkAuth(providerId);
-  if (!authCheck) {
-    stderr(unauthenticatedMessage(providerId));
-    return 1;
-  }
-
-  const kernel = new BufferKernel<AgentMessage, AgentEvent>();
-  let agent;
-  try {
-    agent = createMoriAgent(kernel, credentialStore, env, deps.streamFn, { root: deps.root });
-  } catch (err) {
-    // Unknown-model errors from createMoriAgent are already a plain, user-facing message
-    // (see agent.ts) — surface it as CLI output, not an uncaught stack trace.
-    stderr(`${err instanceof Error ? err.message : String(err)}\n`);
-    return 1;
-  }
-
-  agent.subscribe((event) => {
-    if (
-      event.type === "message_update" &&
-      event.assistantMessageEvent.type === "text_delta"
-    ) {
-      stdout(event.assistantMessageEvent.delta);
-    }
-  });
-
-  await agent.prompt(prompt);
-  stdout("\n");
-
-  const last = agent.state.messages.at(-1);
-  if (last?.role === "assistant" && last.stopReason === "error") {
-    stderr(`mori: ${last.errorMessage ?? "unknown provider error"}\n`);
-    return 1;
-  }
-
-  return 0;
+  return runPrompt(command.prompt, providerId, env, deps, { stdout, stderr });
 }
 
 const entry = process.argv[1];
-if (entry && import.meta.url === pathToFileURL(realpathSync(entry)).href) {
+if (isMainEntry(entry, import.meta.url)) {
   const exitCode = await runCli(process.argv.slice(2), process.env);
   process.exit(exitCode);
 }
