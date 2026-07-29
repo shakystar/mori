@@ -2,10 +2,12 @@ import { getDb } from '../storage/db.js';
 
 /**
  * Read side of the `segments` table (v10) — a DERIVED, bounded short-term
- * buffer of raw transcript content. Only the reader `rebuildProjectProjection`
- * needs (to re-populate `search_fts` under kind='segment') is ported here;
- * the write path (`insertSegments`, `pruneSegments`, consolidate()'s use of
- * this table) belongs to the services layer (#11) and is not yet ported, so
+ * buffer of raw transcript content. `listSegments` (needed by
+ * `rebuildProjectProjection` to re-populate `search_fts` under kind='segment')
+ * and `listSegmentTexts` (hydrates search-service/memory-retrieval-service
+ * hits with full segment text) are ported here; the write path
+ * (`insertSegments`, `pruneSegments`, consolidate()'s use of this table)
+ * belongs to the consolidate-service slice (#64) and is not yet ported, so
  * this table is always empty until then.
  */
 
@@ -55,4 +57,12 @@ export function listSegments(projectId: string): SegmentRow[] {
     )
     .all() as RawRow[];
   return rows.map(parseRow);
+}
+
+/** Map of segment id -> text, for hydrating search hits (text isn't in the projection). */
+export function listSegmentTexts(projectId: string): Map<string, string> {
+  const rows = getDb(projectId)
+    .prepare('SELECT id, text FROM segments')
+    .all() as Array<{ id: string; text: string }>;
+  return new Map(rows.map((r) => [r.id, r.text]));
 }
