@@ -1,4 +1,4 @@
-import type { AgentEvent, AgentMessage } from "@earendil-works/pi-agent-core";
+import type { Agent, AgentEvent, AgentMessage } from "@earendil-works/pi-agent-core";
 import { BufferKernel } from "@mori/kernel";
 import { createMoriAgent, createMoriModels } from "../agent.js";
 import { defaultCredentialsPath, FileCredentialStore } from "../auth/credential-store.js";
@@ -11,17 +11,26 @@ export interface RunPromptIO {
 }
 
 /**
- * Wires a single prompt end to end: credential store -> auth gate -> kernel/agent
- * construction -> event subscription -> the turn itself. This is the runtime-wiring
- * concern of `runCli` (index.ts), split out from user-facing messages and argv parsing.
+ * Either an agent ready to take prompts, or the exit code the caller should return — in
+ * which case the user-facing message has already been written to stderr.
  */
-export async function runPrompt(
-  prompt: string,
+export type PreparedAgent = { ok: true; agent: Agent } | { ok: false; exitCode: number };
+
+/**
+ * Everything that must happen before the first turn: credential store -> auth gate ->
+ * kernel/agent construction -> event subscription.
+ *
+ * Split out of `runPrompt` for the REPL (#26), which runs this exactly once and then reuses
+ * the agent for every turn. Per-turn preparation would rebuild the kernel and drop the
+ * transcript, and an unauthenticated REPL would only discover it after accepting a prompt
+ * rather than at startup.
+ */
+export async function prepareAgent(
   providerId: string,
   env: NodeJS.ProcessEnv,
   deps: RunCliDeps,
   io: RunPromptIO,
-): Promise<number> {
+): Promise<PreparedAgent> {
   const { stdout, stderr } = io;
 
   const credentialStore =
@@ -33,18 +42,18 @@ export async function runPrompt(
   const authCheck = await createMoriModels(env, credentialStore).checkAuth(providerId);
   if (!authCheck) {
     stderr(unauthenticatedMessage(providerId));
-    return 1;
+    return { ok: false, exitCode: 1 };
   }
 
   const kernel = new BufferKernel<AgentMessage, AgentEvent>();
-  let agent;
+  let agent: Agent;
   try {
     agent = createMoriAgent(kernel, credentialStore, env, deps.streamFn, { root: deps.root });
   } catch (err) {
     // Unknown-model errors from createMoriAgent are already a plain, user-facing message
     // (see agent.ts) — surface it as CLI output, not an uncaught stack trace.
     stderr(`${err instanceof Error ? err.message : String(err)}\n`);
-    return 1;
+    return { ok: false, exitCode: 1 };
   }
 
   agent.subscribe((event) => {
@@ -53,12 +62,31 @@ export async function runPrompt(
     }
   });
 
+  return { ok: true, agent };
+}
+
+/**
+ * Wires a single prompt end to end and returns its exit code. This is the runtime-wiring
+ * concern of `runCli` (index.ts), split out from user-facing messages and argv parsing.
+ */
+export async function runPrompt(
+  prompt: string,
+  providerId: string,
+  env: NodeJS.ProcessEnv,
+  deps: RunCliDeps,
+  io: RunPromptIO,
+): Promise<number> {
+  const prepared = await prepareAgent(providerId, env, deps, io);
+  if (!prepared.ok) return prepared.exitCode;
+
+  const { agent } = prepared;
+
   await agent.prompt(prompt);
-  stdout("\n");
+  io.stdout("\n");
 
   const last = agent.state.messages.at(-1);
   if (last?.role === "assistant" && last.stopReason === "error") {
-    stderr(`mori: ${last.errorMessage ?? "unknown provider error"}\n`);
+    io.stderr(`mori: ${last.errorMessage ?? "unknown provider error"}\n`);
     return 1;
   }
 
