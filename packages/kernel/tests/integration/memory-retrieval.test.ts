@@ -80,13 +80,19 @@ async function seedMemory(
   });
 }
 
-async function seedObservation(id: string, summary: string, createdAt: string): Promise<void> {
+async function seedObservation(
+  id: string,
+  summary: string,
+  createdAt: string,
+  sourceProjectId?: string,
+): Promise<void> {
   await appendEvent({
     type: "observation.captured",
     projectId,
     scopeType: "project",
     scopeId: projectId,
     actor: "test",
+    ...(sourceProjectId ? { sourceProjectId } : {}),
     payload: {
       id,
       schemaVersion: CURRENT_SCHEMA_VERSION,
@@ -150,6 +156,16 @@ describe("retrieveMemoryContext", () => {
     const { observations } = retrieveMemoryContext(projectId, { nowIso: NOW });
     expect(observations.map((o) => o.id)).toContain("obs_recent");
     expect(observations.map((o) => o.id)).not.toContain("obs_stale");
+  });
+
+  it("excludes foreign (union-lane) observations from the short-term tail by default (#74)", async () => {
+    await seedObservation("obs_self", "self observation", NOW);
+    await seedObservation("obs_foreign", "foreign workspace observation", NOW, "proj_lane_bob");
+    await rebuildProjectProjection(projectId);
+
+    const { observations } = retrieveMemoryContext(projectId, { nowIso: NOW });
+    expect(observations.map((o) => o.id)).toContain("obs_self");
+    expect(observations.map((o) => o.id)).not.toContain("obs_foreign");
   });
 });
 
