@@ -45,6 +45,9 @@ afterEach(() => {
  * exist by then; here they must be created so the fixture is faithful. Shapes
  * mirror the pre-v12 DDL exactly (see src/storage/db.ts migrations v3/v4/v6/v10);
  * `IF NOT EXISTS` keeps them inert if an in-sequence CREATE also runs on upgrade.
+ * `observations` is seeded unconditionally (v6, same grade as tasks/handoffs/
+ * sessions) so v14's `ALTER TABLE observations ADD COLUMN` (#74) has a table to
+ * touch — it was left out of the v12 ALTER, which is the bug #74 fixes.
  */
 function seedPreV12ProjectionTables(
   db: Database.Database,
@@ -58,6 +61,10 @@ function seedPreV12ProjectionTables(
     CREATE TABLE IF NOT EXISTS handoffs (id TEXT PRIMARY KEY, data TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS sessions (
       id TEXT PRIMARY KEY, status TEXT, data TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS observations (
+      id TEXT PRIMARY KEY, session_id TEXT, signal TEXT,
+      created_at TEXT, data TEXT NOT NULL
     );
     CREATE VIRTUAL TABLE IF NOT EXISTS search_fts USING fts5(
       entity_id UNINDEXED, kind UNINDEXED, text, tokenize='unicode61'
@@ -369,8 +376,16 @@ describe("db v11 provenance columns", () => {
     const dbFile = path.join(tmp, "memorize.db");
     try {
       // A store fully migrated through v12 — no task_requests table. v13 only
-      // CREATEs a new table, so the fixture needs no other seeded tables.
+      // CREATEs a new table, so it needs no other seeded tables; v14 also runs
+      // from this pin (pre-v13) and ALTERs observations (#74), so that table
+      // must exist here too, same shape as the v6 DDL.
       const seed = new Database(dbFile);
+      seed.exec(`
+        CREATE TABLE observations (
+          id TEXT PRIMARY KEY, session_id TEXT, signal TEXT,
+          created_at TEXT, data TEXT NOT NULL
+        );
+      `);
       seed.pragma("user_version = 12"); // pre-v13; only v13 runs on open
       seed.close();
 

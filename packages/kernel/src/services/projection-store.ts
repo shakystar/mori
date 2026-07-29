@@ -6,7 +6,6 @@ import type {
   Decision,
   Handoff,
   MemoryIndex,
-  Observation,
   Project,
   Rule,
   Session,
@@ -21,7 +20,7 @@ import {
   reduceProjectState,
   SELF_LANE,
 } from "../projections/projector.js";
-import type { MemoryRecord, ProjectState } from "../projections/projector.js";
+import type { MemoryRecord, ObservationRecord, ProjectState } from "../projections/projector.js";
 import { getDb } from "../storage/db.js";
 import { listSegments } from "./segment-store.js";
 import { readEvents, readEventsUpTo } from "../storage/event-store.js";
@@ -412,8 +411,8 @@ export async function rebuildProjectProjection(
     }
 
     const insertObservation = db.prepare(
-      `INSERT INTO observations (id, session_id, signal, created_at, data)
-       VALUES (@id, @sessionId, @signal, @createdAt, @data)`,
+      `INSERT INTO observations (id, session_id, signal, created_at, source_project_id, data)
+       VALUES (@id, @sessionId, @signal, @createdAt, @sourceProjectId, @data)`,
     );
     for (const observation of Object.values(state.observations)) {
       insertObservation.run({
@@ -421,6 +420,7 @@ export async function rebuildProjectProjection(
         sessionId: observation.sessionId ?? null,
         signal: observation.signal,
         createdAt: observation.createdAt,
+        sourceProjectId: observation.sourceProjectId ?? null,
         data: JSON.stringify(observation),
       });
     }
@@ -753,13 +753,15 @@ export function listValidMemories(
 /**
  * Most recent observations (short-term tail), newest first. Old rows are
  * never deleted (append-only all the way down) — readers just take a recent
- * window.
+ * window. Self-lane by default (#74) — a foreign union writer's observations
+ * must not silently join the local short-term tail (SoT-040); `union` admits
+ * every writer's rows for a labelled shared channel.
  */
 export function listRecentObservations(
   projectId: string,
-  opts: { sessionId?: string; limit: number; sinceIso?: string },
-): Observation[] {
-  const clauses: string[] = [];
+  opts: { sessionId?: string; limit: number; sinceIso?: string; lane?: ProjectionLane },
+): ObservationRecord[] {
+  const clauses: string[] = [laneWhere(opts.lane ?? "self")];
   const params: unknown[] = [];
   if (opts.sessionId) {
     clauses.push("session_id = ?");
@@ -769,11 +771,11 @@ export function listRecentObservations(
     clauses.push("created_at >= ?");
     params.push(opts.sinceIso);
   }
-  const where = clauses.length ? ` WHERE ${clauses.join(" AND ")}` : "";
+  const where = ` WHERE ${clauses.join(" AND ")}`;
   const rows = db(projectId)
     .prepare(`SELECT data FROM observations${where} ORDER BY created_at DESC LIMIT ?`)
     .all(...params, opts.limit) as Array<{ data: string }>;
-  return parseAll<Observation>(rows);
+  return parseAll<ObservationRecord>(rows);
 }
 
 /**
