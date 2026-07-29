@@ -28,6 +28,10 @@ describe("getEmbedder", () => {
   });
 
   it("returns undefined when unconfigured, so the kernel gets an explicit off", () => {
-    expect(getEmbedder(undefined)).toBeUndefined();
+    // Resolve against an EMPTY env, not `undefined` — passing undefined would
+    // fire getEmbedder's `= resolveEmbeddingsConfig()` default and read the
+    // ambient process.env, so the case would flip on any machine that happens
+    // to export MEMORIZE_EMBEDDINGS_* (PR #90 review).
+    expect(getEmbedder(resolveEmbeddingsConfig({}))).toBeUndefined();
   });
 });
