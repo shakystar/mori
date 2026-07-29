@@ -1,0 +1,33 @@
+name: Notify merge
+
+on:
+  pull_request:
+    types: [closed]
+
+jobs:
+  slack:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post to Slack
+        env:
+          WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}
+          # PR 제목·작성자는 사용자 입력이다. run 스크립트에 ${{ }}로 직접 보간하면
+          # 제목에 넣은 셸 메타문자가 러너에서 실행된다 — 반드시 env를 거친다.
+          TITLE: ${{ github.event.pull_request.title }}
+          NUMBER: ${{ github.event.pull_request.number }}
+          URL: ${{ github.event.pull_request.html_url }}
+          REPO: ${{ github.repository }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          MERGED_BY: ${{ github.event.pull_request.merged_by.login }}
+        run: |
+          if [ -z "$WEBHOOK" ]; then
+            echo "SLACK_WEBHOOK_URL 미설정 — 알림을 건너뜁니다"
+            exit 0
+          fi
+          text="✅ 머지됨 · ${REPO}#${NUMBER} — ${TITLE}
+          ${HEAD_REF} → ${BASE_REF} (by ${MERGED_BY})
+          ${URL}"
+          curl -fsS -m 10 -X POST -H 'Content-Type: application/json' \
+            -d "$(jq -n --arg t "$text" '{text: $t}')" "$WEBHOOK"
