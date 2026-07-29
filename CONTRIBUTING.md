@@ -110,6 +110,21 @@ owner는 **세 조건을 모두 만족한 PR에만** `gh pr merge --auto --squas
 owner가 `gh pr review`를 쓰지 않고 코멘트로 판정하는 이유는, owner와 developer가 같은 GitHub
 계정이라 자기 PR에 대한 approve/request-changes가 거부되기 때문이다.
 
+#### 낡은 그린 체크 재검증 (`recheck-open-prs.yml`)
+
+`build-and-test`의 그린은 **그 PR이 마지막으로 갱신된 시점의 `main`** 에서 얻은 결과다.
+브랜치 보호가 `strict: false`라 `main`이 앞서 나가도 다시 돌지 않고, 텍스트 충돌이 없는
+시맨틱 충돌(시그니처 변경 등)은 아무 관문에도 걸리지 않는다. `main` push마다 도는
+`recheck-open-prs.yml`이 이 구멍을 메운다 — 열린 PR을 러너에서 현재 `main`과 직접 머지해
+`lint`/`format:check`/`build`/`typecheck:test`/`vitest run`을 돌리고, 레드면 **그 PR에
+코멘트를 남긴다**(코멘트 하나를 계속 갱신한다). 드래프트와 충돌 PR은 건너뛴다.
+
+**여전히 사람 몫인 것:** 이 워크플로는 required status check가 아니다. 레드로 판정돼도
+GitHub은 그 PR을 여전히 머지 가능으로 보고하고 `--auto`도 막지 않는다. 그래서 owner는
+머지 전에 **이 PR에 `🤖 [ci]` 재검증 코멘트가 레드로 붙어 있지 않은지** 확인한다.
+코멘트가 없거나 그린이면 통과다. 재검증 결과가 아직 없는 갓 만든 PR은 종전처럼
+CI run 시각과 `main` HEAD 시각을 대조한다.
+
 ## 사람이 개입하는 지점
 
 플릿은 기본적으로 자율 동작한다. 다음 세 가지만 사람 몫이다.

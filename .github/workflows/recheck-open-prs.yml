@@ -1,0 +1,282 @@
+name: Recheck open PRs
+
+# main이 앞서 나가도 열린 PR의 CI는 다시 돌지 않는다. 그래서 낡은 베이스에서 얻은 그린 체크가
+# 그대로 남고, 텍스트 충돌이 없는 시맨틱 충돌(시그니처 변경 등)은 아무 관문에도 걸리지 않는다
+# (#98 · PR #90/#96 사례). 이 워크플로는 main push마다 열린 PR을 러너에서 현재 main과 직접
+# 머지해 검증하고, 레드면 그 PR에 코멘트로 알린다.
+# required status check를 대체하지는 못한다 — 자세한 한계는 CONTRIBUTING.md "머지 권한" 참조.
+on:
+  push:
+    branches: [main]
+
+# main에 연속 push가 들어오면 앞선 스윕은 이미 낡은 base를 보고 있으므로 취소한다.
+concurrency:
+  group: recheck-open-prs-${{ github.ref }}
+  cancel-in-progress: true
+
+# 기본값에 기대지 않고 최소 권한을 명시한다. 코드는 읽기만 하고 결과는 PR 코멘트로만 남긴다.
+# (PR 브랜치에 push하거나 워크플로를 재실행하지 않으므로 contents: write / actions: write 불필요)
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  discover:
+    name: Select open PRs
+    runs-on: ubuntu-latest
+    outputs:
+      prs: ${{ steps.list.outputs.prs }}
+      count: ${{ steps.list.outputs.count }}
+    steps:
+      - name: List open PRs targeting main
+        id: list
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          BASE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          {
+            echo "## 재검증 대상 선정"
+            echo
+            echo "기준 base: \`main\` @ \`${BASE_SHA}\`"
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          numbers=$(gh api --paginate "repos/${REPO}/pulls?state=open&base=main&per_page=100" --jq '.[].number')
+
+          # 열린 PR이 0건이면 할 일이 없다 — 빈 목록으로 성공 종료한다(recheck 잡은 if로 스킵).
+          if [ -z "$numbers" ]; then
+            echo "열린 PR 0건 — 재검증할 것이 없습니다." >> "$GITHUB_STEP_SUMMARY"
+            echo "prs=[]" >> "$GITHUB_OUTPUT"
+            echo "count=0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # PR 하나의 분류가 실패해도 나머지 스윕은 계속돼야 한다. 함수 안에서 set -e로 죽어도
+          # 호출부의 `|| reason=...`이 그 실패를 잡으므로 루프 전체가 조용히 끝나지 않는다.
+          classify() {
+            local n="$1" json draft mergeable state attempt
+            for attempt in 1 2 3 4 5; do
+              json=$(gh api "repos/${REPO}/pulls/${n}")
+              draft=$(jq -r '.draft' <<< "$json")
+              mergeable=$(jq -r '.mergeable' <<< "$json")
+              state=$(jq -r '.mergeable_state' <<< "$json")
+
+              # 드래프트는 아직 리뷰 대상이 아니다.
+              if [ "$draft" = "true" ]; then
+                echo "skip:draft"
+                return 0
+              fi
+
+              # mergeable이 null이면 GitHub이 머지 가능성을 아직 계산 중이다(이 GET이 계산을 촉발한다).
+              if [ "$mergeable" != "null" ] && [ "$state" != "unknown" ]; then
+                case "$state" in
+                  # 충돌(dirty) 건은 developer가 merge로 해소할 몫이다. 여기서 손대봐야 실패만 쌓인다.
+                  dirty) echo "skip:conflict" ;;
+                  *) echo "run" ;;
+                esac
+                return 0
+              fi
+              sleep 5
+            done
+            echo "skip:mergeability-unknown"
+          }
+
+          sel=""
+          for n in $numbers; do
+            reason=$(classify "$n") || reason="error:classify-failed"
+            case "$reason" in
+              run)
+                sel="${sel} ${n}"
+                echo "- #${n} → 재검증" >> "$GITHUB_STEP_SUMMARY"
+                ;;
+              skip:*)
+                echo "- #${n} → 건너뜀 (${reason#skip:})" >> "$GITHUB_STEP_SUMMARY"
+                ;;
+              *)
+                echo "- #${n} → 실패 (${reason}) — 다음 push에서 다시 시도합니다" >> "$GITHUB_STEP_SUMMARY"
+                ;;
+            esac
+          done
+
+          prs=$(jq -c -n --arg s "$sel" '$s | split(" ") | map(select(length > 0)) | map(tonumber)')
+          count=$(jq -r 'length' <<< "$prs")
+          echo "prs=${prs}" >> "$GITHUB_OUTPUT"
+          echo "count=${count}" >> "$GITHUB_OUTPUT"
+
+  recheck:
+    name: Recheck PR
+    needs: discover
+    if: needs.discover.outputs.count != '0'
+    runs-on: ubuntu-latest
+    strategy:
+      # 한 PR이 레드/실패여도 나머지 PR 검증은 끝까지 돌아야 한다.
+      fail-fast: false
+      matrix:
+        pr: ${{ fromJSON(needs.discover.outputs.prs) }}
+    steps:
+      - name: Checkout current main
+        uses: actions/checkout@v4
+        with:
+          # PR head를 받아 러너에서 직접 머지하므로 전체 히스토리가 필요하다.
+          fetch-depth: 0
+
+      - name: Merge the PR into current main (on the runner)
+        id: merge
+        env:
+          PR: ${{ matrix.pr }}
+          BASE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          echo "### PR #${PR} — \`main\` @ \`${BASE_SHA}\` 기준 재검증" >> "$GITHUB_STEP_SUMMARY"
+
+          # GitHub의 refs/pull/N/merge(= merge_commit_sha)는 base가 앞서 나가도 다시 만들어지지
+          # 않는다. PR #96은 base가 네 번 움직인 뒤에도 07-29 12:46에 옛 base(5037d5a)로 만든
+          # 머지 커밋을 그대로 들고 있었다 — API는 그 상태로 mergeable=true/clean을 보고한다.
+          # 그 ref를 믿으면 이 워크플로가 막으려는 "낡은 베이스 검증"을 되풀이하므로, 머지는
+          # 러너에서 직접 만든다. 여기서 만든 머지는 러너 안의 로컬 main에만 존재하고
+          # 어디에도 push하지 않는다 (permissions는 contents: read다).
+          git fetch --no-tags --force origin "refs/pull/${PR}/head:refs/remotes/pull/${PR}/head"
+
+          if git -c user.name='github-actions[bot]' \
+                 -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+                 merge --no-edit --no-ff "refs/remotes/pull/${PR}/head"; then
+            echo "merged=true" >> "$GITHUB_OUTPUT"
+            echo "merge_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          else
+            # discover의 dirty 필터는 GitHub이 옛 base로 계산한 값이라 여기서 처음 드러나는
+            # 충돌이 있을 수 있다. 충돌 해소는 developer 몫이므로 검증하지 않고 알리기만 한다.
+            git merge --abort || true
+            echo "merged=false" >> "$GITHUB_OUTPUT"
+            echo "- 충돌: 현재 main과 텍스트 충돌이 있어 검증하지 못했습니다" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Setup pnpm
+        if: steps.merge.outputs.merged == 'true'
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.30.3
+
+      - name: Setup Node
+        if: steps.merge.outputs.merged == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.1
+          cache: pnpm
+
+      - name: Run repo checks
+        id: checks
+        if: steps.merge.outputs.merged == 'true'
+        env:
+          PR: ${{ matrix.pr }}
+          LOG: ${{ runner.temp }}/checks.log
+        run: |
+          set -uo pipefail
+          : > "$LOG"
+
+          # ci.yml의 build-and-test와 같은 명령·같은 순서다. 첫 실패에서 멈춘다.
+          cmds=(
+            "pnpm install --frozen-lockfile"
+            "pnpm lint"
+            "pnpm format:check"
+            "pnpm build"
+            "pnpm typecheck:test"
+            "pnpm exec vitest run"
+          )
+
+          failed=""
+          for cmd in "${cmds[@]}"; do
+            echo "::group::${cmd}"
+            # 고정 문자열이라 단어 분할이 의도된 동작이다(사용자 입력이 섞이지 않는다).
+            # shellcheck disable=SC2086
+            $cmd 2>&1 | tee -a "$LOG"
+            status=$?
+            echo "::endgroup::"
+            if [ "$status" -ne 0 ]; then
+              failed="$cmd"
+              break
+            fi
+          done
+
+          # 레드인 PR은 main의 문제가 아니므로 이 잡을 실패시키지 않는다. 발견은 PR 코멘트와
+          # 잡 요약으로 보고하고, 이 잡의 레드는 "워크플로 자체가 고장난 경우"로 남겨 둔다.
+          if [ -n "$failed" ]; then
+            echo "status=red" >> "$GITHUB_OUTPUT"
+            echo "failed=${failed}" >> "$GITHUB_OUTPUT"
+            echo "- 🔴 현재 main 기준 레드 — 실패한 명령: \`${failed}\`" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "status=green" >> "$GITHUB_OUTPUT"
+            echo "failed=" >> "$GITHUB_OUTPUT"
+            echo "- 🟢 현재 main 기준 그린" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Report result on the PR
+        if: ${{ !cancelled() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ matrix.pr }}
+          BASE_SHA: ${{ github.sha }}
+          MERGED: ${{ steps.merge.outputs.merged }}
+          MERGE_SHA: ${{ steps.merge.outputs.merge_sha }}
+          STATUS: ${{ steps.checks.outputs.status }}
+          FAILED: ${{ steps.checks.outputs.failed }}
+          LOG: ${{ runner.temp }}/checks.log
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          # 같은 PR에 main push마다 코멘트가 쌓이면 소음이다 — 이 마커로 기존 코멘트를 찾아 갱신한다.
+          marker="<!-- recheck-open-prs -->"
+          body="${RUNNER_TEMP}/body.md"
+
+          {
+            echo "🤖 [ci]"
+            echo
+            echo "$marker"
+            if [ "$MERGED" != "true" ]; then
+              echo "⚠️ **현재 \`main\` 기준 재검증을 하지 못했습니다 — 이 PR은 현재 main과 충돌합니다.**"
+              echo
+              echo "GitHub이 보고하는 \`mergeable\`은 PR이 마지막으로 갱신된 시점의 base로 계산된 값이라"
+              echo "\`clean\`으로 보일 수 있습니다. \`main\`을 merge로 받아넣어 해소해 주세요"
+              echo "(rebase·force push 금지)."
+            elif [ "$STATUS" = "red" ]; then
+              echo "🔴 **이 PR은 현재 main 기준으로 레드입니다.**"
+              echo
+              echo "실패한 명령: \`${FAILED}\`"
+              echo
+              echo "이 PR에 붙은 기존 CI 그린은 더 낡은 base의 결과입니다. main을 merge로 받아넣고"
+              echo "(rebase·force push 금지) 고친 뒤 다시 push하세요."
+              echo
+              echo "<details><summary>출력 마지막 부분</summary>"
+              echo
+              echo '```'
+              tail -c 3000 "$LOG" || true
+              echo '```'
+              echo
+              echo "</details>"
+            else
+              echo "🟢 이 PR은 현재 main 기준으로 그린입니다."
+            fi
+            echo
+            echo "- base: \`${BASE_SHA}\`"
+            echo "- 검증한 머지 커밋: \`${MERGE_SHA:-N/A}\`"
+            echo "- 실행 로그: ${RUN_URL}"
+          } > "$body"
+
+          existing=$(gh api --paginate "repos/${REPO}/issues/${PR}/comments?per_page=100" \
+            | jq -s -r --arg m "$marker" 'add | map(select(.body | contains($m))) | last | .id // empty')
+
+          if [ -n "$existing" ]; then
+            gh api --silent --method PATCH "repos/${REPO}/issues/comments/${existing}" -F "body=@${body}"
+            echo "- 코멘트 ${existing} 갱신" >> "$GITHUB_STEP_SUMMARY"
+          elif [ "$MERGED" != "true" ] || [ "$STATUS" = "red" ]; then
+            gh pr comment "$PR" -R "$REPO" --body-file "$body"
+            echo "- 코멘트 신설" >> "$GITHUB_STEP_SUMMARY"
+          else
+            # 그린인데 이력도 없으면 알릴 것이 없다 — 코멘트를 만들지 않는다.
+            echo "- 그린이고 기존 코멘트도 없어 코멘트를 남기지 않았습니다" >> "$GITHUB_STEP_SUMMARY"
+          fi
