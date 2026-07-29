@@ -1,94 +1,94 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from "vitest";
 
-import { CURRENT_SCHEMA_VERSION } from '../../src/domain/common.js';
-import { createConsolidatedMemory } from '../../src/domain/entities.js';
-import type { DomainEvent } from '../../src/domain/events.js';
-import { reduceProjectState } from '../../src/projections/projector.js';
+import { CURRENT_SCHEMA_VERSION } from "../../src/domain/common.js";
+import { createConsolidatedMemory } from "../../src/domain/entities.js";
+import type { DomainEvent } from "../../src/domain/events.js";
+import { reduceProjectState } from "../../src/projections/projector.js";
 
-const projectId = 'proj_retract_test1';
-const ts = '2026-07-01T00:00:00.000Z';
-const tsLater = '2026-07-01T01:00:00.000Z';
-const tsLater2 = '2026-07-01T02:00:00.000Z';
+const projectId = "proj_retract_test1";
+const ts = "2026-07-01T00:00:00.000Z";
+const tsLater = "2026-07-01T01:00:00.000Z";
+const tsLater2 = "2026-07-01T02:00:00.000Z";
 
 function evt(
-  overrides: Partial<DomainEvent> & Pick<DomainEvent, 'id' | 'type' | 'payload'>,
+  overrides: Partial<DomainEvent> & Pick<DomainEvent, "id" | "type" | "payload">,
 ): DomainEvent {
   return {
     schemaVersion: CURRENT_SCHEMA_VERSION,
     createdAt: ts,
     updatedAt: ts,
     projectId,
-    scopeType: 'session',
-    scopeId: 'sess_1',
-    actor: 'claude',
+    scopeType: "session",
+    scopeId: "sess_1",
+    actor: "claude",
     ...overrides,
   } as DomainEvent;
 }
 
-function mem(text = 'Use sqlite for storage') {
+function mem(text = "Use sqlite for storage") {
   return createConsolidatedMemory({
     projectId,
-    kind: 'decision',
+    kind: "decision",
     text,
     salience: 8,
-    sourceObservationIds: ['obs_x'],
+    sourceObservationIds: ["obs_x"],
   });
 }
 
-describe('projector — memory.retracted (tombstone, SoT-050)', () => {
-  it('closes the validity window without deleting and stamps retractedAt/By', () => {
+describe("projector — memory.retracted (tombstone, SoT-050)", () => {
+  it("closes the validity window without deleting and stamps retractedAt/By", () => {
     const memory = mem();
     const state = reduceProjectState([
-      evt({ id: 'evt_m1', type: 'memory.consolidated', payload: memory }),
+      evt({ id: "evt_m1", type: "memory.consolidated", payload: memory }),
       evt({
-        id: 'evt_r1',
-        type: 'memory.retracted',
+        id: "evt_r1",
+        type: "memory.retracted",
         createdAt: tsLater,
-        writer: 'alice',
-        payload: { retracts: memory.id, reason: 'no longer accurate' },
+        writer: "alice",
+        payload: { retracts: memory.id, reason: "no longer accurate" },
       }),
     ]);
 
     const retracted = state.memories[memory.id]!;
     // Row preserved, text intact — invalidate-not-delete.
-    expect(retracted.text).toBe('Use sqlite for storage');
+    expect(retracted.text).toBe("Use sqlite for storage");
     expect(retracted.invalidAt).toBe(tsLater);
     expect(retracted.retractedAt).toBe(tsLater);
-    expect(retracted.retractedBy).toBe('alice');
+    expect(retracted.retractedBy).toBe("alice");
     // No replacement, unlike supersede.
     expect(retracted.supersededBy).toBeUndefined();
   });
 
-  it('retract of an unknown id is a safe no-op', () => {
+  it("retract of an unknown id is a safe no-op", () => {
     const state = reduceProjectState([
       evt({
-        id: 'evt_r1',
-        type: 'memory.retracted',
-        payload: { retracts: 'mem_ghost' },
+        id: "evt_r1",
+        type: "memory.retracted",
+        payload: { retracts: "mem_ghost" },
       }),
     ]);
     expect(Object.keys(state.memories)).toHaveLength(0);
   });
 
-  it('retracting an already-superseded memory keeps the earlier window but marks it retracted', () => {
+  it("retracting an already-superseded memory keeps the earlier window but marks it retracted", () => {
     const memory = mem();
-    const replacement = mem('Use postgres instead');
+    const replacement = mem("Use postgres instead");
     const state = reduceProjectState([
-      evt({ id: 'evt_m1', type: 'memory.consolidated', payload: memory }),
-      evt({ id: 'evt_m2', type: 'memory.consolidated', payload: replacement }),
+      evt({ id: "evt_m1", type: "memory.consolidated", payload: memory }),
+      evt({ id: "evt_m2", type: "memory.consolidated", payload: replacement }),
       evt({
-        id: 'evt_s1',
-        type: 'memory.superseded',
+        id: "evt_s1",
+        type: "memory.superseded",
         createdAt: tsLater,
         payload: {
           supersedes: memory.id,
           supersededBy: replacement.id,
-          reason: 'reversed',
+          reason: "reversed",
         },
       }),
       evt({
-        id: 'evt_r1',
-        type: 'memory.retracted',
+        id: "evt_r1",
+        type: "memory.retracted",
         createdAt: tsLater2,
         payload: { retracts: memory.id },
       }),
@@ -102,21 +102,21 @@ describe('projector — memory.retracted (tombstone, SoT-050)', () => {
     expect(row.retractedAt).toBe(tsLater2);
   });
 
-  it('replaying the same retract event is idempotent', () => {
+  it("replaying the same retract event is idempotent", () => {
     const memory = mem();
     const retract = evt({
-      id: 'evt_r1',
-      type: 'memory.retracted',
+      id: "evt_r1",
+      type: "memory.retracted",
       createdAt: tsLater,
-      writer: 'alice',
+      writer: "alice",
       payload: { retracts: memory.id },
     });
     const once = reduceProjectState([
-      evt({ id: 'evt_m1', type: 'memory.consolidated', payload: memory }),
+      evt({ id: "evt_m1", type: "memory.consolidated", payload: memory }),
       retract,
     ]);
     const twice = reduceProjectState([
-      evt({ id: 'evt_m1', type: 'memory.consolidated', payload: memory }),
+      evt({ id: "evt_m1", type: "memory.consolidated", payload: memory }),
       retract,
       retract,
     ]);
@@ -124,16 +124,16 @@ describe('projector — memory.retracted (tombstone, SoT-050)', () => {
   });
 });
 
-describe('projector — memory.retracted lane guard (SoT-040/H030)', () => {
-  it('a foreign-lane retract does NOT retract a self memory', () => {
+describe("projector — memory.retracted lane guard (SoT-040/H030)", () => {
+  it("a foreign-lane retract does NOT retract a self memory", () => {
     const memory = mem(); // self lane (event has no sourceProjectId)
     const state = reduceProjectState([
-      evt({ id: 'evt_m1', type: 'memory.consolidated', payload: memory }),
+      evt({ id: "evt_m1", type: "memory.consolidated", payload: memory }),
       evt({
-        id: 'evt_r1',
-        type: 'memory.retracted',
+        id: "evt_r1",
+        type: "memory.retracted",
         createdAt: tsLater,
-        sourceProjectId: 'proj_foreign',
+        sourceProjectId: "proj_foreign",
         payload: { retracts: memory.id },
       }),
     ]);
@@ -142,123 +142,123 @@ describe('projector — memory.retracted lane guard (SoT-040/H030)', () => {
     expect(state.memories[memory.id]!.retractedAt).toBeUndefined();
   });
 
-  it('a self retract does NOT retract a foreign-lane memory', () => {
+  it("a self retract does NOT retract a foreign-lane memory", () => {
     const memory = mem();
     const state = reduceProjectState([
       evt({
-        id: 'evt_m1',
-        type: 'memory.consolidated',
-        sourceProjectId: 'proj_foreign',
+        id: "evt_m1",
+        type: "memory.consolidated",
+        sourceProjectId: "proj_foreign",
         payload: memory,
       }),
       evt({
-        id: 'evt_r1',
-        type: 'memory.retracted',
+        id: "evt_r1",
+        type: "memory.retracted",
         createdAt: tsLater,
         payload: { retracts: memory.id },
       }),
     ]);
     const row = state.memories[memory.id]!;
-    expect(row.sourceProjectId).toBe('proj_foreign');
+    expect(row.sourceProjectId).toBe("proj_foreign");
     expect(row.invalidAt).toBeUndefined();
     expect(row.retractedAt).toBeUndefined();
   });
 
-  it('a same-lane retract removes the foreign-lane memory', () => {
+  it("a same-lane retract removes the foreign-lane memory", () => {
     const memory = mem();
     const state = reduceProjectState([
       evt({
-        id: 'evt_m1',
-        type: 'memory.consolidated',
-        sourceProjectId: 'proj_foreign',
+        id: "evt_m1",
+        type: "memory.consolidated",
+        sourceProjectId: "proj_foreign",
         payload: memory,
       }),
       evt({
-        id: 'evt_r1',
-        type: 'memory.retracted',
+        id: "evt_r1",
+        type: "memory.retracted",
         createdAt: tsLater,
-        writer: 'bob',
-        sourceProjectId: 'proj_foreign',
+        writer: "bob",
+        sourceProjectId: "proj_foreign",
         payload: { retracts: memory.id },
       }),
     ]);
     const row = state.memories[memory.id]!;
     expect(row.invalidAt).toBe(tsLater);
     expect(row.retractedAt).toBe(tsLater);
-    expect(row.retractedBy).toBe('bob');
+    expect(row.retractedBy).toBe("bob");
   });
 });
 
-describe('projector — owner-only GLOBAL retract (W-c, SoT-040/050, H030)', () => {
-  it('an owner-stamped cross-lane retract removes a foreign-lane memory (my self retract of a teammate assertion)', () => {
+describe("projector — owner-only GLOBAL retract (W-c, SoT-040/050, H030)", () => {
+  it("an owner-stamped cross-lane retract removes a foreign-lane memory (my self retract of a teammate assertion)", () => {
     const memory = mem();
     const state = reduceProjectState([
       evt({
-        id: 'evt_m1',
-        type: 'memory.consolidated',
-        sourceProjectId: 'proj_foreign',
+        id: "evt_m1",
+        type: "memory.consolidated",
+        sourceProjectId: "proj_foreign",
         payload: memory,
       }),
       // Self-lane event (no sourceProjectId): the local owner retracting the
       // foreign writer's memory, role stamped at authoring.
       evt({
-        id: 'evt_r1',
-        type: 'memory.retracted',
+        id: "evt_r1",
+        type: "memory.retracted",
         createdAt: tsLater,
-        writer: 'alice',
-        payload: { retracts: memory.id, writerRole: 'owner' },
+        writer: "alice",
+        payload: { retracts: memory.id, writerRole: "owner" },
       }),
     ]);
     const row = state.memories[memory.id]!;
     expect(row.invalidAt).toBe(tsLater);
     expect(row.retractedAt).toBe(tsLater);
-    expect(row.retractedBy).toBe('alice');
+    expect(row.retractedBy).toBe("alice");
   });
 
   it("an owner-stamped foreign-lane retract removes MY self memory (the owner's retract replayed on the target's replica)", () => {
     const memory = mem();
     const state = reduceProjectState([
-      evt({ id: 'evt_m1', type: 'memory.consolidated', payload: memory }),
+      evt({ id: "evt_m1", type: "memory.consolidated", payload: memory }),
       evt({
-        id: 'evt_r1',
-        type: 'memory.retracted',
+        id: "evt_r1",
+        type: "memory.retracted",
         createdAt: tsLater,
-        writer: 'owner-alice',
-        sourceProjectId: 'proj_owner',
-        payload: { retracts: memory.id, writerRole: 'owner' },
+        writer: "owner-alice",
+        sourceProjectId: "proj_owner",
+        payload: { retracts: memory.id, writerRole: "owner" },
       }),
     ]);
     const row = state.memories[memory.id]!;
     expect(row.invalidAt).toBe(tsLater);
     expect(row.retractedAt).toBe(tsLater);
-    expect(row.retractedBy).toBe('owner-alice');
+    expect(row.retractedBy).toBe("owner-alice");
   });
 
-  it('a member-stamped cross-lane retract stays a no-op', () => {
+  it("a member-stamped cross-lane retract stays a no-op", () => {
     const memory = mem();
     const state = reduceProjectState([
-      evt({ id: 'evt_m1', type: 'memory.consolidated', payload: memory }),
+      evt({ id: "evt_m1", type: "memory.consolidated", payload: memory }),
       evt({
-        id: 'evt_r1',
-        type: 'memory.retracted',
+        id: "evt_r1",
+        type: "memory.retracted",
         createdAt: tsLater,
-        sourceProjectId: 'proj_member',
-        payload: { retracts: memory.id, writerRole: 'member' },
+        sourceProjectId: "proj_member",
+        payload: { retracts: memory.id, writerRole: "member" },
       }),
     ]);
     expect(state.memories[memory.id]!.invalidAt).toBeUndefined();
     expect(state.memories[memory.id]!.retractedAt).toBeUndefined();
   });
 
-  it('the stamp changes nothing for a same-lane retract (still applies)', () => {
+  it("the stamp changes nothing for a same-lane retract (still applies)", () => {
     const memory = mem();
     const state = reduceProjectState([
-      evt({ id: 'evt_m1', type: 'memory.consolidated', payload: memory }),
+      evt({ id: "evt_m1", type: "memory.consolidated", payload: memory }),
       evt({
-        id: 'evt_r1',
-        type: 'memory.retracted',
+        id: "evt_r1",
+        type: "memory.retracted",
         createdAt: tsLater,
-        payload: { retracts: memory.id, writerRole: 'owner' },
+        payload: { retracts: memory.id, writerRole: "owner" },
       }),
     ]);
     expect(state.memories[memory.id]!.retractedAt).toBe(tsLater);

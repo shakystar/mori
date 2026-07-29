@@ -13,7 +13,9 @@ describe("experimentalOpenAiOAuthEnabled", () => {
     // named turns it on.
     const off = [undefined, "", "  ", "0", "true", "TRUE", "yes", "on", "2"];
     for (const value of off) {
-      expect(experimentalOpenAiOAuthEnabled({ [EXPERIMENTAL_OPENAI_OAUTH_ENV]: value })).toBe(false);
+      expect(experimentalOpenAiOAuthEnabled({ [EXPERIMENTAL_OPENAI_OAUTH_ENV]: value })).toBe(
+        false,
+      );
     }
     expect(experimentalOpenAiOAuthEnabled({})).toBe(false);
   });

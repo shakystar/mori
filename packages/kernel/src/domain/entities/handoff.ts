@@ -1,7 +1,7 @@
-import type { BaseEntity, EntityId } from '../common.js';
-import { baseEntity } from './base.js';
+import type { BaseEntity, EntityId } from "../common.js";
+import { baseEntity } from "./base.js";
 
-export const CONFIDENCE_VALUES = ['low', 'medium', 'high'] as const;
+export const CONFIDENCE_VALUES = ["low", "medium", "high"] as const;
 export type Confidence = (typeof CONFIDENCE_VALUES)[number];
 
 export function isConfidence(value: string): value is Confidence {
@@ -38,7 +38,7 @@ export function createHandoff(input: {
   confidence?: Confidence;
 }): Handoff {
   return {
-    ...baseEntity('handoff'),
+    ...baseEntity("handoff"),
     projectId: input.projectId,
     taskId: input.taskId,
     fromActor: input.fromActor,
@@ -50,6 +50,6 @@ export function createHandoff(input: {
     requiredContextRefs: input.requiredContextRefs ?? [],
     warnings: input.warnings ?? [],
     unresolvedQuestions: input.unresolvedQuestions ?? [],
-    confidence: input.confidence ?? 'medium',
+    confidence: input.confidence ?? "medium",
   };
 }

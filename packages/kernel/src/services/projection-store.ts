@@ -1,4 +1,4 @@
-import type Database from 'better-sqlite3';
+import type Database from "better-sqlite3";
 
 import type {
   Checkpoint,
@@ -14,19 +14,19 @@ import type {
   TaskRequest,
   TaskRequestStatus,
   Workstream,
-} from '../domain/entities.js';
+} from "../domain/entities.js";
 import {
   buildMemoryIndex,
   parseLaneKey,
   reduceProjectState,
   SELF_LANE,
-} from '../projections/projector.js';
-import type { MemoryRecord, ProjectState } from '../projections/projector.js';
-import { getDb } from '../storage/db.js';
-import { listSegments } from './segment-store.js';
-import { readEvents, readEventsUpTo } from '../storage/event-store.js';
-import { readJson, writeJson } from '../storage/fs-utils.js';
-import { getTopicFile } from '../storage/path-resolver.js';
+} from "../projections/projector.js";
+import type { MemoryRecord, ProjectState } from "../projections/projector.js";
+import { getDb } from "../storage/db.js";
+import { listSegments } from "./segment-store.js";
+import { readEvents, readEventsUpTo } from "../storage/event-store.js";
+import { readJson, writeJson } from "../storage/fs-utils.js";
+import { getTopicFile } from "../storage/path-resolver.js";
 
 /**
  * The persisted shape of the memory index. buildMemoryIndex returns
@@ -42,13 +42,7 @@ export type PersistedMemoryIndex = MemoryIndex;
 
 /** Searchable entity kinds indexed into `search_fts`. */
 export type SearchKind =
-  | 'task'
-  | 'handoff'
-  | 'decision'
-  | 'checkpoint'
-  | 'topic'
-  | 'memory'
-  | 'segment';
+  "task" | "handoff" | "decision" | "checkpoint" | "topic" | "memory" | "segment";
 
 /**
  * Flatten an entity's human-text fields into a single FTS document. Skips
@@ -60,7 +54,7 @@ function searchText(parts: ReadonlyArray<string | undefined>): string {
   return parts
     .map((part) => part?.trim())
     .filter((part): part is string => Boolean(part))
-    .join('\n');
+    .join("\n");
 }
 
 /**
@@ -75,7 +69,7 @@ function laneColumn(compositeKey: string): string | null {
 }
 
 /** Read-side lane scope for {@link laneWhere}. */
-export type ProjectionLane = 'self' | 'union';
+export type ProjectionLane = "self" | "union";
 
 /**
  * The single private-vs-union lane predicate (M2, SoT-040). Every projection
@@ -87,23 +81,23 @@ export type ProjectionLane = 'self' | 'union';
  * result is a constant SQL boolean over a real column — no bound params, no
  * user input, safe to concatenate.
  */
-export function laneWhere(lane: ProjectionLane = 'self'): string {
-  return lane === 'self' ? 'source_project_id IS NULL' : '1 = 1';
+export function laneWhere(lane: ProjectionLane = "self"): string {
+  return lane === "self" ? "source_project_id IS NULL" : "1 = 1";
 }
 
-const SINGLETON_TABLES = ['projects', 'memory_index'] as const;
+const SINGLETON_TABLES = ["projects", "memory_index"] as const;
 const ENTITY_TABLES = [
-  'workstreams',
-  'tasks',
-  'task_requests',
-  'handoffs',
-  'checkpoints',
-  'decisions',
-  'rules',
-  'conflicts',
-  'sessions',
-  'observations',
-  'memories',
+  "workstreams",
+  "tasks",
+  "task_requests",
+  "handoffs",
+  "checkpoints",
+  "decisions",
+  "rules",
+  "conflicts",
+  "sessions",
+  "observations",
+  "memories",
 ] as const;
 
 /**
@@ -133,7 +127,7 @@ export interface RebuildProjectProjectionOptions {
 function latestImportedRules(rules: Record<string, Rule>): Rule[] {
   const byTitle = new Map<string, Rule>();
   for (const rule of Object.values(rules)) {
-    if (rule.source !== 'imported') continue;
+    if (rule.source !== "imported") continue;
     const prev = byTitle.get(rule.title);
     if (
       !prev ||
@@ -193,17 +187,11 @@ export async function rebuildProjectProjection(
             const content = await readJson<{ title?: string; body?: string }>(
               getTopicFile(projectId, rule.id),
             );
-            const text = searchText([
-              rule.title,
-              content?.title,
-              content?.body ?? rule.body,
-            ]);
+            const text = searchText([rule.title, content?.title, content?.body ?? rule.body]);
             return text ? { entityId: rule.id, text } : undefined;
           }),
         )
-      ).filter(
-        (row): row is { entityId: string; text: string } => row !== undefined,
-      )
+      ).filter((row): row is { entityId: string; text: string } => row !== undefined)
     : [];
 
   const db = getDb(projectId);
@@ -224,8 +212,8 @@ export async function rebuildProjectProjection(
       (
         db
           .prepare(
-            'SELECT id, last_accessed_at, injection_count FROM memories ' +
-              'WHERE last_accessed_at IS NOT NULL OR injection_count > 0',
+            "SELECT id, last_accessed_at, injection_count FROM memories " +
+              "WHERE last_accessed_at IS NOT NULL OR injection_count > 0",
           )
           .all() as Array<{
           id: string;
@@ -250,11 +238,11 @@ export async function rebuildProjectProjection(
     // the existing FTS rows survive (still valid — no searchable entity
     // changed) while the projection tables above are still fully rebuilt.
     if (reindexSearch) {
-      db.prepare('DELETE FROM search_fts').run();
+      db.prepare("DELETE FROM search_fts").run();
     }
     const insertSearch = db.prepare(
-      'INSERT INTO search_fts (entity_id, kind, source_project_id, text) ' +
-        'VALUES (@entityId, @kind, @sourceProjectId, @text)',
+      "INSERT INTO search_fts (entity_id, kind, source_project_id, text) " +
+        "VALUES (@entityId, @kind, @sourceProjectId, @text)",
     );
     const indexEntity = (
       entityId: string,
@@ -262,21 +250,20 @@ export async function rebuildProjectProjection(
       text: string,
       sourceProjectId: string | null = null,
     ) => {
-      if (reindexSearch && text)
-        insertSearch.run({ entityId, kind, sourceProjectId, text });
+      if (reindexSearch && text) insertSearch.run({ entityId, kind, sourceProjectId, text });
     };
 
-    db.prepare('INSERT INTO projects (id, data) VALUES (?, ?)').run(
+    db.prepare("INSERT INTO projects (id, data) VALUES (?, ?)").run(
       project.id,
       JSON.stringify(project),
     );
-    db.prepare('INSERT INTO memory_index (id, data) VALUES (?, ?)').run(
+    db.prepare("INSERT INTO memory_index (id, data) VALUES (?, ?)").run(
       project.id,
       JSON.stringify(memoryIndex),
     );
 
     const insertWorkstream = db.prepare(
-      'INSERT INTO workstreams (id, status, data) VALUES (@id, @status, @data)',
+      "INSERT INTO workstreams (id, status, data) VALUES (@id, @status, @data)",
     );
     for (const workstream of Object.values(state.workstreams)) {
       insertWorkstream.run({
@@ -303,7 +290,7 @@ export async function rebuildProjectProjection(
       });
       indexEntity(
         task.id,
-        'task',
+        "task",
         searchText([
           task.title,
           task.description,
@@ -331,7 +318,7 @@ export async function rebuildProjectProjection(
     }
 
     const insertHandoff = db.prepare(
-      'INSERT INTO handoffs (id, source_project_id, data) VALUES (@id, @sourceProjectId, @data)',
+      "INSERT INTO handoffs (id, source_project_id, data) VALUES (@id, @sourceProjectId, @data)",
     );
     for (const [key, handoff] of Object.entries(state.handoffs)) {
       const sourceProjectId = laneColumn(key);
@@ -342,7 +329,7 @@ export async function rebuildProjectProjection(
       });
       indexEntity(
         handoff.id,
-        'handoff',
+        "handoff",
         searchText([
           handoff.summary,
           handoff.nextAction,
@@ -355,9 +342,7 @@ export async function rebuildProjectProjection(
       );
     }
 
-    const insertCheckpoint = db.prepare(
-      'INSERT INTO checkpoints (id, data) VALUES (@id, @data)',
-    );
+    const insertCheckpoint = db.prepare("INSERT INTO checkpoints (id, data) VALUES (@id, @data)");
     for (const checkpoint of Object.values(state.checkpoints)) {
       insertCheckpoint.run({
         id: checkpoint.id,
@@ -365,7 +350,7 @@ export async function rebuildProjectProjection(
       });
       indexEntity(
         checkpoint.id,
-        'checkpoint',
+        "checkpoint",
         searchText([
           checkpoint.summary,
           ...(checkpoint.taskUpdates ?? []),
@@ -376,7 +361,7 @@ export async function rebuildProjectProjection(
     }
 
     const insertDecision = db.prepare(
-      'INSERT INTO decisions (id, status, data) VALUES (@id, @status, @data)',
+      "INSERT INTO decisions (id, status, data) VALUES (@id, @status, @data)",
     );
     for (const decision of Object.values(state.decisions)) {
       insertDecision.run({
@@ -386,13 +371,13 @@ export async function rebuildProjectProjection(
       });
       indexEntity(
         decision.id,
-        'decision',
+        "decision",
         searchText([decision.title, decision.decision, decision.rationale]),
       );
     }
 
     const insertRule = db.prepare(
-      'INSERT INTO rules (id, source, data) VALUES (@id, @source, @data)',
+      "INSERT INTO rules (id, source, data) VALUES (@id, @source, @data)",
     );
     for (const rule of Object.values(state.rules)) {
       insertRule.run({
@@ -403,7 +388,7 @@ export async function rebuildProjectProjection(
     }
 
     const insertConflict = db.prepare(
-      'INSERT INTO conflicts (id, status, data) VALUES (@id, @status, @data)',
+      "INSERT INTO conflicts (id, status, data) VALUES (@id, @status, @data)",
     );
     for (const conflict of Object.values(state.conflicts)) {
       insertConflict.run({
@@ -414,8 +399,8 @@ export async function rebuildProjectProjection(
     }
 
     const insertSession = db.prepare(
-      'INSERT INTO sessions (id, status, source_project_id, data) ' +
-        'VALUES (@id, @status, @sourceProjectId, @data)',
+      "INSERT INTO sessions (id, status, source_project_id, data) " +
+        "VALUES (@id, @status, @sourceProjectId, @data)",
     );
     for (const [key, session] of Object.entries(state.sessions)) {
       insertSession.run({
@@ -475,17 +460,12 @@ export async function rebuildProjectProjection(
       // even raw searchProject (which has no valid-only filter) must not surface
       // it. The row + event survive for audit and reversibility.
       if (!memory.dedupedBy && !memory.retractedAt) {
-        indexEntity(
-          memory.id,
-          'memory',
-          searchText([memory.text]),
-          sourceProjectId,
-        );
+        indexEntity(memory.id, "memory", searchText([memory.text]), sourceProjectId);
       }
     }
 
     for (const topic of topicSearchRows) {
-      indexEntity(topic.entityId, 'topic', topic.text);
+      indexEntity(topic.entityId, "topic", topic.text);
     }
 
     // Raw transcript segments (v10) live in a DERIVED table the projector does
@@ -493,7 +473,7 @@ export async function rebuildProjectProjection(
     // from the segments table on every reindex (same pattern as topicSearchRows
     // reading external .md content). Empty table => zero rows => byte-identical.
     for (const seg of listSegments(projectId)) {
-      indexEntity(seg.id, 'segment', seg.text, seg.sourceProjectId ?? null);
+      indexEntity(seg.id, "segment", seg.text, seg.sourceProjectId ?? null);
     }
   });
   writeAll();
@@ -503,7 +483,7 @@ export async function rebuildProjectProjection(
   // artifacts on disk, not a projection table.
   await Promise.all(
     Object.values(state.rules)
-      .filter((rule) => rule.source === 'imported')
+      .filter((rule) => rule.source === "imported")
       .map((rule) =>
         writeJson(getTopicFile(projectId, rule.id), {
           title: rule.title,
@@ -529,9 +509,8 @@ function db(projectId: string): Database.Database {
 }
 
 export function getProjectProjection(projectId: string): Project | undefined {
-  const row = db(projectId)
-    .prepare('SELECT data FROM projects WHERE id = ?')
-    .get(projectId) as { data: string } | undefined;
+  const row = db(projectId).prepare("SELECT data FROM projects WHERE id = ?").get(projectId) as
+    { data: string } | undefined;
   return parse<Project>(row);
 }
 
@@ -544,61 +523,51 @@ export async function getProjectStateAtRevision(
   projectId: string,
   upToEventId: string,
 ): Promise<ProjectState> {
-  return reduceProjectState(
-    await readEventsUpTo(projectId, upToEventId),
-    projectId,
-  );
+  return reduceProjectState(await readEventsUpTo(projectId, upToEventId), projectId);
 }
 
-export function getMemoryIndex(
-  projectId: string,
-): PersistedMemoryIndex | undefined {
-  const row = db(projectId)
-    .prepare('SELECT data FROM memory_index WHERE id = ?')
-    .get(projectId) as { data: string } | undefined;
+export function getMemoryIndex(projectId: string): PersistedMemoryIndex | undefined {
+  const row = db(projectId).prepare("SELECT data FROM memory_index WHERE id = ?").get(projectId) as
+    { data: string } | undefined;
   return parse<PersistedMemoryIndex>(row);
 }
 
-export function getWorkstream(
-  projectId: string,
-  workstreamId: string,
-): Workstream | undefined {
+export function getWorkstream(projectId: string, workstreamId: string): Workstream | undefined {
   const row = db(projectId)
-    .prepare('SELECT data FROM workstreams WHERE id = ?')
+    .prepare("SELECT data FROM workstreams WHERE id = ?")
     .get(workstreamId) as { data: string } | undefined;
   return parse<Workstream>(row);
 }
 
 export function getTask(projectId: string, taskId: string): Task | undefined {
-  const row = db(projectId)
-    .prepare('SELECT data FROM tasks WHERE id = ?')
-    .get(taskId) as { data: string } | undefined;
+  const row = db(projectId).prepare("SELECT data FROM tasks WHERE id = ?").get(taskId) as
+    { data: string } | undefined;
   return parse<Task>(row);
 }
 
 export interface ListTasksFilters {
-  status?: Task['status'];
+  status?: Task["status"];
   workstreamId?: string;
 }
 
 export function listTasks(
   projectId: string,
   filters: ListTasksFilters = {},
-  lane: ProjectionLane = 'self',
+  lane: ProjectionLane = "self",
 ): Task[] {
   // laneWhere is always present, so the WHERE is unconditional; self-lane
   // (default) keeps a single-writer store's list byte-identical to pre-M2.
   const clauses: string[] = [laneWhere(lane)];
   const params: unknown[] = [];
   if (filters.status) {
-    clauses.push('status = ?');
+    clauses.push("status = ?");
     params.push(filters.status);
   }
   if (filters.workstreamId) {
-    clauses.push('workstream_id = ?');
+    clauses.push("workstream_id = ?");
     params.push(filters.workstreamId);
   }
-  const where = ` WHERE ${clauses.join(' AND ')}`;
+  const where = ` WHERE ${clauses.join(" AND ")}`;
   const rows = db(projectId)
     .prepare(`SELECT data FROM tasks${where} ORDER BY created_at ASC`)
     .all(...params) as Array<{ data: string }>;
@@ -610,13 +579,13 @@ export async function getTaskRequest(
   requestId: string,
 ): Promise<TaskRequest | undefined> {
   const row = db(projectId)
-    .prepare('SELECT data FROM task_requests WHERE id = ?')
+    .prepare("SELECT data FROM task_requests WHERE id = ?")
     .get(requestId) as { data: string } | undefined;
   return parse<TaskRequest>(row);
 }
 
 export interface ListTaskRequestsFilters {
-  direction?: 'inbound' | 'outbound';
+  direction?: "inbound" | "outbound";
   status?: TaskRequestStatus;
 }
 
@@ -631,47 +600,39 @@ export async function listTaskRequests(
 ): Promise<TaskRequest[]> {
   const clauses: string[] = [];
   const params: Record<string, string> = {};
-  if (filters.direction === 'inbound') {
-    clauses.push('target_project_id = @self');
+  if (filters.direction === "inbound") {
+    clauses.push("target_project_id = @self");
     params.self = projectId;
-  } else if (filters.direction === 'outbound') {
-    clauses.push('source_project_id IS NULL');
+  } else if (filters.direction === "outbound") {
+    clauses.push("source_project_id IS NULL");
   }
   if (filters.status) {
-    clauses.push('status = @status');
+    clauses.push("status = @status");
     params.status = filters.status;
   }
-  const where = clauses.length > 0 ? ` WHERE ${clauses.join(' AND ')}` : '';
+  const where = clauses.length > 0 ? ` WHERE ${clauses.join(" AND ")}` : "";
   const rows = db(projectId)
     .prepare(`SELECT data FROM task_requests${where} ORDER BY created_at ASC`)
     .all(params) as Array<{ data: string }>;
   return parseAll<TaskRequest>(rows);
 }
 
-export function getHandoff(
-  projectId: string,
-  handoffId: string,
-): Handoff | undefined {
-  const row = db(projectId)
-    .prepare('SELECT data FROM handoffs WHERE id = ?')
-    .get(handoffId) as { data: string } | undefined;
+export function getHandoff(projectId: string, handoffId: string): Handoff | undefined {
+  const row = db(projectId).prepare("SELECT data FROM handoffs WHERE id = ?").get(handoffId) as
+    { data: string } | undefined;
   return parse<Handoff>(row);
 }
 
-export function getCheckpoint(
-  projectId: string,
-  checkpointId: string,
-): Checkpoint | undefined {
+export function getCheckpoint(projectId: string, checkpointId: string): Checkpoint | undefined {
   const row = db(projectId)
-    .prepare('SELECT data FROM checkpoints WHERE id = ?')
+    .prepare("SELECT data FROM checkpoints WHERE id = ?")
     .get(checkpointId) as { data: string } | undefined;
   return parse<Checkpoint>(row);
 }
 
 export function getRule(projectId: string, ruleId: string): Rule | undefined {
-  const row = db(projectId)
-    .prepare('SELECT data FROM rules WHERE id = ?')
-    .get(ruleId) as { data: string } | undefined;
+  const row = db(projectId).prepare("SELECT data FROM rules WHERE id = ?").get(ruleId) as
+    { data: string } | undefined;
   return parse<Rule>(row);
 }
 
@@ -687,13 +648,9 @@ export function listImportedRules(projectId: string): Rule[] {
   return parseAll<Rule>(rows);
 }
 
-export function getDecision(
-  projectId: string,
-  decisionId: string,
-): Decision | undefined {
-  const row = db(projectId)
-    .prepare('SELECT data FROM decisions WHERE id = ?')
-    .get(decisionId) as { data: string } | undefined;
+export function getDecision(projectId: string, decisionId: string): Decision | undefined {
+  const row = db(projectId).prepare("SELECT data FROM decisions WHERE id = ?").get(decisionId) as
+    { data: string } | undefined;
   return parse<Decision>(row);
 }
 
@@ -707,22 +664,16 @@ export function listDecisions(
   projectId: string,
   opts: { includeSuperseded?: boolean } = {},
 ): Decision[] {
-  const where = opts.includeSuperseded ? '' : " WHERE status = 'accepted'";
-  const rows = db(projectId)
-    .prepare(`SELECT data FROM decisions${where}`)
-    .all() as Array<{ data: string }>;
-  return parseAll<Decision>(rows).sort((a, b) =>
-    a.createdAt < b.createdAt ? 1 : -1,
-  );
+  const where = opts.includeSuperseded ? "" : " WHERE status = 'accepted'";
+  const rows = db(projectId).prepare(`SELECT data FROM decisions${where}`).all() as Array<{
+    data: string;
+  }>;
+  return parseAll<Decision>(rows).sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
 }
 
-export function getConflict(
-  projectId: string,
-  conflictId: string,
-): Conflict | undefined {
-  const row = db(projectId)
-    .prepare('SELECT data FROM conflicts WHERE id = ?')
-    .get(conflictId) as { data: string } | undefined;
+export function getConflict(projectId: string, conflictId: string): Conflict | undefined {
+  const row = db(projectId).prepare("SELECT data FROM conflicts WHERE id = ?").get(conflictId) as
+    { data: string } | undefined;
   return parse<Conflict>(row);
 }
 
@@ -733,23 +684,16 @@ export function listOpenConflicts(projectId: string): Conflict[] {
   return parseAll<Conflict>(rows);
 }
 
-export function listSessions(
-  projectId: string,
-  lane: ProjectionLane = 'self',
-): Session[] {
+export function listSessions(projectId: string, lane: ProjectionLane = "self"): Session[] {
   const rows = db(projectId)
     .prepare(`SELECT data FROM sessions WHERE ${laneWhere(lane)}`)
     .all() as Array<{ data: string }>;
   return parseAll<Session>(rows);
 }
 
-export function getSession(
-  projectId: string,
-  sessionId: string,
-): Session | undefined {
-  const row = db(projectId)
-    .prepare('SELECT data FROM sessions WHERE id = ?')
-    .get(sessionId) as { data: string } | undefined;
+export function getSession(projectId: string, sessionId: string): Session | undefined {
+  const row = db(projectId).prepare("SELECT data FROM sessions WHERE id = ?").get(sessionId) as
+    { data: string } | undefined;
   return parse<Session>(row);
 }
 
@@ -769,12 +713,9 @@ export interface ValidMemoryRow {
  * `memory show` can surface the reinforcement signal. Returns undefined when
  * no memory with that id exists in the project.
  */
-export function getMemory(
-  projectId: string,
-  memoryId: string,
-): ValidMemoryRow | undefined {
+export function getMemory(projectId: string, memoryId: string): ValidMemoryRow | undefined {
   const row = db(projectId)
-    .prepare('SELECT data, last_accessed_at FROM memories WHERE id = ?')
+    .prepare("SELECT data, last_accessed_at FROM memories WHERE id = ?")
     .get(memoryId) as { data: string; last_accessed_at: string | null } | undefined;
   if (!row) return undefined;
   return {
@@ -791,7 +732,7 @@ export function getMemory(
  */
 export function listValidMemories(
   projectId: string,
-  lane: ProjectionLane = 'self',
+  lane: ProjectionLane = "self",
 ): ValidMemoryRow[] {
   const rows = db(projectId)
     .prepare(
@@ -817,18 +758,16 @@ export function listRecentObservations(
   const clauses: string[] = [];
   const params: unknown[] = [];
   if (opts.sessionId) {
-    clauses.push('session_id = ?');
+    clauses.push("session_id = ?");
     params.push(opts.sessionId);
   }
   if (opts.sinceIso) {
-    clauses.push('created_at >= ?');
+    clauses.push("created_at >= ?");
     params.push(opts.sinceIso);
   }
-  const where = clauses.length ? ` WHERE ${clauses.join(' AND ')}` : '';
+  const where = clauses.length ? ` WHERE ${clauses.join(" AND ")}` : "";
   const rows = db(projectId)
-    .prepare(
-      `SELECT data FROM observations${where} ORDER BY created_at DESC LIMIT ?`,
-    )
+    .prepare(`SELECT data FROM observations${where} ORDER BY created_at DESC LIMIT ?`)
     .all(...params, opts.limit) as Array<{ data: string }>;
   return parseAll<Observation>(rows);
 }
@@ -851,8 +790,8 @@ export function touchMemoryAccess(
   // #62 — startup injection is also an injection: bump the telemetry counter
   // in the same statement as the reinforcement stamp.
   const update = database.prepare(
-    'UPDATE memories SET last_accessed_at = ?, ' +
-      'injection_count = injection_count + 1 WHERE id = ?',
+    "UPDATE memories SET last_accessed_at = ?, " +
+      "injection_count = injection_count + 1 WHERE id = ?",
   );
   database.transaction(() => {
     for (const memoryId of memoryIds) {
@@ -869,14 +808,11 @@ export function touchMemoryAccess(
  * best-effort grade: projection-level UPDATE, carried over across routine
  * rebuilds, reset by a from-scratch replay.
  */
-export function bumpMemoryInjections(
-  projectId: string,
-  memoryIds: string[],
-): void {
+export function bumpMemoryInjections(projectId: string, memoryIds: string[]): void {
   if (memoryIds.length === 0) return;
   const database = db(projectId);
   const update = database.prepare(
-    'UPDATE memories SET injection_count = injection_count + 1 WHERE id = ?',
+    "UPDATE memories SET injection_count = injection_count + 1 WHERE id = ?",
   );
   database.transaction(() => {
     for (const memoryId of memoryIds) {

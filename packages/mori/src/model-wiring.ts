@@ -80,7 +80,10 @@ export function moriProviderIds(env: NodeJS.ProcessEnv): readonly string[] {
  * while `openai-codex` — whose only auth method is OAuth — reads the credential
  * `mori login` just stored.
  */
-export function createMoriModels(env: NodeJS.ProcessEnv, credentialStore: CredentialStore): MutableModels {
+export function createMoriModels(
+  env: NodeJS.ProcessEnv,
+  credentialStore: CredentialStore,
+): MutableModels {
   const providers = moriProviders(env);
   const oauthCapableIds = new Set(
     providers.filter((provider) => provider.auth.oauth).map((provider) => provider.id),

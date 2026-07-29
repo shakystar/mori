@@ -4,7 +4,10 @@
  */
 
 /** Wraps `text` as the single content block an `AgentTool.execute` returns, alongside `details`. */
-export function textResult<D>(text: string, details: D): { content: [{ type: "text"; text: string }]; details: D } {
+export function textResult<D>(
+  text: string,
+  details: D,
+): { content: [{ type: "text"; text: string }]; details: D } {
   return { content: [{ type: "text", text }], details };
 }
 

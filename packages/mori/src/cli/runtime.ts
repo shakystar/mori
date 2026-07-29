@@ -48,10 +48,7 @@ export async function runPrompt(
   }
 
   agent.subscribe((event) => {
-    if (
-      event.type === "message_update" &&
-      event.assistantMessageEvent.type === "text_delta"
-    ) {
+    if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
       stdout(event.assistantMessageEvent.delta);
     }
   });

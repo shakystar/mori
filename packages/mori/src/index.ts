@@ -5,7 +5,11 @@ import { unauthenticatedMessage, usageMessage } from "./cli/messages.js";
 import { parseCliCommand } from "./cli/parse-args.js";
 import { runPrompt } from "./cli/runtime.js";
 import type { RunCliDeps } from "./cli/types.js";
-import { resolveProviderSelection, supportedProviderIds, unknownProviderMessage } from "./provider-selection.js";
+import {
+  resolveProviderSelection,
+  supportedProviderIds,
+  unknownProviderMessage,
+} from "./provider-selection.js";
 
 export { unauthenticatedMessage };
 export type { RunCliDeps };
@@ -24,7 +28,8 @@ export async function runCli(
   // selects. Either way the id is validated against the providers actually registered for
   // this environment (see `moriProviders`) before it reaches pi-ai, so a gated-off
   // experimental provider is rejected here exactly like a typo would be.
-  const named = command.kind === "login" || command.kind === "logout" ? command.providerId : undefined;
+  const named =
+    command.kind === "login" || command.kind === "logout" ? command.providerId : undefined;
   const providerId = named ?? resolveProviderSelection(env).providerId;
   if (!supportedProviderIds(env).includes(providerId)) {
     stderr(unknownProviderMessage(providerId, env));

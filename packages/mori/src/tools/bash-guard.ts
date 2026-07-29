@@ -31,7 +31,8 @@ export const BASH_BLOCKED_PATTERNS: readonly BlockedCommandPattern[] = [
     id: "rm-root",
     description: "deletes the filesystem root or the home directory",
     // `rm` with any flags, targeting `/`, `/*`, `~`, `~/*`, `$HOME` or `${HOME}`.
-    pattern: /\brm\b(?:\s+-{1,2}\S+)*\s+(?:--\s+)?(?:\/|\/\*|~|~\/\*|\$HOME|\$\{HOME\})(?=\s|$|;|&|\|)/,
+    pattern:
+      /\brm\b(?:\s+-{1,2}\S+)*\s+(?:--\s+)?(?:\/|\/\*|~|~\/\*|\$HOME|\$\{HOME\})(?=\s|$|;|&|\|)/,
   },
   {
     id: "rm-no-preserve-root",
@@ -64,7 +65,8 @@ export const BASH_BLOCKED_PATTERNS: readonly BlockedCommandPattern[] = [
     description: "fork bomb — spawns processes until the machine stops responding",
     // `:(){ :|:& };:` and renamed variants; the backreference ties the three uses
     // of the same function name together.
-    pattern: /(?:^|[\s;&|])([A-Za-z_.:][\w.:]*)\s*\(\s*\)\s*\{\s*\1\s*\|\s*\1\s*&\s*;?\s*\}\s*;?\s*\1/,
+    pattern:
+      /(?:^|[\s;&|])([A-Za-z_.:][\w.:]*)\s*\(\s*\)\s*\{\s*\1\s*\|\s*\1\s*&\s*;?\s*\}\s*;?\s*\1/,
   },
 ];
 

@@ -26,7 +26,13 @@ afterEach(() => {
 
 /** Minimal `beforeToolCall` context — the hook only reads `toolCall` and `args`. */
 function toolCallContext(name: string, args: unknown): BeforeToolCallContext {
-  const toolCall = { type: "toolCall" as const, id: "call-1", name, arguments: args as Record<string, any> };
+  const toolCall = {
+    type: "toolCall" as const,
+    id: "call-1",
+    name,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- upstream toolCall.arguments type is Record<string, any>
+    arguments: args as Record<string, any>,
+  };
   const assistantMessage = {
     role: "assistant",
     content: [toolCall],
@@ -49,7 +55,10 @@ function isRunning(pid: number): boolean {
     return false;
   }
   // Field 3 is the state character; the comm field before it may contain spaces.
-  const state = stat.slice(stat.lastIndexOf(")") + 2).trim().charAt(0);
+  const state = stat
+    .slice(stat.lastIndexOf(")") + 2)
+    .trim()
+    .charAt(0);
   return state !== "Z" && state !== "X";
 }
 
@@ -197,7 +206,13 @@ describe("runBash", () => {
 describe("bash blocklist", () => {
   /** One sample command per blocklist id. Every id must appear here. */
   const samples: Record<string, string[]> = {
-    "rm-root": ["rm -rf /", "sudo rm -rf --no-preserve-root /", "rm -r -f /*", "rm -rf ~", "rm -fr $HOME"],
+    "rm-root": [
+      "rm -rf /",
+      "sudo rm -rf --no-preserve-root /",
+      "rm -r -f /*",
+      "rm -rf ~",
+      "rm -fr $HOME",
+    ],
     "rm-no-preserve-root": ["rm -rf --no-preserve-root /tmp/x"],
     "rm-system-directory": ["rm -rf /etc", "rm -rf /usr/lib", "rm -r /boot"],
     "dd-to-disk-device": ["dd if=/dev/zero of=/dev/sda bs=1M", "dd if=x.img of=/dev/nvme0n1"],
@@ -207,7 +222,9 @@ describe("bash blocklist", () => {
   };
 
   it("has a test case for every blocked pattern", () => {
-    expect(Object.keys(samples).sort()).toEqual(BASH_BLOCKED_PATTERNS.map((entry) => entry.id).sort());
+    expect(Object.keys(samples).sort()).toEqual(
+      BASH_BLOCKED_PATTERNS.map((entry) => entry.id).sort(),
+    );
   });
 
   for (const entry of BASH_BLOCKED_PATTERNS) {
@@ -346,6 +363,7 @@ describe("beforeToolCall wiring in the agent loop", () => {
     const agent = new Agent({
       initialState: {
         systemPrompt: "test",
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- stub model bypasses upstream Model's full shape
         model: { id: "test-model", api: "anthropic-messages", provider: "anthropic" } as any,
         tools: [stubBash],
       },

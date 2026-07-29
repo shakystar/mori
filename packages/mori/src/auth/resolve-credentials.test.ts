@@ -6,7 +6,10 @@ import { apiKeyEnvVarFor, hidingOAuth, resolveCredentials } from "./resolve-cred
 
 const ONE_HOUR_MS = 60 * 60 * 1000;
 
-async function storeWith(providerId: string, credential: Credential): Promise<InMemoryCredentialStore> {
+async function storeWith(
+  providerId: string,
+  credential: Credential,
+): Promise<InMemoryCredentialStore> {
   const store = new InMemoryCredentialStore();
   await store.modify(providerId, async () => credential);
   return store;
@@ -21,15 +24,27 @@ describe("resolveCredentials", () => {
       expires: Date.now() + ONE_HOUR_MS,
     });
 
-    const result = await resolveCredentials({ ANTHROPIC_API_KEY: "sk-ant-env" }, store, "anthropic");
+    const result = await resolveCredentials(
+      { ANTHROPIC_API_KEY: "sk-ant-env" },
+      store,
+      "anthropic",
+    );
 
-    expect(result).toEqual({ kind: "oauth", accessToken: "at-valid", expiresAt: expect.any(Number) });
+    expect(result).toEqual({
+      kind: "oauth",
+      accessToken: "at-valid",
+      expiresAt: expect.any(Number),
+    });
   });
 
   it("falls back to ANTHROPIC_API_KEY when the store is empty", async () => {
     const store = new InMemoryCredentialStore();
 
-    const result = await resolveCredentials({ ANTHROPIC_API_KEY: "sk-ant-env" }, store, "anthropic");
+    const result = await resolveCredentials(
+      { ANTHROPIC_API_KEY: "sk-ant-env" },
+      store,
+      "anthropic",
+    );
 
     expect(result).toEqual({ kind: "apiKey", apiKey: "sk-ant-env" });
   });
@@ -42,7 +57,11 @@ describe("resolveCredentials", () => {
       expires: Date.now() - ONE_HOUR_MS,
     });
 
-    const result = await resolveCredentials({ ANTHROPIC_API_KEY: "sk-ant-env" }, store, "anthropic");
+    const result = await resolveCredentials(
+      { ANTHROPIC_API_KEY: "sk-ant-env" },
+      store,
+      "anthropic",
+    );
 
     expect(result).toEqual({ kind: "apiKey", apiKey: "sk-ant-env" });
   });
@@ -91,7 +110,11 @@ describe("resolveCredentials", () => {
 
     const result = await resolveCredentials({ OPENAI_API_KEY: "sk-oai-env" }, store, "openai");
 
-    expect(result).toEqual({ kind: "oauth", accessToken: "at-valid", expiresAt: expect.any(Number) });
+    expect(result).toEqual({
+      kind: "oauth",
+      accessToken: "at-valid",
+      expiresAt: expect.any(Number),
+    });
   });
 
   it("returns null for a provider with no known API key env var and nothing stored", async () => {

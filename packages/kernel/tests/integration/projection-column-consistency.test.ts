@@ -1,8 +1,8 @@
-import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
   createConflict,
@@ -12,15 +12,15 @@ import {
   createSession,
   createTask,
   createWorkstream,
-} from '../../src/domain/entities.js';
-import { rebuildProjectProjection } from '../../src/services/projection-store.js';
-import { appendEvent } from '../../src/storage/event-store.js';
-import { closeAll, getDb } from '../../src/storage/db.js';
+} from "../../src/domain/entities.js";
+import { rebuildProjectProjection } from "../../src/services/projection-store.js";
+import { appendEvent } from "../../src/storage/event-store.js";
+import { closeAll, getDb } from "../../src/storage/db.js";
 
 let sandbox: string;
 
 beforeEach(async () => {
-  sandbox = await mkdtemp(join(tmpdir(), 'mori-pcol-'));
+  sandbox = await mkdtemp(join(tmpdir(), "mori-pcol-"));
   process.env.MEMORIZE_ROOT = sandbox;
 });
 
@@ -42,26 +42,26 @@ afterEach(async () => {
  * not yet ported here, so this drives the same shapes directly through the
  * domain factories + appendEvent instead.
  */
-describe('projection column == data JSON consistency', () => {
-  it('every extracted column matches its parsed data field across tables', async () => {
-    const project = createProject({ title: 'Cols', rootPath: '/tmp/cols' });
+describe("projection column == data JSON consistency", () => {
+  it("every extracted column matches its parsed data field across tables", async () => {
+    const project = createProject({ title: "Cols", rootPath: "/tmp/cols" });
     const projectId = project.id;
     await appendEvent({
-      type: 'project.created',
+      type: "project.created",
       projectId,
-      scopeType: 'project',
+      scopeType: "project",
       scopeId: projectId,
-      actor: 'test',
+      actor: "test",
       payload: project,
     });
 
-    const workstream = createWorkstream({ projectId, title: 'main' });
+    const workstream = createWorkstream({ projectId, title: "main" });
     await appendEvent({
-      type: 'workstream.created',
+      type: "workstream.created",
       projectId,
-      scopeType: 'workstream',
+      scopeType: "workstream",
       scopeId: workstream.id,
-      actor: 'test',
+      actor: "test",
       payload: workstream,
     });
 
@@ -70,102 +70,102 @@ describe('projection column == data JSON consistency', () => {
     const todo = createTask({
       projectId,
       workstreamId: workstream.id,
-      title: 'Todo task',
+      title: "Todo task",
     });
     await appendEvent({
-      type: 'task.created',
+      type: "task.created",
       projectId,
-      scopeType: 'task',
+      scopeType: "task",
       scopeId: todo.id,
-      actor: 'test',
+      actor: "test",
       payload: todo,
     });
 
     const doing = createTask({
       projectId,
       workstreamId: workstream.id,
-      title: 'In-progress task',
+      title: "In-progress task",
     });
     await appendEvent({
-      type: 'task.created',
+      type: "task.created",
       projectId,
-      scopeType: 'task',
+      scopeType: "task",
       scopeId: doing.id,
-      actor: 'test',
+      actor: "test",
       payload: doing,
     });
     await appendEvent({
-      type: 'task.updated',
+      type: "task.updated",
       projectId,
-      scopeType: 'task',
+      scopeType: "task",
       scopeId: doing.id,
-      actor: 'test',
-      payload: { status: 'in_progress' },
+      actor: "test",
+      payload: { status: "in_progress" },
     });
 
     // A session (sessions.status).
-    const session = createSession({ projectId, actor: 'claude' });
+    const session = createSession({ projectId, actor: "claude" });
     await appendEvent({
-      type: 'session.started',
+      type: "session.started",
       projectId,
-      scopeType: 'session',
+      scopeType: "session",
       scopeId: session.id,
-      actor: 'claude',
+      actor: "claude",
       payload: session,
     });
 
     // A decision (decisions.status).
     const decision = createDecision({
-      scopeType: 'project',
+      scopeType: "project",
       scopeId: projectId,
-      title: 'Use SQLite',
-      decision: 'Adopt SQLite event store',
-      rationale: 'Single-file durability',
-      createdBy: 'test',
+      title: "Use SQLite",
+      decision: "Adopt SQLite event store",
+      rationale: "Single-file durability",
+      createdBy: "test",
     });
     await appendEvent({
-      type: 'decision.proposed',
+      type: "decision.proposed",
       projectId,
-      scopeType: 'project',
+      scopeType: "project",
       scopeId: projectId,
-      actor: 'test',
+      actor: "test",
       payload: decision,
     });
 
     // A rule (rules.source).
     const rule = createRule({
-      scopeType: 'project',
+      scopeType: "project",
       scopeId: projectId,
-      title: 'Imported rule',
-      body: 'Keep commits small',
-      updatedBy: 'test',
-      source: 'imported',
+      title: "Imported rule",
+      body: "Keep commits small",
+      updatedBy: "test",
+      source: "imported",
     });
     await appendEvent({
-      type: 'rule.upserted',
+      type: "rule.upserted",
       projectId,
-      scopeType: 'project',
+      scopeType: "project",
       scopeId: projectId,
-      actor: 'test',
+      actor: "test",
       payload: rule,
     });
 
     // A conflict (conflicts.status).
     const conflict = createConflict({
       projectId,
-      scopeType: 'rule',
+      scopeType: "rule",
       scopeId: projectId,
-      fieldPath: 'commit_style',
-      leftVersion: 'small_commits',
-      rightVersion: 'squash_final_commit',
-      conflictType: 'rule',
+      fieldPath: "commit_style",
+      leftVersion: "small_commits",
+      rightVersion: "squash_final_commit",
+      conflictType: "rule",
     });
     await appendEvent({
-      type: 'conflict.detected',
+      type: "conflict.detected",
       projectId,
-      scopeType: 'project',
+      scopeType: "project",
       scopeId: projectId,
-      actor: 'test',
+      actor: "test",
       payload: conflict,
     });
 
@@ -173,25 +173,25 @@ describe('projection column == data JSON consistency', () => {
 
     // table → (extracted column → field path inside parsed `data`).
     const tableColumns: Record<string, Record<string, string>> = {
-      workstreams: { status: 'status' },
+      workstreams: { status: "status" },
       tasks: {
-        status: 'status',
-        workstream_id: 'workstreamId',
-        created_at: 'createdAt',
-        updated_at: 'updatedAt',
+        status: "status",
+        workstream_id: "workstreamId",
+        created_at: "createdAt",
+        updated_at: "updatedAt",
       },
-      decisions: { status: 'status' },
-      rules: { source: 'source' },
-      conflicts: { status: 'status' },
-      sessions: { status: 'status' },
+      decisions: { status: "status" },
+      rules: { source: "source" },
+      conflicts: { status: "status" },
+      sessions: { status: "status" },
     };
 
     const db = getDb(projectId);
     for (const [table, columns] of Object.entries(tableColumns)) {
       const colNames = Object.keys(columns);
-      const rows = db
-        .prepare(`SELECT ${colNames.join(', ')}, data FROM ${table}`)
-        .all() as Array<Record<string, unknown> & { data: string }>;
+      const rows = db.prepare(`SELECT ${colNames.join(", ")}, data FROM ${table}`).all() as Array<
+        Record<string, unknown> & { data: string }
+      >;
 
       // Each table must contribute at least one row, otherwise the assertion
       // below vacuously passes and the test guards nothing.
@@ -202,10 +202,7 @@ describe('projection column == data JSON consistency', () => {
         for (const [column, field] of Object.entries(columns)) {
           // null column ⇔ undefined field (the projection writes `?? null`).
           const columnValue = row[column] ?? undefined;
-          expect(
-            columnValue,
-            `${table}.${column} must equal data.${field}`,
-          ).toBe(data[field]);
+          expect(columnValue, `${table}.${column} must equal data.${field}`).toBe(data[field]);
         }
       }
     }

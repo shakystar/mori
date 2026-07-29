@@ -140,7 +140,9 @@ describe("createCliAuthInteraction — notify", () => {
     const io = fakeIo([]);
     const interaction = createCliAuthInteraction(io);
 
-    expect(() => interaction.notify({ type: "auth_url", url: "https://example.com/authorize" })).not.toThrow();
+    expect(() =>
+      interaction.notify({ type: "auth_url", url: "https://example.com/authorize" }),
+    ).not.toThrow();
     expect(io.output.join("")).toContain("https://example.com/authorize");
   });
 
