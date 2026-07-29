@@ -1,18 +1,18 @@
-import { getDb } from '../storage/db.js';
+import { getDb } from "../storage/db.js";
 import {
   cosineSimilarity,
   getEmbedder,
   reciprocalRankFusion,
   type Embedder,
-} from './embeddings-service.js';
-import { listEmbeddings } from './embeddings-store.js';
-import { listSegmentTexts } from './segment-store.js';
+} from "./embeddings-service.js";
+import { listEmbeddings } from "./embeddings-store.js";
+import { listSegmentTexts } from "./segment-store.js";
 import {
   laneWhere,
   listValidMemories,
   type ProjectionLane,
   type SearchKind,
-} from './projection-store.js';
+} from "./projection-store.js";
 
 export interface SearchHit {
   entityId: string;
@@ -52,7 +52,7 @@ export function toFtsMatch(query: string): string | undefined {
     // useful, and an empty quoted string `""` is a syntax error.
     .filter((token) => /[\p{L}\p{N}]/u.test(token));
   if (tokens.length === 0) return undefined;
-  return tokens.map((token) => `"${token.replace(/"/g, '""')}"`).join(' OR ');
+  return tokens.map((token) => `"${token.replace(/"/g, '""')}"`).join(" OR ");
 }
 
 /**
@@ -64,7 +64,7 @@ export function searchProject(
   projectId: string,
   query: string,
   limit: number = DEFAULT_SEARCH_LIMIT,
-  lane: ProjectionLane = 'self',
+  lane: ProjectionLane = "self",
 ): SearchHit[] {
   const match = toFtsMatch(query);
   if (!match) return [];
@@ -139,7 +139,7 @@ export async function semanticMemoryScores(
   query: string,
   embedder: Embedder | undefined = getEmbedder(),
 ): Promise<Map<string, number>> {
-  return semanticScoresForKind(projectId, query, 'memory', embedder);
+  return semanticScoresForKind(projectId, query, "memory", embedder);
 }
 
 /** Memory hits ranked by embedding similarity (best-first). Empty when off. */
@@ -166,7 +166,7 @@ export async function semanticSearch(
     .slice(0, limit)
     .map(([entityId, score]) => ({
       entityId,
-      kind: 'memory' as SearchKind,
+      kind: "memory" as SearchKind,
       score,
       snippet: snippetFromText(textById.get(entityId)!),
     }));
@@ -185,7 +185,7 @@ export async function hybridSearch(
   query: string,
   limit: number = DEFAULT_SEARCH_LIMIT,
   embedder: Embedder | undefined = getEmbedder(),
-  lane: ProjectionLane = 'self',
+  lane: ProjectionLane = "self",
 ): Promise<SearchHit[]> {
   // Pull a wider slice from each ranker so fusion has overlap to reward.
   const poolSize = Math.max(limit * 2, DEFAULT_SEARCH_LIMIT);
@@ -221,7 +221,7 @@ export function searchByKind(
   query: string,
   kind: SearchKind,
   limit: number = DEFAULT_SEARCH_LIMIT,
-  lane: ProjectionLane = 'self',
+  lane: ProjectionLane = "self",
 ): SearchHit[] {
   const match = toFtsMatch(query);
   if (!match) return [];
@@ -264,11 +264,11 @@ export async function hybridSearchSegments(
   queryVec?: number[],
 ): Promise<SearchHit[]> {
   const poolSize = Math.max(limit * 2, DEFAULT_SEARCH_LIMIT);
-  const ftsHits = searchByKind(projectId, query, 'segment', poolSize);
-  const scores = await semanticScoresForKind(projectId, query, 'segment', embedder, queryVec);
+  const ftsHits = searchByKind(projectId, query, "segment", poolSize);
+  const scores = await semanticScoresForKind(projectId, query, "segment", embedder, queryVec);
   const texts = listSegmentTexts(projectId);
   const hydrate = (id: string, snippet: string): string =>
-    snippet || snippetFromText(texts.get(id) ?? '');
+    snippet || snippetFromText(texts.get(id) ?? "");
 
   if (scores.size === 0) {
     return ftsHits
@@ -282,7 +282,7 @@ export async function hybridSearchSegments(
   const fused = reciprocalRankFusion([ftsHits.map((h) => h.entityId), semanticIds]);
   const byId = new Map<string, SearchHit>();
   for (const id of semanticIds) {
-    byId.set(id, { entityId: id, kind: 'segment', score: scores.get(id) ?? 0, snippet: '' });
+    byId.set(id, { entityId: id, kind: "segment", score: scores.get(id) ?? 0, snippet: "" });
   }
   for (const hit of ftsHits) byId.set(hit.entityId, hit);
   return [...fused.entries()]

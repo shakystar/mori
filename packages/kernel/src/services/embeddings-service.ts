@@ -1,13 +1,9 @@
-import { createHash } from 'node:crypto';
+import { createHash } from "node:crypto";
 
-import { nowIso } from '../domain/common.js';
-import { listValidMemories } from './projection-store.js';
-import { listSegments } from './segment-store.js';
-import {
-  listEmbeddings,
-  upsertEmbedding,
-  type EmbeddingRow,
-} from './embeddings-store.js';
+import { nowIso } from "../domain/common.js";
+import { listValidMemories } from "./projection-store.js";
+import { listSegments } from "./segment-store.js";
+import { listEmbeddings, upsertEmbedding, type EmbeddingRow } from "./embeddings-store.js";
 
 /**
  * P3-c — semantic search embeddings. Mirrors the LLM consolidator pattern
@@ -31,8 +27,8 @@ export interface EmbeddingsConfig {
   fetchImpl?: typeof fetch;
 }
 
-export const DEFAULT_EMBEDDINGS_ENDPOINT = 'https://api.openai.com/v1';
-export const DEFAULT_EMBEDDINGS_MODEL = 'text-embedding-3-small';
+export const DEFAULT_EMBEDDINGS_ENDPOINT = "https://api.openai.com/v1";
+export const DEFAULT_EMBEDDINGS_MODEL = "text-embedding-3-small";
 const EMBEDDINGS_TIMEOUT_MS = 20_000;
 
 /**
@@ -94,10 +90,7 @@ export class HttpEmbedder implements Embedder {
     let batch: string[] = [];
     let batchChars = 0;
     for (const text of texts) {
-      if (
-        batch.length > 0 &&
-        batchChars + text.length > MAX_EMBED_BATCH_CHARS
-      ) {
+      if (batch.length > 0 && batchChars + text.length > MAX_EMBED_BATCH_CHARS) {
         out.push(...(await this.embedPacked(batch)));
         batch = [];
         batchChars = 0;
@@ -126,15 +119,8 @@ export class HttpEmbedder implements Embedder {
         const right = await this.embedPacked(texts.slice(mid));
         return [...left, ...right];
       }
-      if (
-        tooLarge &&
-        texts.length === 1 &&
-        texts[0]!.length > MIN_EMBED_INPUT_CHARS
-      ) {
-        const half = Math.max(
-          MIN_EMBED_INPUT_CHARS,
-          Math.floor(texts[0]!.length / 2),
-        );
+      if (tooLarge && texts.length === 1 && texts[0]!.length > MIN_EMBED_INPUT_CHARS) {
+        const half = Math.max(MIN_EMBED_INPUT_CHARS, Math.floor(texts[0]!.length / 2));
         return this.embedPacked([texts[0]!.slice(0, half)]);
       }
       throw error;
@@ -145,26 +131,19 @@ export class HttpEmbedder implements Embedder {
   private async embedBatch(texts: string[]): Promise<number[][]> {
     const fetchImpl = this.config.fetchImpl ?? fetch;
     const headers: Record<string, string> = {
-      'content-type': 'application/json',
+      "content-type": "application/json",
     };
     if (this.config.apiKey) {
       headers.authorization = `Bearer ${this.config.apiKey}`;
     }
-    const response = await fetchImpl(
-      `${this.config.endpoint.replace(/\/$/, '')}/embeddings`,
-      {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({ model: this.config.model, input: texts }),
-        signal: AbortSignal.timeout(
-          this.config.timeoutMs ?? EMBEDDINGS_TIMEOUT_MS,
-        ),
-      },
-    );
+    const response = await fetchImpl(`${this.config.endpoint.replace(/\/$/, "")}/embeddings`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ model: this.config.model, input: texts }),
+      signal: AbortSignal.timeout(this.config.timeoutMs ?? EMBEDDINGS_TIMEOUT_MS),
+    });
     if (!response.ok) {
-      const error: Error & { status?: number } = new Error(
-        `Embeddings HTTP ${response.status}`,
-      );
+      const error: Error & { status?: number } = new Error(`Embeddings HTTP ${response.status}`);
       error.status = response.status;
       throw error;
     }
@@ -172,9 +151,7 @@ export class HttpEmbedder implements Embedder {
       data?: Array<{ embedding?: number[]; index?: number }>;
     };
     // OpenAI returns `data` ordered by index; sort defensively before mapping.
-    const data = [...(body.data ?? [])].sort(
-      (a, b) => (a.index ?? 0) - (b.index ?? 0),
-    );
+    const data = [...(body.data ?? [])].sort((a, b) => (a.index ?? 0) - (b.index ?? 0));
     return data.map((entry) => entry.embedding ?? []);
   }
 }
@@ -188,7 +165,7 @@ export function getEmbedder(
 
 /** Stable content hash used to skip re-embedding unchanged memory text. */
 export function hashText(text: string): string {
-  return createHash('sha256').update(text).digest('hex');
+  return createHash("sha256").update(text).digest("hex");
 }
 
 /** Cosine similarity in [-1, 1]; 0 for empty/mismatched-length vectors. */
@@ -251,9 +228,7 @@ export async function ensureEmbeddings(
     if (!embedder) {
       const config = resolveEmbeddingsConfig();
       embedder = getEmbedder(
-        config && opts.timeoutMs
-          ? { ...config, timeoutMs: opts.timeoutMs }
-          : config,
+        config && opts.timeoutMs ? { ...config, timeoutMs: opts.timeoutMs } : config,
       );
     }
     if (!embedder) return { embedded: 0 };
@@ -262,14 +237,12 @@ export async function ensureEmbeddings(
     if (memories.length === 0) return { embedded: 0 };
 
     const existing = new Map<string, EmbeddingRow>(
-      listEmbeddings(projectId, 'memory').map((row) => [row.entityId, row]),
+      listEmbeddings(projectId, "memory").map((row) => [row.entityId, row]),
     );
     const stale = memories.filter((memory) => {
       const current = existing.get(memory.id);
       return (
-        !current ||
-        current.textHash !== hashText(memory.text) ||
-        current.model !== embedder.model
+        !current || current.textHash !== hashText(memory.text) || current.model !== embedder.model
       );
     });
     if (stale.length === 0) return { embedded: 0 };
@@ -283,7 +256,7 @@ export async function ensureEmbeddings(
       if (!vector || vector.length === 0) continue;
       upsertEmbedding(projectId, {
         entityId: memory.id,
-        kind: 'memory',
+        kind: "memory",
         model: embedder.model,
         dim: vector.length,
         vector,
@@ -325,14 +298,12 @@ export async function ensureSegmentEmbeddings(
     if (segments.length === 0) return { embedded: 0 };
 
     const existing = new Map<string, EmbeddingRow>(
-      listEmbeddings(projectId, 'segment').map((row) => [row.entityId, row]),
+      listEmbeddings(projectId, "segment").map((row) => [row.entityId, row]),
     );
     const stale = segments.filter((seg) => {
       const current = existing.get(seg.id);
       return (
-        !current ||
-        current.textHash !== hashText(seg.text) ||
-        current.model !== embedder.model
+        !current || current.textHash !== hashText(seg.text) || current.model !== embedder.model
       );
     });
     if (stale.length === 0) return { embedded: 0 };
@@ -346,7 +317,7 @@ export async function ensureSegmentEmbeddings(
       if (!vector || vector.length === 0) continue;
       upsertEmbedding(projectId, {
         entityId: seg.id,
-        kind: 'segment',
+        kind: "segment",
         model: embedder.model,
         dim: vector.length,
         vector,

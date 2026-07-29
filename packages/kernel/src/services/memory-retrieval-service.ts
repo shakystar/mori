@@ -1,14 +1,14 @@
-import type { Observation } from '../domain/entities.js';
-import { nowIso } from '../domain/common.js';
-import type { MemoryRecord } from '../projections/projector.js';
+import type { Observation } from "../domain/entities.js";
+import { nowIso } from "../domain/common.js";
+import type { MemoryRecord } from "../projections/projector.js";
 import {
   listRecentObservations,
   listValidMemories,
   touchMemoryAccess,
-} from './projection-store.js';
-import { hybridSearchSegments, searchProject } from './search-service.js';
-import { listSegmentTexts } from './segment-store.js';
-import type { Embedder } from './embeddings-service.js';
+} from "./projection-store.js";
+import { hybridSearchSegments, searchProject } from "./search-service.js";
+import { listSegmentTexts } from "./segment-store.js";
+import type { Embedder } from "./embeddings-service.js";
 
 /**
  * CLS Phase 1 — retrieval-time ranking for startup injection (decision ②,
@@ -82,7 +82,7 @@ export function retrieveMemoryContext(
   if (opts.taskTitle) {
     relevantIds = new Set(
       searchProject(projectId, opts.taskTitle)
-        .filter((hit) => hit.kind === 'memory')
+        .filter((hit) => hit.kind === "memory")
         .map((hit) => hit.entityId),
     );
   }
@@ -100,11 +100,8 @@ export function retrieveMemoryContext(
     // Reinforcement: a re-referenced memory decays from its last access,
     // not its creation (best-effort — resets with a from-scratch replay).
     const reference =
-      lastAccessedAt && lastAccessedAt > memory.createdAt
-        ? lastAccessedAt
-        : memory.createdAt;
-    const base =
-      0.5 * (memory.salience / 10) + 0.5 * recencyScore(reference, nowMs);
+      lastAccessedAt && lastAccessedAt > memory.createdAt ? lastAccessedAt : memory.createdAt;
+    const base = 0.5 * (memory.salience / 10) + 0.5 * recencyScore(reference, nowMs);
     // Relevance boost: take the stronger of the binary FTS signal and the
     // graded semantic signal (when P3-c embeddings are configured). No semantic
     // scores → identical to the pre-P3-c FTS-only boost.
@@ -120,15 +117,12 @@ export function retrieveMemoryContext(
     });
   }
 
-  const sinceIso = new Date(
-    nowMs - OBSERVATION_TAIL_MAX_AGE_HOURS * 3_600_000,
-  ).toISOString();
+  const sinceIso = new Date(nowMs - OBSERVATION_TAIL_MAX_AGE_HOURS * 3_600_000).toISOString();
   for (const observation of listRecentObservations(projectId, {
     limit: OBSERVATION_TAIL_LIMIT,
     sinceIso,
   })) {
-    const score =
-      SHORT_TERM_WEIGHT * recencyScore(observation.createdAt, nowMs);
+    const score = SHORT_TERM_WEIGHT * recencyScore(observation.createdAt, nowMs);
     pool.push({
       score,
       chars: (observation.summary?.length ?? 16) + 24,
@@ -202,10 +196,7 @@ export async function retrieveSegments(
  * Reinforcement stamp for the memories that were actually injected.
  * Projection-only UPDATE — events stay append-only.
  */
-export function reinforceInjectedMemories(
-  projectId: string,
-  memories: RankedMemory[],
-): void {
+export function reinforceInjectedMemories(projectId: string, memories: RankedMemory[]): void {
   touchMemoryAccess(
     projectId,
     memories.map((entry) => entry.memory.id),

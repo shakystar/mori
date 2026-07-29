@@ -1,4 +1,4 @@
-import { getDb } from '../storage/db.js';
+import { getDb } from "../storage/db.js";
 
 /**
  * Read/write the `embeddings` table (v8) — the derived, best-effort semantic
@@ -47,10 +47,7 @@ function parseRow(row: {
 }
 
 /** Insert or replace one memory's embedding (keyed by entity_id). */
-export function upsertEmbedding(
-  projectId: string,
-  embedding: StoredEmbedding,
-): void {
+export function upsertEmbedding(projectId: string, embedding: StoredEmbedding): void {
   getDb(projectId)
     .prepare(
       `INSERT INTO embeddings
@@ -83,29 +80,20 @@ export function upsertEmbedding(
  * or it lingers (and would keep scoring in semantic search). No-op if absent.
  */
 export function deleteEmbedding(projectId: string, entityId: string): void {
-  getDb(projectId)
-    .prepare('DELETE FROM embeddings WHERE entity_id = ?')
-    .run(entityId);
+  getDb(projectId).prepare("DELETE FROM embeddings WHERE entity_id = ?").run(entityId);
 }
 
 /** All stored embeddings (optionally filtered by kind), vectors parsed. */
-export function listEmbeddings(
-  projectId: string,
-  kind?: string,
-): EmbeddingRow[] {
+export function listEmbeddings(projectId: string, kind?: string): EmbeddingRow[] {
   const db = getDb(projectId);
   const rows = (
     kind
       ? db
           .prepare(
-            'SELECT entity_id, kind, model, vector, text_hash FROM embeddings WHERE kind = ?',
+            "SELECT entity_id, kind, model, vector, text_hash FROM embeddings WHERE kind = ?",
           )
           .all(kind)
-      : db
-          .prepare(
-            'SELECT entity_id, kind, model, vector, text_hash FROM embeddings',
-          )
-          .all()
+      : db.prepare("SELECT entity_id, kind, model, vector, text_hash FROM embeddings").all()
   ) as Array<{
     entity_id: string;
     kind: string;
@@ -117,14 +105,9 @@ export function listEmbeddings(
 }
 
 /** One embedding by entity id, or undefined. */
-export function getEmbedding(
-  projectId: string,
-  entityId: string,
-): EmbeddingRow | undefined {
+export function getEmbedding(projectId: string, entityId: string): EmbeddingRow | undefined {
   const row = getDb(projectId)
-    .prepare(
-      'SELECT entity_id, kind, model, vector, text_hash FROM embeddings WHERE entity_id = ?',
-    )
+    .prepare("SELECT entity_id, kind, model, vector, text_hash FROM embeddings WHERE entity_id = ?")
     .get(entityId) as
     | {
         entity_id: string;

@@ -61,8 +61,9 @@ export function listSegments(projectId: string): SegmentRow[] {
 
 /** Map of segment id -> text, for hydrating search hits (text isn't in the projection). */
 export function listSegmentTexts(projectId: string): Map<string, string> {
-  const rows = getDb(projectId)
-    .prepare('SELECT id, text FROM segments')
-    .all() as Array<{ id: string; text: string }>;
+  const rows = getDb(projectId).prepare("SELECT id, text FROM segments").all() as Array<{
+    id: string;
+    text: string;
+  }>;
   return new Map(rows.map((r) => [r.id, r.text]));
 }
