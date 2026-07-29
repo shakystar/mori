@@ -472,7 +472,11 @@ export async function rebuildProjectProjection(
     // not know about, so the FTS wipe above would drop their rows. Re-emit them
     // from the segments table on every reindex (same pattern as topicSearchRows
     // reading external .md content). Empty table => zero rows => byte-identical.
-    for (const seg of listSegments(projectId)) {
+    // Explicit "union": this is the one legitimate full-corpus read (#72) — the
+    // FTS reindex mirrors source_project_id onto search_fts itself, so a
+    // foreign segment still resolves through laneWhere at query time. Every
+    // OTHER listSegments/listSegmentTexts call site must stay self-only.
+    for (const seg of listSegments(projectId, "union")) {
       indexEntity(seg.id, "segment", seg.text, seg.sourceProjectId ?? null);
     }
   });

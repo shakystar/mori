@@ -260,6 +260,15 @@ export function searchByKind(
  * hydrated from the `segments` table (segment text is not in the projection). An
  * optional precomputed `queryVec` lets a caller embed the query once and reuse it
  * across the memory and segment corpora. Returns [] when there are no segments.
+ *
+ * Self-lane only — this is the segment-path mirror of `hybridSearch`'s
+ * memory-path invariant (#72): `searchByKind` above defaults to self, and
+ * `texts` below (`listSegmentTexts`, also self-default) is the id set the
+ * semantic candidates are filtered against BEFORE the poolSize slice, so a
+ * foreign segment can reach neither ranker even if a stale foreign embedding
+ * row survives in the `embeddings` table (out-of-band index, see
+ * embeddings-store.ts). There is no union/opt-in variant of this function —
+ * out of scope for #72 (see issue body).
  */
 export async function hybridSearchSegments(
   projectId: string,
