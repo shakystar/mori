@@ -58,30 +58,42 @@ export async function runCli(
     // keystroke rather than as a process signal — and `runRepl`'s handler for it does not
     // exist yet. Covering the preparation window is what keeps a slow credential lookup or
     // token refresh from being uninterruptible: leaving is a normal exit, code 0.
-    let stopStartupListening = (): void => {};
-    const startupInterrupt = new Promise<"interrupted">((resolve) => {
-      stopStartupListening = input.onInterrupt(() => resolve("interrupted"));
-    });
+    //
+    // Everything from here on runs under a `finally` that closes `input` — restoring raw
+    // mode — no matter which of the paths below is taken, including `preparing` rejecting
+    // (#80). `input.close()` is idempotent (readline's own `close()` is a no-op past the
+    // first call, and so is re-removing a listener or re-applying the same raw-mode flag),
+    // so `runRepl`'s own `finally` closing it again on the success path is harmless.
+    try {
+      let stopStartupListening = (): void => {};
+      const startupInterrupt = new Promise<"interrupted">((resolve) => {
+        stopStartupListening = input.onInterrupt(() => resolve("interrupted"));
+      });
 
-    const preparing = prepareAgent(providerId, env, deps, { stdout, stderr });
-    const prepared = await Promise.race([preparing, startupInterrupt]);
-    stopStartupListening();
+      const preparing = prepareAgent(providerId, env, deps, { stdout, stderr });
+      let prepared: Awaited<typeof preparing> | "interrupted";
+      try {
+        prepared = await Promise.race([preparing, startupInterrupt]);
+      } finally {
+        stopStartupListening();
+      }
 
-    if (prepared === "interrupted") {
-      // Nothing is awaiting the preparation any more; a later failure from it is not an
-      // unhandled rejection, it is a result nobody asked for.
-      void preparing.catch(() => {});
-      stdout("\n");
+      if (prepared === "interrupted") {
+        // Nothing is awaiting the preparation any more; a later failure from it is not an
+        // unhandled rejection, it is a result nobody asked for.
+        void preparing.catch(() => {});
+        stdout("\n");
+        return 0;
+      }
+
+      if (!prepared.ok) {
+        return prepared.exitCode;
+      }
+
+      return await runRepl(prepared.agent, input, { stdout, stderr });
+    } finally {
       input.close();
-      return 0;
     }
-
-    if (!prepared.ok) {
-      input.close();
-      return prepared.exitCode;
-    }
-
-    return runRepl(prepared.agent, input, { stdout, stderr });
   }
 
   return runPrompt(command.prompt, providerId, env, deps, { stdout, stderr });

@@ -393,6 +393,42 @@ describe("runCli", () => {
       expect(input.state.reads).toBe(0);
       expect(input.state.closed).toBe(true);
     });
+
+    it("closes the input source (restoring raw mode) when preparation rejects (#80)", async () => {
+      // `prepareAgent`'s only unguarded await is `Models.checkAuth`, which rejects if the
+      // credential store's `read` throws — pi-ai wraps the cause in a `ModelsError` but does
+      // not swallow it (dist/models.js's `readCredential`). Before the fix, that rejection
+      // made `Promise.race` reject in turn, skipping both `input.close()` calls in `index.ts`
+      // and leaving the terminal in raw mode for the rest of the process's life. This failed
+      // on pre-fix code: `input.state.closed` stayed `false` and the rejection carried no
+      // cleanup with it.
+      const io = captureOutput();
+      const input = scriptedInput(["never read"]);
+      const failingStore = {
+        read: async () => {
+          throw new Error("boom");
+        },
+        list: async () => [],
+        modify: async () => undefined,
+        delete: async () => {},
+      };
+
+      await expect(
+        runCli(
+          [],
+          { ANTHROPIC_API_KEY: "sk-ant-test" },
+          {
+            stdout: io.stdout,
+            stderr: io.stderr,
+            credentialStore: failingStore,
+            openReplInput: () => input.source,
+          },
+        ),
+      ).rejects.toThrow("boom");
+
+      expect(input.state.reads).toBe(0);
+      expect(input.state.closed).toBe(true);
+    });
   });
 
   it("names the target provider's own API key env var in the unauthenticated message", () => {
