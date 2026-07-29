@@ -316,6 +316,15 @@ const MIGRATIONS: ReadonlyArray<(db: Database.Database) => void> = [
       );
     `);
   },
+  // v14 — #74 union-lane hardening: `observations` was left out of the v12
+  // provenance ALTER (only tasks/handoffs/sessions/memories/segments got the
+  // column), so every foreign (union-lane) observation.captured event
+  // projected with a NULL lane — indistinguishable from self. Additive column,
+  // same grade as v12: existing rows read back NULL = self, byte-identical for
+  // single-writer stores.
+  (db) => {
+    db.exec("ALTER TABLE observations ADD COLUMN source_project_id TEXT;");
+  },
 ];
 
 function runMigrations(db: Database.Database): void {
