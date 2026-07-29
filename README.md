@@ -83,7 +83,7 @@ mori login openai-codex        # prints the risk notice on success
 MORI_MODEL=openai-codex/gpt-5.1-codex mori "hi"
 ```
 
-Note that `openai-codex` is a *different provider* from `openai`: it talks to
+Note that `openai-codex` is a _different provider_ from `openai`: it talks to
 `chatgpt.com/backend-api` and has no API key path at all, so `OPENAI_API_KEY` does not
 apply to it.
 

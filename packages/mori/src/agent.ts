@@ -1,8 +1,18 @@
-import { Agent, type AgentEvent, type AgentMessage, type AgentTool, type StreamFn } from "@earendil-works/pi-agent-core";
+import {
+  Agent,
+  type AgentEvent,
+  type AgentMessage,
+  type AgentTool,
+  type StreamFn,
+} from "@earendil-works/pi-agent-core";
 import type { CredentialStore } from "@earendil-works/pi-ai";
 import type { MemoryKernel } from "@mori/kernel";
 import { createMoriModels } from "./model-wiring.js";
-import { resolveProviderSelection, supportedProviderIds, unknownProviderMessage } from "./provider-selection.js";
+import {
+  resolveProviderSelection,
+  supportedProviderIds,
+  unknownProviderMessage,
+} from "./provider-selection.js";
 import { createBashBeforeToolCall, createMoriTools } from "./tools/index.js";
 
 export { createMoriModels };
@@ -20,6 +30,7 @@ export interface CreateMoriAgentOptions {
    * Tools to register, in place of the default toolset built from `root`. Pass `[]` to
    * get the pre-toolset single-prompt behavior back (e.g. for regression tests).
    */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- AgentTool<TArgs> erasure for a heterogeneous tool array
   tools?: AgentTool<any>[];
 }
 

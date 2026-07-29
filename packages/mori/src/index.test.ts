@@ -81,7 +81,12 @@ function fakeStreamFn(text: string): StreamFn {
 }
 
 function oauthCredential(): OAuthCredential {
-  return { type: "oauth", access: "at-codex", refresh: "rt-codex", expires: Date.now() + ONE_HOUR_MS };
+  return {
+    type: "oauth",
+    access: "at-codex",
+    refresh: "rt-codex",
+    expires: Date.now() + ONE_HOUR_MS,
+  };
 }
 
 /**
@@ -370,15 +375,19 @@ describe("runCli", () => {
       const store = new InMemoryCredentialStore();
       const asked: string[] = [];
 
-      const exitCode = await runCli(["login"], { ...GATE_ON }, {
-        stdout: io.stdout,
-        stderr: io.stderr,
-        credentialStore: store,
-        question: async (prompt) => {
-          asked.push(prompt);
-          return "sk-ant-typed";
+      const exitCode = await runCli(
+        ["login"],
+        { ...GATE_ON },
+        {
+          stdout: io.stdout,
+          stderr: io.stderr,
+          credentialStore: store,
+          question: async (prompt) => {
+            asked.push(prompt);
+            return "sk-ant-typed";
+          },
         },
-      });
+      );
 
       expect(exitCode).toBe(0);
       expect(asked.join("\n")).toContain("Anthropic API key");
@@ -390,14 +399,18 @@ describe("runCli", () => {
     it("reports a failed login as a message and a non-zero exit, not a stack trace", async () => {
       const io = captureOutput();
 
-      const exitCode = await runCli(["login"], {}, {
-        stdout: io.stdout,
-        stderr: io.stderr,
-        credentialStore: new InMemoryCredentialStore(),
-        question: async () => {
-          throw new Error("입력이 취소되었습니다");
+      const exitCode = await runCli(
+        ["login"],
+        {},
+        {
+          stdout: io.stdout,
+          stderr: io.stderr,
+          credentialStore: new InMemoryCredentialStore(),
+          question: async () => {
+            throw new Error("입력이 취소되었습니다");
+          },
         },
-      });
+      );
 
       expect(exitCode).toBe(1);
       expect(io.err()).toContain("로그인에 실패");
@@ -409,11 +422,15 @@ describe("runCli", () => {
       const io = captureOutput();
       const store = await storeWith({ type: "api_key", key: "sk-ant-stored" });
 
-      const exitCode = await runCli(["logout"], {}, {
-        stdout: io.stdout,
-        stderr: io.stderr,
-        credentialStore: store,
-      });
+      const exitCode = await runCli(
+        ["logout"],
+        {},
+        {
+          stdout: io.stdout,
+          stderr: io.stderr,
+          credentialStore: store,
+        },
+      );
 
       expect(exitCode).toBe(0);
       expect(await store.read("anthropic")).toBeUndefined();
@@ -426,11 +443,15 @@ describe("runCli", () => {
         // indistinguishable from a provider that does not exist.
         const io = captureOutput();
 
-        const exitCode = await runCli(["login", OPENAI_OAUTH_PROVIDER_ID], {}, {
-          stdout: io.stdout,
-          stderr: io.stderr,
-          credentialStore: new InMemoryCredentialStore(),
-        });
+        const exitCode = await runCli(
+          ["login", OPENAI_OAUTH_PROVIDER_ID],
+          {},
+          {
+            stdout: io.stdout,
+            stderr: io.stderr,
+            credentialStore: new InMemoryCredentialStore(),
+          },
+        );
 
         expect(exitCode).toBe(1);
         expect(io.err()).toContain("알 수 없는 프로바이더");
@@ -441,11 +462,15 @@ describe("runCli", () => {
       it("refuses to select openai-codex as a model provider", async () => {
         const io = captureOutput();
 
-        const exitCode = await runCli(["hi"], { MORI_MODEL: `${OPENAI_OAUTH_PROVIDER_ID}/gpt-5.1-codex` }, {
-          stdout: io.stdout,
-          stderr: io.stderr,
-          credentialStore: new InMemoryCredentialStore(),
-        });
+        const exitCode = await runCli(
+          ["hi"],
+          { MORI_MODEL: `${OPENAI_OAUTH_PROVIDER_ID}/gpt-5.1-codex` },
+          {
+            stdout: io.stdout,
+            stderr: io.stderr,
+            credentialStore: new InMemoryCredentialStore(),
+          },
+        );
 
         expect(exitCode).toBe(1);
         expect(io.err()).toContain("알 수 없는 프로바이더");
@@ -458,11 +483,15 @@ describe("runCli", () => {
         const store = new InMemoryCredentialStore();
         await store.modify(OPENAI_OAUTH_PROVIDER_ID, async () => oauthCredential());
 
-        const exitCode = await runCli(["logout", OPENAI_OAUTH_PROVIDER_ID], {}, {
-          stdout: io.stdout,
-          stderr: io.stderr,
-          credentialStore: store,
-        });
+        const exitCode = await runCli(
+          ["logout", OPENAI_OAUTH_PROVIDER_ID],
+          {},
+          {
+            stdout: io.stdout,
+            stderr: io.stderr,
+            credentialStore: store,
+          },
+        );
 
         expect(exitCode).toBe(1);
         expect(await store.read(OPENAI_OAUTH_PROVIDER_ID)).toBeDefined();
@@ -481,11 +510,15 @@ describe("runCli", () => {
         const models = createMoriModels({ ...GATE_ON }, store);
         models.setProvider(fakeOAuthProvider(OPENAI_OAUTH_PROVIDER_ID, credential));
 
-        const exitCode = await runCli(["login", OPENAI_OAUTH_PROVIDER_ID], { ...GATE_ON }, {
-          stdout: io.stdout,
-          stderr: io.stderr,
-          loginModels: models,
-        });
+        const exitCode = await runCli(
+          ["login", OPENAI_OAUTH_PROVIDER_ID],
+          { ...GATE_ON },
+          {
+            stdout: io.stdout,
+            stderr: io.stderr,
+            loginModels: models,
+          },
+        );
 
         expect(exitCode).toBe(0);
         expect(io.out()).toContain("로그인 완료");
@@ -503,11 +536,15 @@ describe("runCli", () => {
         const models = createMoriModels({ ...GATE_ON }, store);
         models.setProvider(fakeOAuthProvider(OPENAI_OAUTH_PROVIDER_ID, oauthCredential()));
 
-        await runCli(["login", OPENAI_OAUTH_PROVIDER_ID], { ...GATE_ON }, {
-          stdout: () => {},
-          stderr: () => {},
-          loginModels: models,
-        });
+        await runCli(
+          ["login", OPENAI_OAUTH_PROVIDER_ID],
+          { ...GATE_ON },
+          {
+            stdout: () => {},
+            stderr: () => {},
+            loginModels: models,
+          },
+        );
 
         expect(await models.checkAuth(OPENAI_OAUTH_PROVIDER_ID)).toBeDefined();
         expect((await models.getAuth(OPENAI_OAUTH_PROVIDER_ID))?.auth.apiKey).toBe("at-codex");
