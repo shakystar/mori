@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { createProject } from "../../src/domain/entities.js";
+import { upsertEmbedding } from "../../src/services/embeddings-store.js";
 import { retrieveSegments } from "../../src/services/memory-retrieval-service.js";
 import { rebuildProjectProjection } from "../../src/services/projection-store.js";
 import { hybridSearchSegments, searchByKind } from "../../src/services/search-service.js";
@@ -102,5 +103,86 @@ describe("segment search + retrieval", () => {
     const got = await retrieveSegments(projectId, { taskTitle: "budgetword", budgetChars: 500 });
     const totalChars = got.reduce((n, s) => n + s.text.length, 0);
     expect(totalChars).toBeLessThanOrEqual(500);
+  });
+
+  it("filters pruned segment ids out of the semantic pool before it is sliced (#75)", async () => {
+    // seg_live has both a segments row and an embedding. seg_dead_* simulate
+    // pruned segments: their `embeddings` rows survived (embeddings-store.ts is
+    // a derived, out-of-band index not rebuilt alongside `segments` — see
+    // segment-store.ts), but the segments row is gone, so listSegmentTexts()
+    // no longer knows them. There are more dead ids than poolSize (20 for
+    // limit=1) and every dead vector scores higher than the live one, so a
+    // slice taken BEFORE filtering would evict seg_live entirely.
+    insertSegment(
+      "seg_live",
+      "alpha beta gamma project timeline planning",
+      "2026-01-01T00:00:00.000Z",
+    );
+    await rebuildProjectProjection(projectId, { reindexSearch: true });
+
+    for (let i = 0; i < 25; i++) {
+      upsertEmbedding(projectId, {
+        entityId: `seg_dead_${i}`,
+        kind: "segment",
+        model: "fake",
+        dim: 2,
+        vector: [1, 0], // cosine 1.0 against the query vector — ranks above seg_live
+        textHash: `dead-${i}`,
+        createdAt: new Date(0).toISOString(),
+      });
+    }
+    upsertEmbedding(projectId, {
+      entityId: "seg_live",
+      kind: "segment",
+      model: "fake",
+      dim: 2,
+      vector: [0.9, 0.1], // cosine < 1.0 against the query vector — ranks below all dead ids
+      textHash: "live",
+      createdAt: new Date(0).toISOString(),
+    });
+
+    const embedder = { model: "fake", embed: async (texts: string[]) => texts.map(() => [1, 0]) };
+    const hits = await hybridSearchSegments(projectId, "alpha beta gamma", 1, embedder);
+
+    expect(hits.map((h) => h.entityId)).toContain("seg_live");
+    expect(hits.some((h) => h.entityId.startsWith("seg_dead_"))).toBe(false);
+    expect(hits.every((h) => h.snippet.length > 0)).toBe(true);
+  });
+
+  it("hybridSearchSegments uses a supplied queryVec even without a configured embedder (#75)", async () => {
+    insertSegment(
+      "seg_v",
+      "distinct semantic phrase with no lexical overlap",
+      "2026-01-01T00:00:00.000Z",
+    );
+    await rebuildProjectProjection(projectId, { reindexSearch: true });
+    upsertEmbedding(projectId, {
+      entityId: "seg_v",
+      kind: "segment",
+      model: "fake",
+      dim: 2,
+      vector: [1, 0],
+      textHash: "v",
+      createdAt: new Date(0).toISOString(),
+    });
+
+    // No embedder configured (MEMORIZE_EMBEDDINGS_* unset in this sandbox) and
+    // none passed explicitly — only a precomputed queryVec, mirroring
+    // retrieveSegments reusing one embed call across corpora.
+    const hits = await hybridSearchSegments(
+      projectId,
+      "totally unrelated words",
+      10,
+      undefined,
+      [1, 0],
+    );
+    expect(hits.map((h) => h.entityId)).toContain("seg_v");
+  });
+
+  it("hybridSearchSegments still degrades to FTS-only with neither embedder nor queryVec", async () => {
+    insertSegment("seg_w", "lexical only segment text", "2026-01-01T00:00:00.000Z");
+    await rebuildProjectProjection(projectId, { reindexSearch: true });
+    const hits = await hybridSearchSegments(projectId, "lexical only");
+    expect(hits.map((h) => h.entityId)).toContain("seg_w");
   });
 });

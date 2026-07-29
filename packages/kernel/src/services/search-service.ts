@@ -115,11 +115,15 @@ export async function semanticScoresForKind(
   embedder: Embedder | undefined = getEmbedder(),
   queryVec?: number[],
 ): Promise<Map<string, number>> {
-  if (!embedder || !query.trim()) return new Map();
+  // embedder/query.trim() are only needed to PRODUCE a vector — a caller that
+  // already supplies queryVec (e.g. retrieveSegments reusing one embed call
+  // across the memory and segment corpora) must not be forced through them.
+  if (!queryVec && (!embedder || !query.trim())) return new Map();
   const corpus = listEmbeddings(projectId, kind);
   if (corpus.length === 0) return new Map();
   let vec = queryVec;
   if (!vec) {
+    if (!embedder) return new Map();
     try {
       [vec] = await embedder.embed([query]);
     } catch {
@@ -275,7 +279,14 @@ export async function hybridSearchSegments(
       .slice(0, limit)
       .map((hit) => ({ ...hit, snippet: hydrate(hit.entityId, hit.snippet) }));
   }
+  // Embeddings survive segment pruning (the `embeddings` table is a derived,
+  // out-of-band index not rebuilt alongside `segments` — see segment-store.ts),
+  // so `scores` can hold ids for segments already pruned from `texts`. Filter
+  // BEFORE the poolSize slice, or dead ids consume the pool/limit and push out
+  // live matches, surfacing empty-snippet hits. Mirrors semanticSearch's
+  // textById filter above (SoT-050).
   const semanticIds = [...scores.entries()]
+    .filter(([id]) => texts.has(id))
     .sort((a, b) => b[1] - a[1])
     .slice(0, poolSize)
     .map(([id]) => id);
