@@ -202,7 +202,7 @@ describe("semantic search (P3-c)", () => {
 
     // Corpus embedded under model "old-model".
     const oldEmbedder = fakeEmbedder(VECTORS, "old-model");
-    await ensureEmbeddings(projectId, { embedder: oldEmbedder });
+    await ensureEmbeddings(projectId, oldEmbedder);
     expect(listEmbeddings(projectId, "memory")).toHaveLength(2);
 
     // MEMORIZE_EMBEDDINGS_MODEL has since changed — the active embedder is a
@@ -231,7 +231,7 @@ describe("semantic search (P3-c)", () => {
 
     // Corpus stored under model "m1" with 3-dim vectors.
     const corpusEmbedder = fakeEmbedder(VECTORS, "m1");
-    await ensureEmbeddings(projectId, { embedder: corpusEmbedder });
+    await ensureEmbeddings(projectId, corpusEmbedder);
 
     // Same model name, but this call's query vector is 2-dim (e.g. the
     // provider changed the output shape for that model id) — the model
