@@ -1,5 +1,6 @@
 import type { StreamFn } from "@earendil-works/pi-agent-core";
 import type { CredentialStore, MutableModels } from "@earendil-works/pi-ai";
+import type { ReplInputSource } from "./repl-input.js";
 
 export interface RunCliDeps {
   stdout?: (chunk: string) => void;
@@ -27,4 +28,14 @@ export interface RunCliDeps {
    * agent.ts) and is unaffected by this.
    */
   loginModels?: MutableModels;
+  /**
+   * Opens the REPL's line source, or returns `undefined` when there is nobody to prompt —
+   * which is what makes `mori` with no arguments print usage instead of looping when stdin
+   * is a pipe or a closed descriptor.
+   *
+   * The default (index.ts) is a readline interface over `process.stdin`, gated on
+   * `stdin.isTTY`. Tests substitute a scripted source so the REPL can be driven without a
+   * real terminal (TESTING.md).
+   */
+  openReplInput?: () => ReplInputSource | undefined;
 }

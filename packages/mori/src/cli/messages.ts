@@ -2,8 +2,21 @@ import { apiKeyEnvVarFor } from "../auth/resolve-credentials.js";
 
 export const usageMessage =
   "usage: mori <prompt>\n" +
+  "       mori                      # 터미널에서 실행하면 REPL로 진입합니다\n" +
   "       mori login [provider]     # 자격증명을 저장합니다\n" +
   "       mori logout [provider]    # 저장된 자격증명을 지웁니다\n";
+
+export function replBanner(): string {
+  return "mori REPL — /exit 또는 Ctrl-D로 종료, /clear로 대화 초기화\n";
+}
+
+export function replClearedMessage(): string {
+  return "mori: 대화를 초기화했습니다.\n";
+}
+
+export function replTurnCancelledMessage(): string {
+  return "mori: 턴을 취소했습니다.\n";
+}
 
 export function unauthenticatedMessage(providerId: string): string {
   const apiKeyEnv = apiKeyEnvVarFor(providerId);
