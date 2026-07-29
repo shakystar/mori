@@ -9,13 +9,22 @@
   "scripts": {
     "build": "tsc -b",
     "dev": "tsx packages/mori/src/index.ts",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
     "pretest": "tsc -b",
     "test": "vitest run"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@types/node": "^24.0.0",
+    "eslint": "^10.8.0",
+    "eslint-config-prettier": "^10.1.8",
+    "globals": "^17.8.0",
+    "prettier": "^3.9.6",
     "tsx": "^4.20.0",
     "typescript": "^5.7.0",
+    "typescript-eslint": "^8.65.0",
     "vitest": "^3.0.0"
   },
   "pnpm": {

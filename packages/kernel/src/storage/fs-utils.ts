@@ -1,10 +1,10 @@
-import fs from 'node:fs/promises';
-import path from 'node:path';
+import fs from "node:fs/promises";
+import path from "node:path";
 
-import writeFileAtomic from 'write-file-atomic';
+import writeFileAtomic from "write-file-atomic";
 
 export function isEnoent(error: unknown): boolean {
-  return (error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT';
+  return (error as NodeJS.ErrnoException | undefined)?.code === "ENOENT";
 }
 
 /** Strip a leading UTF-8 BOM (0xFEFF). Windows editors and PowerShell 5.1
@@ -24,12 +24,9 @@ export async function ensureParentDir(filePath: string): Promise<void> {
 const LOCK_STALE_MS = 30_000;
 const LOCK_SETTLE_MS = 10;
 
-export async function withFileLock<T>(
-  lockTarget: string,
-  fn: () => Promise<T>,
-): Promise<T> {
+export async function withFileLock<T>(lockTarget: string, fn: () => Promise<T>): Promise<T> {
   const lockDir = `${lockTarget}.lock`;
-  const ownerFile = path.join(lockDir, 'owner');
+  const ownerFile = path.join(lockDir, "owner");
   const ownerId = `${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}`;
   const maxRetries = 50;
   const retryBaseMs = 5;
@@ -40,14 +37,14 @@ export async function withFileLock<T>(
       await fs.mkdir(lockDir);
       created = true;
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
     }
 
     if (created) {
       await fs.writeFile(ownerFile, ownerId);
       await new Promise((r) => setTimeout(r, LOCK_SETTLE_MS));
       try {
-        const currentOwner = await fs.readFile(ownerFile, 'utf8');
+        const currentOwner = await fs.readFile(ownerFile, "utf8");
         if (currentOwner === ownerId) break;
       } catch {
         // Owner file gone — another process rm'd our lock
@@ -64,19 +61,15 @@ export async function withFileLock<T>(
         continue;
       }
     } catch (statErr) {
-      if ((statErr as NodeJS.ErrnoException).code === 'ENOENT') continue;
+      if ((statErr as NodeJS.ErrnoException).code === "ENOENT") continue;
       throw statErr;
     }
 
     if (attempt === maxRetries - 1) {
-      throw new Error(
-        `Failed to acquire file lock after ${maxRetries} retries: ${lockTarget}`,
-      );
+      throw new Error(`Failed to acquire file lock after ${maxRetries} retries: ${lockTarget}`);
     }
     const jitter = Math.random() * retryBaseMs * Math.min(attempt + 1, 10);
-    await new Promise((r) =>
-      setTimeout(r, retryBaseMs * Math.min(attempt + 1, 10) + jitter),
-    );
+    await new Promise((r) => setTimeout(r, retryBaseMs * Math.min(attempt + 1, 10) + jitter));
   }
 
   try {
@@ -88,12 +81,12 @@ export async function withFileLock<T>(
 
 export async function writeJson(filePath: string, value: unknown): Promise<void> {
   await ensureParentDir(filePath);
-  await writeFileAtomic(filePath, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
+  await writeFileAtomic(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
 }
 
 export async function readJson<T>(filePath: string): Promise<T | undefined> {
   try {
-    const raw = await fs.readFile(filePath, 'utf8');
+    const raw = await fs.readFile(filePath, "utf8");
     // Tolerate a leading UTF-8 BOM: Windows editors and PowerShell 5.1
     // (ConvertTo-Json | Out-File) prepend one; mori itself never writes it.
     return JSON.parse(stripBom(raw)) as T;
@@ -105,11 +98,9 @@ export async function readJson<T>(filePath: string): Promise<T | undefined> {
   }
 }
 
-export async function readText(
-  filePath: string,
-): Promise<string | undefined> {
+export async function readText(filePath: string): Promise<string | undefined> {
   try {
-    return await fs.readFile(filePath, 'utf8');
+    return await fs.readFile(filePath, "utf8");
   } catch (error) {
     if (isEnoent(error)) {
       return undefined;
@@ -120,23 +111,19 @@ export async function readText(
 
 export async function appendLine(filePath: string, line: string): Promise<void> {
   await ensureParentDir(filePath);
-  await fs.appendFile(filePath, `${line}\n`, 'utf8');
+  await fs.appendFile(filePath, `${line}\n`, "utf8");
 }
 
 /** Read every `.json` file in `dir` and return the parsed values. Returns [] when the dir does not exist. */
 export async function readJsonDir<T>(dir: string): Promise<T[]> {
   let entries: string[];
   try {
-    entries = (await fs.readdir(dir))
-      .filter((entry) => entry.endsWith('.json'))
-      .sort();
+    entries = (await fs.readdir(dir)).filter((entry) => entry.endsWith(".json")).sort();
   } catch (error) {
     if (isEnoent(error)) return [];
     throw error;
   }
-  const values = await Promise.all(
-    entries.map((entry) => readJson<T>(path.join(dir, entry))),
-  );
+  const values = await Promise.all(entries.map((entry) => readJson<T>(path.join(dir, entry))));
   return values.filter((value): value is Awaited<T> => Boolean(value)) as T[];
 }
 
@@ -150,13 +137,13 @@ export async function readNdjson<T>(
 ): Promise<T[]> {
   let raw: string;
   try {
-    raw = await fs.readFile(filePath, 'utf8');
+    raw = await fs.readFile(filePath, "utf8");
   } catch (error) {
     if (isEnoent(error)) return [];
     throw error;
   }
   const result: T[] = [];
-  const lines = raw.split('\n');
+  const lines = raw.split("\n");
   for (let i = 0; i < lines.length; i++) {
     const trimmed = lines[i]!.trim();
     if (!trimmed) continue;

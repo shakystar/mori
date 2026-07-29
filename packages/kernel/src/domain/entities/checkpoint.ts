@@ -1,5 +1,5 @@
-import type { BaseEntity, EntityId } from '../common.js';
-import { baseEntity } from './base.js';
+import type { BaseEntity, EntityId } from "../common.js";
+import { baseEntity } from "./base.js";
 
 export interface Checkpoint extends BaseEntity {
   projectId: EntityId;
@@ -28,7 +28,7 @@ export function createCheckpoint(input: {
   sourceHookId?: string;
 }): Checkpoint {
   return {
-    ...baseEntity('checkpoint'),
+    ...baseEntity("checkpoint"),
     projectId: input.projectId,
     ...(input.taskId ? { taskId: input.taskId } : {}),
     sessionId: input.sessionId,

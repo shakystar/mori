@@ -39,7 +39,10 @@ export class FileCredentialStore implements CredentialStore {
 
   async list(): Promise<readonly CredentialInfo[]> {
     const all = await this.enqueue(() => this.readAll());
-    return Object.entries(all).map(([providerId, credential]) => ({ providerId, type: credential.type }));
+    return Object.entries(all).map(([providerId, credential]) => ({
+      providerId,
+      type: credential.type,
+    }));
   }
 
   async modify(

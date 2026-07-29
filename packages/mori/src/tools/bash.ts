@@ -24,10 +24,19 @@
  * Do not run this tool against untrusted prompts. Real isolation (container, seccomp,
  * a permission system) is a separate concern and is not implemented here.
  */
-import type { AgentTool, BeforeToolCallContext, BeforeToolCallResult } from "@earendil-works/pi-agent-core";
+import type {
+  AgentTool,
+  BeforeToolCallContext,
+  BeforeToolCallResult,
+} from "@earendil-works/pi-agent-core";
 import { Type, type Static } from "@earendil-works/pi-ai";
 import { blockedReason, findBlockedPattern } from "./bash-guard.js";
-import { BASH_DEFAULT_TIMEOUT_MS, formatBashResult, runBash, type BashRunResult } from "./bash-exec.js";
+import {
+  BASH_DEFAULT_TIMEOUT_MS,
+  formatBashResult,
+  runBash,
+  type BashRunResult,
+} from "./bash-exec.js";
 import { textResult } from "./tool-result.js";
 
 export * from "./bash-guard.js";
@@ -105,7 +114,10 @@ export function createBashTool(
  */
 export function createBashBeforeToolCall(
   toolName: string = BASH_TOOL_NAME,
-): (context: BeforeToolCallContext, signal?: AbortSignal) => Promise<BeforeToolCallResult | undefined> {
+): (
+  context: BeforeToolCallContext,
+  signal?: AbortSignal,
+) => Promise<BeforeToolCallResult | undefined> {
   return async (context) => {
     if (context.toolCall.name !== toolName) return undefined;
 

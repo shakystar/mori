@@ -1,39 +1,37 @@
-import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { CURRENT_SCHEMA_VERSION } from '../../src/domain/common.js';
-import type { DomainEvent } from '../../src/domain/events.js';
-import { reduceProjectState } from '../../src/projections/projector.js';
+import { CURRENT_SCHEMA_VERSION } from "../../src/domain/common.js";
+import type { DomainEvent } from "../../src/domain/events.js";
+import { reduceProjectState } from "../../src/projections/projector.js";
 import {
   getMemoryIndex,
   getProjectProjection,
   getTask,
   listSessions,
   rebuildProjectProjection,
-} from '../../src/services/projection-store.js';
-import { closeAll } from '../../src/storage/db.js';
-import { appendEvent, readEvents } from '../../src/storage/event-store.js';
+} from "../../src/services/projection-store.js";
+import { closeAll } from "../../src/storage/db.js";
+import { appendEvent, readEvents } from "../../src/storage/event-store.js";
 
-const projectId = 'proj_pstore_test1';
+const projectId = "proj_pstore_test1";
 
 let sandbox: string;
 
-const ts = '2026-02-02T00:00:00.000Z';
+const ts = "2026-02-02T00:00:00.000Z";
 
-function evt(
-  overrides: Partial<DomainEvent> & Pick<DomainEvent, 'id' | 'type'>,
-): DomainEvent {
+function evt(overrides: Partial<DomainEvent> & Pick<DomainEvent, "id" | "type">): DomainEvent {
   return {
     schemaVersion: CURRENT_SCHEMA_VERSION,
     createdAt: ts,
     updatedAt: ts,
     projectId,
-    scopeType: 'project',
+    scopeType: "project",
     scopeId: projectId,
-    actor: 'test',
+    actor: "test",
     payload: {},
     ...overrides,
   } as DomainEvent;
@@ -41,18 +39,18 @@ function evt(
 
 const seedEvents: DomainEvent[] = [
   evt({
-    id: 'evt_p',
-    type: 'project.created',
+    id: "evt_p",
+    type: "project.created",
     payload: {
       id: projectId,
       schemaVersion: CURRENT_SCHEMA_VERSION,
       createdAt: ts,
       updatedAt: ts,
-      title: 'PStore',
-      summary: 'projection store project',
+      title: "PStore",
+      summary: "projection store project",
       goals: [],
-      status: 'active',
-      rootPath: '/tmp/pstore',
+      status: "active",
+      rootPath: "/tmp/pstore",
       activeWorkstreamIds: [],
       activeTaskIds: [],
       acceptedDecisionIds: [],
@@ -60,23 +58,23 @@ const seedEvents: DomainEvent[] = [
     } as never,
   }),
   evt({
-    id: 'evt_t1',
-    type: 'task.created',
-    scopeType: 'task',
-    scopeId: 'task_1',
+    id: "evt_t1",
+    type: "task.created",
+    scopeType: "task",
+    scopeId: "task_1",
     payload: {
-      id: 'task_1',
+      id: "task_1",
       schemaVersion: CURRENT_SCHEMA_VERSION,
       createdAt: ts,
       updatedAt: ts,
       projectId,
-      workstreamId: 'ws_1',
-      title: 'First task',
-      description: 'first',
-      status: 'todo',
-      priority: 'high',
-      ownerType: 'unassigned',
-      goal: 'first',
+      workstreamId: "ws_1",
+      title: "First task",
+      description: "first",
+      status: "todo",
+      priority: "high",
+      ownerType: "unassigned",
+      goal: "first",
       acceptanceCriteria: [],
       dependsOn: [],
       contextRefIds: [],
@@ -87,27 +85,27 @@ const seedEvents: DomainEvent[] = [
     } as never,
   }),
   evt({
-    id: 'evt_s1',
-    type: 'session.started',
-    scopeType: 'session',
-    scopeId: 'sess_1',
-    actor: 'claude',
+    id: "evt_s1",
+    type: "session.started",
+    scopeType: "session",
+    scopeId: "sess_1",
+    actor: "claude",
     payload: {
-      id: 'sess_1',
+      id: "sess_1",
       schemaVersion: CURRENT_SCHEMA_VERSION,
       createdAt: ts,
       updatedAt: ts,
       projectId,
-      actor: 'claude',
+      actor: "claude",
       startedAt: ts,
       lastSeenAt: ts,
-      status: 'active',
+      status: "active",
     } as never,
   }),
 ];
 
 beforeEach(async () => {
-  sandbox = await mkdtemp(join(tmpdir(), 'mori-pstore-'));
+  sandbox = await mkdtemp(join(tmpdir(), "mori-pstore-"));
   process.env.MEMORIZE_ROOT = sandbox;
 });
 
@@ -117,8 +115,8 @@ afterEach(async () => {
   await rm(sandbox, { recursive: true, force: true });
 });
 
-describe('projection store', () => {
-  it('round-trips: reduce → writeProjection → read back == reduced entities', async () => {
+describe("projection store", () => {
+  it("round-trips: reduce → writeProjection → read back == reduced entities", async () => {
     for (const event of seedEvents) {
       await appendEvent({
         type: event.type,

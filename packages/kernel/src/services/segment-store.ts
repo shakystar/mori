@@ -1,4 +1,4 @@
-import { getDb } from '../storage/db.js';
+import { getDb } from "../storage/db.js";
 
 /**
  * Read side of the `segments` table (v10) — a DERIVED, bounded short-term
@@ -53,7 +53,7 @@ function parseRow(r: RawRow): SegmentRow {
 export function listSegments(projectId: string): SegmentRow[] {
   const rows = getDb(projectId)
     .prepare(
-      'SELECT id, session_id, created_at, ordinal, source, source_project_id, text FROM segments ORDER BY created_at DESC, ordinal ASC',
+      "SELECT id, session_id, created_at, ordinal, source, source_project_id, text FROM segments ORDER BY created_at DESC, ordinal ASC",
     )
     .all() as RawRow[];
   return rows.map(parseRow);

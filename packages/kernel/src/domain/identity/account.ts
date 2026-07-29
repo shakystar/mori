@@ -1,4 +1,4 @@
-import { assertValidId } from '../common.js';
+import { assertValidId } from "../common.js";
 
 /**
  * The reserved LOCAL account used before any server login (OAuth/Hub). memorize
@@ -8,7 +8,7 @@ import { assertValidId } from '../common.js';
  * server-issued accountId (a later milestone, W1). It is deliberately a fixed
  * SENTINEL, never minted, so it can never collide with a server `acc_…`.
  */
-export const DEFAULT_ACCOUNT_ID = 'local_default';
+export const DEFAULT_ACCOUNT_ID = "local_default";
 
 export function isDefaultAccount(accountId: string): boolean {
   return accountId === DEFAULT_ACCOUNT_ID;
@@ -27,7 +27,7 @@ export function isDefaultAccount(accountId: string): boolean {
 export function resolveActiveAccount(): string {
   const override = process.env.MEMORIZE_ACCOUNT?.trim();
   if (override) {
-    assertValidId(override, 'accountId');
+    assertValidId(override, "accountId");
     return override;
   }
   return DEFAULT_ACCOUNT_ID;

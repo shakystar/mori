@@ -1,16 +1,16 @@
-import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { closeAll } from '../../src/storage/db.js';
-import { appendEvents, readEvents } from '../../src/storage/event-store.js';
+import { closeAll } from "../../src/storage/db.js";
+import { appendEvents, readEvents } from "../../src/storage/event-store.js";
 
 let sandbox: string;
 
 beforeEach(async () => {
-  sandbox = await mkdtemp(join(tmpdir(), 'memorize-append-atomic-'));
+  sandbox = await mkdtemp(join(tmpdir(), "memorize-append-atomic-"));
   process.env.MEMORIZE_ROOT = sandbox;
 });
 
@@ -20,11 +20,11 @@ afterEach(async () => {
   await rm(sandbox, { recursive: true, force: true });
 });
 
-describe('appendEvents atomicity', () => {
-  it('rolls back the whole batch when one event fails inside the transaction', async () => {
+describe("appendEvents atomicity", () => {
+  it("rolls back the whole batch when one event fails inside the transaction", async () => {
     // event-store has no dependency on the (out-of-scope, #11) project
     // service — a bare valid projectId is enough to address a per-project db.
-    const projectId = 'proj_atomic_test1';
+    const projectId = "proj_atomic_test1";
 
     const before = (await readEvents(projectId)).length;
 
@@ -34,19 +34,19 @@ describe('appendEvents atomicity', () => {
     await expect(
       appendEvents(projectId, [
         {
-          type: 'task.created',
+          type: "task.created",
           projectId,
-          scopeType: 'task',
-          scopeId: 'task_ok',
-          actor: 'user',
-          payload: { id: 'task_ok' } as never,
+          scopeType: "task",
+          scopeId: "task_ok",
+          actor: "user",
+          payload: { id: "task_ok" } as never,
         },
         {
-          type: 'task.created',
+          type: "task.created",
           projectId,
-          scopeType: 'task',
-          scopeId: 'task_bad',
-          actor: 'user',
+          scopeType: "task",
+          scopeId: "task_bad",
+          actor: "user",
           payload: { bad: 1n } as never,
         },
       ]),
@@ -56,6 +56,6 @@ describe('appendEvents atomicity', () => {
     // event nor the failing second event was persisted.
     const after = await readEvents(projectId);
     expect(after.length).toBe(before);
-    expect(after.some((e) => e.scopeId === 'task_ok')).toBe(false);
+    expect(after.some((e) => e.scopeId === "task_ok")).toBe(false);
   });
 });

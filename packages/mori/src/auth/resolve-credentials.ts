@@ -62,21 +62,31 @@ export async function resolveCredentials(
 }
 
 /**
- * Wraps a `CredentialStore` so a stored OAuth credential always reads as absent,
- * regardless of expiry. This is for wiring in front of a real pi-ai request path (see
- * agent.ts's `createMoriModels`) whose registered providers never accept OAuth as a
- * real-request auth method — anthropic has `auth.oauth` stripped (#16), and openai never
- * had it. pi-ai's own auth resolution has no env fallback once *anything* is stored for a
- * provider (once stored, it owns that provider; ambient/env is not consulted — see
- * `checkProviderAuth`/`resolveProviderAuth` in the installed `@earendil-works/pi-ai`).
- * Without this wrapper, a stored OAuth credential — expired or not — would permanently
- * shadow a valid API key env var on any provider wired to reject OAuth requests.
+ * Wraps a `CredentialStore` so a stored OAuth credential reads as absent — regardless of
+ * expiry — for every provider `shouldHide` selects.
+ *
+ * Why it exists: pi-ai's auth resolution has no env fallback once *anything* is stored for
+ * a provider (once stored, the credential owns that provider; ambient/env is not consulted
+ * — see `checkProviderAuth`/`resolveProviderAuth` in the installed `@earendil-works/pi-ai`).
+ * So on a provider that cannot use OAuth for a real request, a stored OAuth credential
+ * would permanently shadow a valid API key env var.
+ *
+ * Why it is conditional rather than unconditional: as of #44 that is no longer true of
+ * every provider mori registers. `openai-codex` authenticates with OAuth and nothing else,
+ * so hiding its credential would make `mori login` succeed and then leave every request
+ * unauthenticated. The caller passes the policy — `model-wiring.ts` hides OAuth exactly for
+ * the providers whose registered `auth.oauth` is absent, which keeps anthropic hidden
+ * (#16's standing decision, enforced by stripping `auth.oauth` there) without hard-coding
+ * a provider id here.
  */
-export function hidingOAuth(store: CredentialStore): CredentialStore {
+export function hidingOAuth(
+  store: CredentialStore,
+  shouldHide: (providerId: string) => boolean,
+): CredentialStore {
   return {
     read: async (providerId) => {
       const credential = await store.read(providerId);
-      if (credential?.type === "oauth") return undefined;
+      if (credential?.type === "oauth" && shouldHide(providerId)) return undefined;
       return credential;
     },
     list: () => store.list(),

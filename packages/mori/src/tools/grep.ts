@@ -125,14 +125,23 @@ export function grep(root: string, pattern: string, options: GrepOptions = {}): 
 }
 
 const grepParameters = Type.Object({
-  pattern: Type.String({ description: "Fixed string (or regular expression, if regex=true) to search for." }),
+  pattern: Type.String({
+    description: "Fixed string (or regular expression, if regex=true) to search for.",
+  }),
   path: Type.Optional(
-    Type.String({ description: "Subdirectory or file to search, relative to the working root. Defaults to the whole root." }),
+    Type.String({
+      description:
+        "Subdirectory or file to search, relative to the working root. Defaults to the whole root.",
+    }),
   ),
-  regex: Type.Optional(Type.Boolean({ description: "Treat `pattern` as a regular expression. Defaults to false." })),
+  regex: Type.Optional(
+    Type.Boolean({ description: "Treat `pattern` as a regular expression. Defaults to false." }),
+  ),
 });
 
-export function createGrepTool(root: string = process.cwd()): AgentTool<typeof grepParameters, GrepResult> {
+export function createGrepTool(
+  root: string = process.cwd(),
+): AgentTool<typeof grepParameters, GrepResult> {
   return {
     name: "grep",
     label: "Search Files",
@@ -145,7 +154,9 @@ export function createGrepTool(root: string = process.cwd()): AgentTool<typeof g
       if (!result.ok) return errorResult(result);
 
       const lines = result.matches.map((match) => `${match.file}:${match.line}:${match.text}`);
-      const notice = result.truncated ? `\n\n[truncated: showing first ${GREP_MAX_MATCHES} matches]` : "";
+      const notice = result.truncated
+        ? `\n\n[truncated: showing first ${GREP_MAX_MATCHES} matches]`
+        : "";
       const text = lines.length > 0 ? lines.join("\n") + notice : "No matches found.";
 
       return textResult(text, result);

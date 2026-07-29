@@ -5,6 +5,10 @@ on:
   push:
     branches: [main]
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
@@ -26,8 +30,17 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Lint
+        run: pnpm lint
+
+      - name: Format check
+        run: pnpm format:check
+
       - name: Build
         run: pnpm build
 
+      # Runs vitest directly instead of `pnpm test` so the build above isn't
+      # redone via the `pretest` lifecycle hook (that hook exists for `pnpm test`
+      # to be self-sufficient in local dev, but CI already built in the step above).
       - name: Test
-        run: pnpm test
+        run: pnpm exec vitest run

@@ -1,9 +1,10 @@
 import { describe, expect, it } from "vitest";
+import { EXPERIMENTAL_OPENAI_OAUTH_ENV, OPENAI_OAUTH_PROVIDER_ID } from "./auth/experimental.js";
 import {
   DEFAULT_MODEL_ID,
   DEFAULT_PROVIDER_ID,
   resolveProviderSelection,
-  SUPPORTED_PROVIDER_IDS,
+  supportedProviderIds,
   unknownProviderMessage,
 } from "./provider-selection.js";
 
@@ -37,12 +38,34 @@ describe("resolveProviderSelection", () => {
   });
 });
 
+describe("supportedProviderIds", () => {
+  it("offers only the two API-key providers when the experimental gate is unset", () => {
+    // #44 hard constraint 1: with no configuration at all, the experimental
+    // subscription-OAuth provider must not exist as far as the user can tell.
+    expect(supportedProviderIds({})).toEqual(["anthropic", "openai"]);
+  });
+
+  it("adds the experimental OpenAI OAuth provider once the gate is set to 1", () => {
+    expect(supportedProviderIds({ [EXPERIMENTAL_OPENAI_OAUTH_ENV]: "1" })).toEqual([
+      "anthropic",
+      "openai",
+      OPENAI_OAUTH_PROVIDER_ID,
+    ]);
+  });
+});
+
 describe("unknownProviderMessage", () => {
   it("names the offending provider and lists supported ones", () => {
-    const message = unknownProviderMessage("bogus");
+    const message = unknownProviderMessage("bogus", {});
     expect(message).toContain("bogus");
-    for (const id of SUPPORTED_PROVIDER_IDS) {
+    for (const id of supportedProviderIds({})) {
       expect(message).toContain(id);
     }
+  });
+
+  it("keeps the gated-off experimental provider out of the supported list it prints", () => {
+    expect(unknownProviderMessage(OPENAI_OAUTH_PROVIDER_ID, {})).toContain(
+      "지원하는 프로바이더: anthropic, openai\n",
+    );
   });
 });

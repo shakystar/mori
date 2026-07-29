@@ -1,20 +1,20 @@
-import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { CURRENT_SCHEMA_VERSION } from '../../src/domain/common.js';
-import { hashText, type Embedder } from '../../src/services/embeddings-service.js';
-import { upsertEmbedding } from '../../src/services/embeddings-store.js';
+import { CURRENT_SCHEMA_VERSION } from "../../src/domain/common.js";
+import { hashText, type Embedder } from "../../src/services/embeddings-service.js";
+import { upsertEmbedding } from "../../src/services/embeddings-store.js";
 import {
   listTasks,
   listValidMemories,
   rebuildProjectProjection,
-} from '../../src/services/projection-store.js';
-import { hybridSearch, searchProject, semanticSearch } from '../../src/services/search-service.js';
-import { closeAll, getDb } from '../../src/storage/db.js';
-import { appendEvent } from '../../src/storage/event-store.js';
+} from "../../src/services/projection-store.js";
+import { hybridSearch, searchProject, semanticSearch } from "../../src/services/search-service.js";
+import { closeAll, getDb } from "../../src/storage/db.js";
+import { appendEvent } from "../../src/storage/event-store.js";
 
 // M2 `(entity, writer)` projection, persistence + selector side: a foreign
 // origin store's rows (simulated via the `sourceProjectId` provenance override)
@@ -27,9 +27,9 @@ import { appendEvent } from '../../src/storage/event-store.js';
 // #11 scope, deferred until #62 ported search-service.ts. Those cases are
 // revived below (`describe('search lane surfacing')`).
 
-const projectId = 'proj_lane_self';
-const FOREIGN = 'proj_lane_bob';
-const ts = '2026-06-01T00:00:00.000Z';
+const projectId = "proj_lane_self";
+const FOREIGN = "proj_lane_bob";
+const ts = "2026-06-01T00:00:00.000Z";
 
 let sandbox: string;
 
@@ -40,13 +40,13 @@ function taskPayload(id: string, title: string) {
     createdAt: ts,
     updatedAt: ts,
     projectId,
-    workstreamId: 'ws_1',
+    workstreamId: "ws_1",
     title,
-    description: 'desc',
-    status: 'in_progress',
-    priority: 'high',
-    ownerType: 'unassigned',
-    goal: 'g',
+    description: "desc",
+    status: "in_progress",
+    priority: "high",
+    ownerType: "unassigned",
+    goal: "g",
     acceptanceCriteria: [],
     dependsOn: [],
     contextRefIds: [],
@@ -64,7 +64,7 @@ function memoryPayload(id: string, text: string) {
     createdAt: ts,
     updatedAt: ts,
     projectId,
-    kind: 'insight',
+    kind: "insight",
     text,
     salience: 3,
     sourceObservationIds: [],
@@ -72,25 +72,25 @@ function memoryPayload(id: string, text: string) {
 }
 
 beforeEach(async () => {
-  sandbox = await mkdtemp(join(tmpdir(), 'mori-lane-'));
+  sandbox = await mkdtemp(join(tmpdir(), "mori-lane-"));
   process.env.MEMORIZE_ROOT = sandbox;
 
   await appendEvent({
-    type: 'project.created',
+    type: "project.created",
     projectId,
-    scopeType: 'project',
+    scopeType: "project",
     scopeId: projectId,
-    actor: 'test',
+    actor: "test",
     payload: {
       id: projectId,
       schemaVersion: CURRENT_SCHEMA_VERSION,
       createdAt: ts,
       updatedAt: ts,
-      title: 'Self',
-      summary: 'self store',
+      title: "Self",
+      summary: "self store",
       goals: [],
-      status: 'active',
-      rootPath: '/tmp/self',
+      status: "active",
+      rootPath: "/tmp/self",
       activeWorkstreamIds: [],
       activeTaskIds: [],
       acceptedDecisionIds: [],
@@ -99,39 +99,39 @@ beforeEach(async () => {
   });
   // Self task + memory (no provenance override → self lane, NULL column).
   await appendEvent({
-    type: 'task.created',
+    type: "task.created",
     projectId,
-    scopeType: 'task',
-    scopeId: 'task_self',
-    actor: 'test',
-    payload: taskPayload('task_self', 'alpha self task') as never,
+    scopeType: "task",
+    scopeId: "task_self",
+    actor: "test",
+    payload: taskPayload("task_self", "alpha self task") as never,
   });
   await appendEvent({
-    type: 'memory.consolidated',
+    type: "memory.consolidated",
     projectId,
-    scopeType: 'project',
+    scopeType: "project",
     scopeId: projectId,
-    actor: 'test',
-    payload: memoryPayload('mem_self', 'alpha self memory') as never,
+    actor: "test",
+    payload: memoryPayload("mem_self", "alpha self memory") as never,
   });
   // Foreign task + memory carried in by a union: same store, foreign lane.
   await appendEvent({
-    type: 'task.created',
+    type: "task.created",
     projectId,
-    scopeType: 'task',
-    scopeId: 'task_bob',
-    actor: 'test',
+    scopeType: "task",
+    scopeId: "task_bob",
+    actor: "test",
     sourceProjectId: FOREIGN,
-    payload: taskPayload('task_bob', 'alpha bob task') as never,
+    payload: taskPayload("task_bob", "alpha bob task") as never,
   });
   await appendEvent({
-    type: 'memory.consolidated',
+    type: "memory.consolidated",
     projectId,
-    scopeType: 'project',
+    scopeType: "project",
     scopeId: projectId,
-    actor: 'test',
+    actor: "test",
     sourceProjectId: FOREIGN,
-    payload: memoryPayload('mem_bob', 'alpha bob memory') as never,
+    payload: memoryPayload("mem_bob", "alpha bob memory") as never,
   });
 
   await rebuildProjectProjection(projectId);
@@ -143,80 +143,78 @@ afterEach(async () => {
   await rm(sandbox, { recursive: true, force: true });
 });
 
-describe('projection lane selector (M2)', () => {
-  it('stores the lane in source_project_id: NULL for self, origin id for foreign', () => {
+describe("projection lane selector (M2)", () => {
+  it("stores the lane in source_project_id: NULL for self, origin id for foreign", () => {
     const rows = getDb(projectId)
-      .prepare('SELECT id, source_project_id AS lane FROM tasks ORDER BY id')
+      .prepare("SELECT id, source_project_id AS lane FROM tasks ORDER BY id")
       .all() as Array<{ id: string; lane: string | null }>;
     expect(rows).toEqual([
-      { id: 'task_bob', lane: FOREIGN },
-      { id: 'task_self', lane: null },
+      { id: "task_bob", lane: FOREIGN },
+      { id: "task_self", lane: null },
     ]);
   });
 
-  it('listTasks defaults to self; union surfaces both without folding', () => {
-    expect(listTasks(projectId).map((t) => t.id)).toEqual(['task_self']);
+  it("listTasks defaults to self; union surfaces both without folding", () => {
+    expect(listTasks(projectId).map((t) => t.id)).toEqual(["task_self"]);
     expect(
-      listTasks(projectId, {}, 'union')
+      listTasks(projectId, {}, "union")
         .map((t) => t.id)
         .sort(),
-    ).toEqual(['task_bob', 'task_self']);
+    ).toEqual(["task_bob", "task_self"]);
   });
 
-  it('listValidMemories defaults to self; union surfaces both', () => {
-    expect(listValidMemories(projectId).map((r) => r.memory.id)).toEqual([
-      'mem_self',
-    ]);
+  it("listValidMemories defaults to self; union surfaces both", () => {
+    expect(listValidMemories(projectId).map((r) => r.memory.id)).toEqual(["mem_self"]);
     expect(
-      listValidMemories(projectId, 'union')
+      listValidMemories(projectId, "union")
         .map((r) => r.memory.id)
         .sort(),
-    ).toEqual(['mem_bob', 'mem_self']);
+    ).toEqual(["mem_bob", "mem_self"]);
   });
 });
 
-describe('search lane surfacing', () => {
-  it('searchProject defaults to self; union searches every lane', () => {
-    const self = searchProject(projectId, 'alpha').map((h) => h.entityId).sort();
-    expect(self).toEqual(['mem_self', 'task_self']);
-    const union = searchProject(projectId, 'alpha', 20, 'union')
+describe("search lane surfacing", () => {
+  it("searchProject defaults to self; union searches every lane", () => {
+    const self = searchProject(projectId, "alpha")
       .map((h) => h.entityId)
       .sort();
-    expect(union).toEqual(['mem_bob', 'mem_self', 'task_bob', 'task_self']);
+    expect(self).toEqual(["mem_self", "task_self"]);
+    const union = searchProject(projectId, "alpha", 20, "union")
+      .map((h) => h.entityId)
+      .sort();
+    expect(union).toEqual(["mem_bob", "mem_self", "task_bob", "task_self"]);
   });
 
-  it('union hits carry sourceProjectId for foreign rows and omit it for self', () => {
-    const hits = searchProject(projectId, 'alpha', 20, 'union');
+  it("union hits carry sourceProjectId for foreign rows and omit it for self", () => {
+    const hits = searchProject(projectId, "alpha", 20, "union");
     const byId = new Map(hits.map((h) => [h.entityId, h]));
 
     // Foreign hits carry their origin store id.
-    expect(byId.get('task_bob')!.sourceProjectId).toBe(FOREIGN);
-    expect(byId.get('mem_bob')!.sourceProjectId).toBe(FOREIGN);
+    expect(byId.get("task_bob")!.sourceProjectId).toBe(FOREIGN);
+    expect(byId.get("mem_bob")!.sourceProjectId).toBe(FOREIGN);
 
     // Self hits omit the field entirely (absence = self, never null).
-    expect('sourceProjectId' in byId.get('task_self')!).toBe(false);
-    expect('sourceProjectId' in byId.get('mem_self')!).toBe(false);
+    expect("sourceProjectId" in byId.get("task_self")!).toBe(false);
+    expect("sourceProjectId" in byId.get("mem_self")!).toBe(false);
   });
 
-  it('hybridSearch defaults to self; union surfaces foreign hits with provenance', async () => {
-    const self = (await hybridSearch(projectId, 'alpha'))
-      .map((h) => h.entityId)
-      .sort();
-    expect(self).toEqual(['mem_self', 'task_self']);
+  it("hybridSearch defaults to self; union surfaces foreign hits with provenance", async () => {
+    const self = (await hybridSearch(projectId, "alpha")).map((h) => h.entityId).sort();
+    expect(self).toEqual(["mem_self", "task_self"]);
 
-    const union = await hybridSearch(projectId, 'alpha', 20, undefined, 'union');
-    const bob = union.find((h) => h.entityId === 'task_bob');
+    const union = await hybridSearch(projectId, "alpha", 20, undefined, "union");
+    const bob = union.find((h) => h.entityId === "task_bob");
     expect(bob).toBeDefined();
     expect(bob!.sourceProjectId).toBe(FOREIGN);
   });
 
-  it('hybridSearch preserves provenance through the RRF fusion + byId merge (embedder ON)', async () => {
+  it("hybridSearch preserves provenance through the RRF fusion + byId merge (embedder ON)", async () => {
     // The embedder-off tests above all hit `hybridSearch`'s early return
     // (`if (semantic.length === 0) return ftsHits.slice(0, limit)`) BEFORE the
     // RRF/byId merge block runs. This test supplies a stub Embedder so the
     // semantic list is non-empty and that merge block actually executes.
     const stubEmbedder: Embedder = {
-      model: 'stub-embedder',
+      model: "stub-embedder",
       embed: async (texts) => texts.map(() => [1, 0, 0]),
     };
     // The semantic corpus (the `embeddings` table) is populated out-of-band by
@@ -225,12 +223,12 @@ describe('search lane surfacing', () => {
     // mem_self — the only self-lane, valid memory in this fixture — so
     // `listEmbeddings(projectId, 'memory')` is non-empty.
     upsertEmbedding(projectId, {
-      entityId: 'mem_self',
-      kind: 'memory',
+      entityId: "mem_self",
+      kind: "memory",
       model: stubEmbedder.model,
       dim: 3,
       vector: [1, 0, 0],
-      textHash: hashText('alpha self memory'),
+      textHash: hashText("alpha self memory"),
       createdAt: ts,
     });
 
@@ -239,16 +237,16 @@ describe('search lane surfacing', () => {
     // `if (semantic.length === 0) return ...`). A non-empty result here means
     // hybridSearch's call to the same semanticSearch will also be non-empty,
     // so the guard is false and control falls through to the RRF/byId block.
-    const semanticHits = await semanticSearch(projectId, 'alpha', 20, stubEmbedder);
+    const semanticHits = await semanticSearch(projectId, "alpha", 20, stubEmbedder);
     expect(semanticHits.length).toBeGreaterThan(0);
 
-    const union = await hybridSearch(projectId, 'alpha', 20, stubEmbedder, 'union');
+    const union = await hybridSearch(projectId, "alpha", 20, stubEmbedder, "union");
     const byId = new Map(union.map((h) => [h.entityId, h]));
 
     // Foreign hit's provenance survives RRF fusion + the byId merge.
-    expect(byId.get('task_bob')!.sourceProjectId).toBe(FOREIGN);
+    expect(byId.get("task_bob")!.sourceProjectId).toBe(FOREIGN);
     // A fused self hit carries no sourceProjectId key at all (absence = self,
     // matching the existing tests' absence-assertion style).
-    expect('sourceProjectId' in byId.get('task_self')!).toBe(false);
+    expect("sourceProjectId" in byId.get("task_self")!).toBe(false);
   });
 });

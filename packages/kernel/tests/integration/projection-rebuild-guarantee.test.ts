@@ -1,8 +1,8 @@
-import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
   createConflict,
@@ -15,10 +15,10 @@ import {
   createSession,
   createTask,
   createWorkstream,
-} from '../../src/domain/entities.js';
-import { rebuildProjectProjection } from '../../src/services/projection-store.js';
-import { appendEvent } from '../../src/storage/event-store.js';
-import { closeAll, getDb } from '../../src/storage/db.js';
+} from "../../src/domain/entities.js";
+import { rebuildProjectProjection } from "../../src/services/projection-store.js";
+import { appendEvent } from "../../src/storage/event-store.js";
+import { closeAll, getDb } from "../../src/storage/db.js";
 
 /**
  * The event log is the source of truth (#10): every projection table must be
@@ -35,25 +35,25 @@ import { closeAll, getDb } from '../../src/storage/db.js';
  */
 
 const SNAPSHOT_TABLES = [
-  'projects',
-  'memory_index',
-  'workstreams',
-  'tasks',
-  'task_requests',
-  'handoffs',
-  'checkpoints',
-  'decisions',
-  'rules',
-  'conflicts',
-  'sessions',
-  'observations',
-  'memories',
+  "projects",
+  "memory_index",
+  "workstreams",
+  "tasks",
+  "task_requests",
+  "handoffs",
+  "checkpoints",
+  "decisions",
+  "rules",
+  "conflicts",
+  "sessions",
+  "observations",
+  "memories",
 ] as const;
 
 let sandbox: string;
 
 beforeEach(async () => {
-  sandbox = await mkdtemp(join(tmpdir(), 'mori-rebuild-guarantee-'));
+  sandbox = await mkdtemp(join(tmpdir(), "mori-rebuild-guarantee-"));
   process.env.MEMORIZE_ROOT = sandbox;
 });
 
@@ -83,14 +83,13 @@ function snapshot(projectId: string): Record<string, unknown[]> {
     const rows = db.prepare(`SELECT * FROM ${table} ORDER BY id`).all() as Array<{
       data: string;
     }>;
-    snap[table] =
-      table === 'memory_index' ? rows.map(normalizeMemoryIndexRow) : rows;
+    snap[table] = table === "memory_index" ? rows.map(normalizeMemoryIndexRow) : rows;
   }
   // search_fts is a virtual FTS5 table with no stable rowid ordering
   // guarantee across a wipe + reinsert, so sort by its own columns.
   snap.search_fts = db
     .prepare(
-      'SELECT entity_id, kind, text, source_project_id FROM search_fts ORDER BY entity_id, kind',
+      "SELECT entity_id, kind, text, source_project_id FROM search_fts ORDER BY entity_id, kind",
     )
     .all() as unknown[];
   return snap;
@@ -102,231 +101,231 @@ function wipeAllProjections(projectId: string): void {
     for (const table of SNAPSHOT_TABLES) {
       db.prepare(`DELETE FROM ${table}`).run();
     }
-    db.prepare('DELETE FROM search_fts').run();
+    db.prepare("DELETE FROM search_fts").run();
   })();
 }
 
-describe('projection rebuild guarantee (event log is source of truth)', () => {
-  it('wiping every projection table and rebuilding from the event log alone reproduces the same state', async () => {
-    const projectId = 'proj_rebuild_guarantee1';
-    const ts = '2026-07-01T00:00:00.000Z';
+describe("projection rebuild guarantee (event log is source of truth)", () => {
+  it("wiping every projection table and rebuilding from the event log alone reproduces the same state", async () => {
+    const projectId = "proj_rebuild_guarantee1";
+    const ts = "2026-07-01T00:00:00.000Z";
 
-    const project = createProject({ title: 'Rebuild Guarantee', rootPath: '/tmp/rebuild' });
+    const project = createProject({ title: "Rebuild Guarantee", rootPath: "/tmp/rebuild" });
     await appendEvent({
-      type: 'project.created',
+      type: "project.created",
       projectId,
-      scopeType: 'project',
+      scopeType: "project",
       scopeId: projectId,
-      actor: 'test',
+      actor: "test",
       payload: { ...project, id: projectId },
     });
 
-    const workstream = createWorkstream({ projectId, title: 'main' });
+    const workstream = createWorkstream({ projectId, title: "main" });
     await appendEvent({
-      type: 'workstream.created',
+      type: "workstream.created",
       projectId,
-      scopeType: 'workstream',
+      scopeType: "workstream",
       scopeId: workstream.id,
-      actor: 'test',
+      actor: "test",
       payload: workstream,
     });
 
-    const task = createTask({ projectId, workstreamId: workstream.id, title: 'Task A' });
+    const task = createTask({ projectId, workstreamId: workstream.id, title: "Task A" });
     await appendEvent({
-      type: 'task.created',
+      type: "task.created",
       projectId,
-      scopeType: 'task',
+      scopeType: "task",
       scopeId: task.id,
-      actor: 'test',
+      actor: "test",
       payload: task,
     });
     await appendEvent({
-      type: 'task.updated',
+      type: "task.updated",
       projectId,
-      scopeType: 'task',
+      scopeType: "task",
       scopeId: task.id,
-      actor: 'test',
-      payload: { status: 'in_progress' },
+      actor: "test",
+      payload: { status: "in_progress" },
     });
     await appendEvent({
-      type: 'task.item-appended',
+      type: "task.item-appended",
       projectId,
-      scopeType: 'task',
+      scopeType: "task",
       scopeId: task.id,
-      actor: 'test',
-      payload: { field: 'openQuestions', text: 'What is the rebuild invariant?' },
+      actor: "test",
+      payload: { field: "openQuestions", text: "What is the rebuild invariant?" },
     });
 
     const decisionOld = createDecision({
-      scopeType: 'project',
+      scopeType: "project",
       scopeId: projectId,
-      title: 'Old decision',
-      decision: 'Do it the old way',
-      rationale: 'Seemed fine then',
-      createdBy: 'test',
+      title: "Old decision",
+      decision: "Do it the old way",
+      rationale: "Seemed fine then",
+      createdBy: "test",
     });
     await appendEvent({
-      type: 'decision.accepted',
+      type: "decision.accepted",
       projectId,
-      scopeType: 'project',
+      scopeType: "project",
       scopeId: projectId,
-      actor: 'test',
+      actor: "test",
       payload: decisionOld,
     });
     const decisionNew = createDecision({
-      scopeType: 'project',
+      scopeType: "project",
       scopeId: projectId,
-      title: 'New decision',
-      decision: 'Do it the new way',
-      rationale: 'Old way had a bug',
-      createdBy: 'test',
+      title: "New decision",
+      decision: "Do it the new way",
+      rationale: "Old way had a bug",
+      createdBy: "test",
     });
     await appendEvent({
-      type: 'decision.accepted',
+      type: "decision.accepted",
       projectId,
-      scopeType: 'project',
+      scopeType: "project",
       scopeId: projectId,
-      actor: 'test',
+      actor: "test",
       payload: decisionNew,
     });
     await appendEvent({
-      type: 'decision.superseded',
+      type: "decision.superseded",
       projectId,
-      scopeType: 'project',
+      scopeType: "project",
       scopeId: decisionOld.id,
-      actor: 'test',
+      actor: "test",
       payload: {
         supersedes: decisionOld.id,
         supersededBy: decisionNew.id,
-        reason: 'replaced',
+        reason: "replaced",
       },
     });
 
     const handoff = createHandoff({
       projectId,
       taskId: task.id,
-      fromActor: 'claude',
-      toActor: 'next-agent',
-      summary: 'Set up the rebuild guarantee test',
-      nextAction: 'Run the suite',
+      fromActor: "claude",
+      toActor: "next-agent",
+      summary: "Set up the rebuild guarantee test",
+      nextAction: "Run the suite",
     });
     await appendEvent({
-      type: 'handoff.created',
+      type: "handoff.created",
       projectId,
-      scopeType: 'task',
+      scopeType: "task",
       scopeId: task.id,
-      actor: 'claude',
+      actor: "claude",
       payload: handoff,
     });
 
     const rule = createRule({
-      scopeType: 'project',
+      scopeType: "project",
       scopeId: projectId,
-      title: 'Imported rule',
-      body: 'Keep commits small',
-      updatedBy: 'test',
-      source: 'imported',
+      title: "Imported rule",
+      body: "Keep commits small",
+      updatedBy: "test",
+      source: "imported",
     });
     await appendEvent({
-      type: 'rule.upserted',
+      type: "rule.upserted",
       projectId,
-      scopeType: 'project',
+      scopeType: "project",
       scopeId: projectId,
-      actor: 'test',
+      actor: "test",
       payload: rule,
     });
 
     const conflict = createConflict({
       projectId,
-      scopeType: 'rule',
+      scopeType: "rule",
       scopeId: projectId,
-      fieldPath: 'commit_style',
-      leftVersion: 'small_commits',
-      rightVersion: 'squash_final_commit',
-      conflictType: 'rule',
+      fieldPath: "commit_style",
+      leftVersion: "small_commits",
+      rightVersion: "squash_final_commit",
+      conflictType: "rule",
     });
     await appendEvent({
-      type: 'conflict.detected',
+      type: "conflict.detected",
       projectId,
-      scopeType: 'project',
+      scopeType: "project",
       scopeId: projectId,
-      actor: 'test',
+      actor: "test",
       payload: conflict,
     });
 
-    const session = createSession({ projectId, actor: 'claude', taskId: task.id });
+    const session = createSession({ projectId, actor: "claude", taskId: task.id });
     await appendEvent({
-      type: 'session.started',
+      type: "session.started",
       projectId,
-      scopeType: 'session',
+      scopeType: "session",
       scopeId: session.id,
-      actor: 'claude',
+      actor: "claude",
       payload: session,
     });
     await appendEvent({
-      type: 'session.heartbeat',
+      type: "session.heartbeat",
       projectId,
-      scopeType: 'session',
+      scopeType: "session",
       scopeId: session.id,
-      actor: 'claude',
+      actor: "claude",
       payload: { sessionId: session.id, at: ts },
     });
 
     const observation = createObservation({
       projectId,
       sessionId: session.id,
-      signal: 'tool-use',
-      summary: 'ran a build',
+      signal: "tool-use",
+      summary: "ran a build",
     });
     await appendEvent({
-      type: 'observation.captured',
+      type: "observation.captured",
       projectId,
-      scopeType: 'session',
+      scopeType: "session",
       scopeId: session.id,
-      actor: 'claude',
+      actor: "claude",
       payload: observation,
     });
 
     const memoryOld = createConsolidatedMemory({
       projectId,
-      kind: 'decision',
-      text: 'We used to do it the old way',
+      kind: "decision",
+      text: "We used to do it the old way",
       salience: 5,
       sourceObservationIds: [observation.id],
     });
     await appendEvent({
-      type: 'memory.consolidated',
+      type: "memory.consolidated",
       projectId,
-      scopeType: 'project',
+      scopeType: "project",
       scopeId: projectId,
-      actor: 'claude',
+      actor: "claude",
       payload: memoryOld,
     });
     const memoryNew = createConsolidatedMemory({
       projectId,
-      kind: 'decision',
-      text: 'We now do it the new way',
+      kind: "decision",
+      text: "We now do it the new way",
       salience: 6,
       sourceObservationIds: [observation.id],
     });
     await appendEvent({
-      type: 'memory.consolidated',
+      type: "memory.consolidated",
       projectId,
-      scopeType: 'project',
+      scopeType: "project",
       scopeId: projectId,
-      actor: 'claude',
+      actor: "claude",
       payload: memoryNew,
     });
     await appendEvent({
-      type: 'memory.superseded',
+      type: "memory.superseded",
       projectId,
-      scopeType: 'project',
+      scopeType: "project",
       scopeId: memoryOld.id,
-      actor: 'claude',
+      actor: "claude",
       payload: {
         supersedes: memoryOld.id,
         supersededBy: memoryNew.id,
-        reason: 'replaced by newer decision',
+        reason: "replaced by newer decision",
       },
     });
 
@@ -345,8 +344,11 @@ describe('projection rebuild guarantee (event log is source of truth)', () => {
     // Every table has at least one row, otherwise the equality check below
     // would vacuously pass on empty tables and guard nothing.
     for (const table of SNAPSHOT_TABLES) {
-      if (table === 'task_requests' || table === 'checkpoints') continue; // not seeded above
-      expect((before[table] as unknown[]).length, `${table} should have rows before wipe`).toBeGreaterThan(0);
+      if (table === "task_requests" || table === "checkpoints") continue; // not seeded above
+      expect(
+        (before[table] as unknown[]).length,
+        `${table} should have rows before wipe`,
+      ).toBeGreaterThan(0);
     }
     expect((before.search_fts as unknown[]).length).toBeGreaterThan(0);
 
@@ -354,7 +356,9 @@ describe('projection rebuild guarantee (event log is source of truth)', () => {
     // — the event log is untouched.
     wipeAllProjections(projectId);
     for (const table of SNAPSHOT_TABLES) {
-      expect(getDb(projectId).prepare(`SELECT COUNT(*) AS n FROM ${table}`).get()).toEqual({ n: 0 });
+      expect(getDb(projectId).prepare(`SELECT COUNT(*) AS n FROM ${table}`).get()).toEqual({
+        n: 0,
+      });
     }
 
     // Rebuild from the event log alone — no network, no LLM, nothing but

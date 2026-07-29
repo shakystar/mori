@@ -1,10 +1,6 @@
-import {
-  type Observation,
-  type ObservationSignal,
-  createObservation,
-} from '../domain/entities.js';
-import { appendEvent } from '../storage/event-store.js';
-import { rebuildProjectProjection } from './projection-store.js';
+import { type Observation, type ObservationSignal, createObservation } from "../domain/entities.js";
+import { appendEvent } from "../storage/event-store.js";
+import { rebuildProjectProjection } from "./projection-store.js";
 
 /**
  * CLS Phase 1 — short-term capture (the cheap half of D3).
@@ -26,14 +22,7 @@ import { rebuildProjectProjection } from './projection-store.js';
  *  simply never matches it. (Gemini and Hermes tool names confirmed via
  *  conformance dogfood; Cursor's are documented, not live-dogfooded — it has no
  *  headless CLI.) */
-const WRITE_TOOLS = new Set([
-  'Write',
-  'Edit',
-  'MultiEdit',
-  'write_file',
-  'replace',
-  'patch',
-]);
+const WRITE_TOOLS = new Set(["Write", "Edit", "MultiEdit", "write_file", "replace", "patch"]);
 
 /**
  * Codex performs file edits through a single `apply_patch` tool rather than
@@ -44,7 +33,7 @@ const WRITE_TOOLS = new Set([
  * codex's edits are invisible to cross-session sharing and collision
  * detection (Phase 1 only saw codex's Bash activity).
  */
-const APPLY_PATCH_TOOLS = new Set(['apply_patch', 'ApplyPatch']);
+const APPLY_PATCH_TOOLS = new Set(["apply_patch", "ApplyPatch"]);
 
 /**
  * Extract the file paths an apply_patch envelope touches. The patch body uses
@@ -75,7 +64,7 @@ const MUTATING_BASH_PATTERN = new RegExp(
     String.raw`\b(npm|pnpm|yarn)\s+(install|add|remove|uninstall|publish|link)\b`,
     String.raw`\bpip3?\s+install\b`,
     String.raw`\b(rm|rmdir|del|mv|move|ren)\s`,
-  ].join('|'),
+  ].join("|"),
 );
 
 /**
@@ -91,7 +80,7 @@ export const DESTRUCTIVE_GIT_PATTERN = new RegExp(
     String.raw`\bgit\s+worktree\s+(remove|prune)\b`,
     String.raw`\bgit\s+branch\s+(-d\b|-D\b|--delete\b)`,
     String.raw`\b(rm|rmdir)\s+[^\n]*(\.git\b|\.worktrees\b)`,
-  ].join('|'),
+  ].join("|"),
 );
 
 /** `memorize task …` invocations that mark a task state transition. */
@@ -120,7 +109,7 @@ export interface CaptureVerdict {
 }
 
 function clip(text: string): string {
-  const collapsed = text.replace(/\s+/g, ' ').trim();
+  const collapsed = text.replace(/\s+/g, " ").trim();
   return collapsed.length > MAX_SUMMARY_LENGTH
     ? `${collapsed.slice(0, MAX_SUMMARY_LENGTH - 1)}…`
     : collapsed;
@@ -139,7 +128,7 @@ export function evaluateCapture(
   if (WRITE_TOOLS.has(toolName)) {
     return {
       capture: true,
-      signal: 'write-tool',
+      signal: "write-tool",
       summary: clip(`${toolName}: ${toolInputText}`),
       ...(toolInputText ? { filePath: toolInputText } : {}),
     };
@@ -152,9 +141,9 @@ export function evaluateCapture(
     const paths = extractApplyPatchPaths(toolInputText);
     return {
       capture: true,
-      signal: 'write-tool',
+      signal: "write-tool",
       summary: clip(
-        paths.length > 0 ? `apply_patch: ${paths.join(', ')}` : `apply_patch: ${toolInputText}`,
+        paths.length > 0 ? `apply_patch: ${paths.join(", ")}` : `apply_patch: ${toolInputText}`,
       ),
       ...(paths[0] ? { filePath: paths[0] } : {}),
     };
@@ -163,33 +152,30 @@ export function evaluateCapture(
   // Shell-tool branch across harnesses: Claude `Bash`, Codex `shell`, Gemini
   // CLI `run_shell_command`, Hermes `terminal`, Cursor `Shell`.
   if (
-    toolName === 'Bash' ||
-    toolName === 'shell' ||
-    toolName === 'run_shell_command' ||
-    toolName === 'terminal' ||
-    toolName === 'Shell'
+    toolName === "Bash" ||
+    toolName === "shell" ||
+    toolName === "run_shell_command" ||
+    toolName === "terminal" ||
+    toolName === "Shell"
   ) {
     if (TASK_TRANSITION_PATTERN.test(toolInputText)) {
       return {
         capture: true,
-        signal: 'task-transition',
+        signal: "task-transition",
         summary: clip(toolInputText),
       };
     }
-    if (
-      MUTATING_BASH_PATTERN.test(toolInputText) ||
-      DESTRUCTIVE_GIT_PATTERN.test(toolInputText)
-    ) {
+    if (MUTATING_BASH_PATTERN.test(toolInputText) || DESTRUCTIVE_GIT_PATTERN.test(toolInputText)) {
       return {
         capture: true,
-        signal: 'mutating-bash',
+        signal: "mutating-bash",
         summary: clip(toolInputText),
       };
     }
     if (DECISION_KEYWORD_PATTERN.test(toolInputText)) {
       return {
         capture: true,
-        signal: 'decision-keyword',
+        signal: "decision-keyword",
         summary: clip(toolInputText),
       };
     }
@@ -258,9 +244,9 @@ export async function captureObservation(
   const scopeId = params.sessionId ?? params.projectId;
 
   await appendEvent({
-    type: 'observation.captured',
+    type: "observation.captured",
     projectId: params.projectId,
-    scopeType: 'session',
+    scopeType: "session",
     scopeId,
     actor: params.actor,
     payload: observation,

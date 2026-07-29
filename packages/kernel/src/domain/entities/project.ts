@@ -1,7 +1,7 @@
-import type { BaseEntity, EntityId } from '../common.js';
-import { baseEntity } from './base.js';
+import type { BaseEntity, EntityId } from "../common.js";
+import { baseEntity } from "./base.js";
 
-export type ProjectStatus = 'active' | 'paused' | 'archived';
+export type ProjectStatus = "active" | "paused" | "archived";
 
 export interface Project extends BaseEntity {
   title: string;
@@ -34,11 +34,11 @@ export function createProject(input: {
   rootCommit?: string;
 }): Project {
   return {
-    ...baseEntity('proj'),
+    ...baseEntity("proj"),
     title: input.title,
     summary: input.summary ?? input.title,
     goals: input.goals ?? [],
-    status: 'active',
+    status: "active",
     rootPath: input.rootPath,
     importedContextCount: 0,
     activeWorkstreamIds: [],

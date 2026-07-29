@@ -1,4 +1,14 @@
-import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -89,7 +99,12 @@ describe("editFile", () => {
   it("blocks a path escaping the root and does not create or change any file", () => {
     const sibling = mkdtempSync(join(tmpdir(), "mori-edit-file-sibling-"));
 
-    const result = editFile(root, join("..", basename(sibling), "outside.txt"), "", "malicious content");
+    const result = editFile(
+      root,
+      join("..", basename(sibling), "outside.txt"),
+      "",
+      "malicious content",
+    );
 
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.reason).toMatch(/escapes working root/);
@@ -142,7 +157,11 @@ describe("createEditFileTool", () => {
     const root = mkdtempSync(join(tmpdir(), "mori-edit-file-tool-"));
     const tool = createEditFileTool(root);
 
-    const result = await tool.execute("call-1", { path: "../etc/passwd", oldString: "", newString: "pwned" });
+    const result = await tool.execute("call-1", {
+      path: "../etc/passwd",
+      oldString: "",
+      newString: "pwned",
+    });
 
     expect(result.content[0]).toMatchObject({ type: "text" });
     expect((result.content[0] as { type: "text"; text: string }).text).toMatch(/^Error:/);
@@ -156,9 +175,15 @@ describe("createEditFileTool", () => {
     writeFileSync(join(root, "file.txt"), "hello world");
     const tool = createEditFileTool(root);
 
-    const result = await tool.execute("call-1", { path: "file.txt", oldString: "world", newString: "there" });
+    const result = await tool.execute("call-1", {
+      path: "file.txt",
+      oldString: "world",
+      newString: "there",
+    });
 
-    expect((result.content[0] as { type: "text"; text: string }).text).toMatch(/Replaced 1 occurrence/);
+    expect((result.content[0] as { type: "text"; text: string }).text).toMatch(
+      /Replaced 1 occurrence/,
+    );
     expect(result.details.ok).toBe(true);
 
     rmSync(root, { recursive: true, force: true });
