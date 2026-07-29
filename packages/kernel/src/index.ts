@@ -33,6 +33,51 @@ export interface Embedder {
   readonly model: string;
 }
 
+/** One boundary's worth of conversation, as produced by a {@link ConversationSource}. */
+export interface ConversationSlice {
+  /**
+   * The conversational turns since the requested offset, joined by a blank line
+   * ("USER: …\n\nAGENT: …"). Empty when the slice held nothing a human said or
+   * the agent answered — tool traffic alone is not conversation.
+   */
+  text: string;
+  /** Cursor to hand back on the next boundary. Opaque to the kernel. */
+  newOffset: number;
+}
+
+/**
+ * Conversation seam for consolidation — the third injected capability, next to
+ * `ConsolidatorLlm` and `Embedder` and for the same reason.
+ *
+ * Consolidation wants the verbatim dialogue since the last boundary: it is both
+ * the richest extraction input and the raw material of the `segments` buffer,
+ * which exists precisely to keep detail the extractor compressed away. In
+ * memorize the kernel got that by opening the host agent's transcript file and
+ * parsing its (explicitly unstable) JSONL — a hard dependency on one harness's
+ * on-disk format living inside the replaceable core. Inverted here: the harness
+ * knows where its conversation lives and hands over already-stripped text, so
+ * the kernel keeps the detail without owning any file format. mori's
+ * conversation is in-process (`agent.state.messages`), which is exactly the case
+ * a transcript-path parameter could not have expressed.
+ *
+ * OPTIONAL like the other two: absent ⇒ an observation-only boundary, which is
+ * the pre-existing degraded behaviour, not an error.
+ */
+export interface ConversationSource {
+  /**
+   * Stable identity of this conversation. Keys the per-source byte watermark, so
+   * it must survive across boundaries and across sessions sharing one
+   * conversation (compaction splits one conversation over several sessions).
+   */
+  readonly id: string;
+  /**
+   * Conversation appended after `offset`, or undefined when nothing is new /
+   * the source is unreadable. Never throws — an unreadable conversation
+   * degrades a boundary, it does not fail it.
+   */
+  read(offset: number): Promise<ConversationSlice | undefined>;
+}
+
 export interface MemoryKernel<M, E> {
   /** Per-turn retrieval: runs right before each LLM call. */
   transformContext(messages: M[], signal?: AbortSignal): Promise<M[]>;
