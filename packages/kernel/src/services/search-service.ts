@@ -115,11 +115,15 @@ export async function semanticScoresForKind(
   embedder: Embedder | undefined = getEmbedder(),
   queryVec?: number[],
 ): Promise<Map<string, number>> {
-  if (!embedder || !query.trim()) return new Map();
+  // embedder/query.trim() are only needed to PRODUCE a vector — a caller that
+  // already supplies queryVec (e.g. retrieveSegments reusing one embed call
+  // across the memory and segment corpora) must not be forced through them.
+  if (!queryVec && (!embedder || !query.trim())) return new Map();
   const corpus = listEmbeddings(projectId, kind);
   if (corpus.length === 0) return new Map();
   let vec = queryVec;
   if (!vec) {
+    if (!embedder) return new Map();
     try {
       [vec] = await embedder.embed([query]);
     } catch {

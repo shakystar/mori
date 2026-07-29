@@ -148,4 +148,41 @@ describe("segment search + retrieval", () => {
     expect(hits.some((h) => h.entityId.startsWith("seg_dead_"))).toBe(false);
     expect(hits.every((h) => h.snippet.length > 0)).toBe(true);
   });
+
+  it("hybridSearchSegments uses a supplied queryVec even without a configured embedder (#75)", async () => {
+    insertSegment(
+      "seg_v",
+      "distinct semantic phrase with no lexical overlap",
+      "2026-01-01T00:00:00.000Z",
+    );
+    await rebuildProjectProjection(projectId, { reindexSearch: true });
+    upsertEmbedding(projectId, {
+      entityId: "seg_v",
+      kind: "segment",
+      model: "fake",
+      dim: 2,
+      vector: [1, 0],
+      textHash: "v",
+      createdAt: new Date(0).toISOString(),
+    });
+
+    // No embedder configured (MEMORIZE_EMBEDDINGS_* unset in this sandbox) and
+    // none passed explicitly — only a precomputed queryVec, mirroring
+    // retrieveSegments reusing one embed call across corpora.
+    const hits = await hybridSearchSegments(
+      projectId,
+      "totally unrelated words",
+      10,
+      undefined,
+      [1, 0],
+    );
+    expect(hits.map((h) => h.entityId)).toContain("seg_v");
+  });
+
+  it("hybridSearchSegments still degrades to FTS-only with neither embedder nor queryVec", async () => {
+    insertSegment("seg_w", "lexical only segment text", "2026-01-01T00:00:00.000Z");
+    await rebuildProjectProjection(projectId, { reindexSearch: true });
+    const hits = await hybridSearchSegments(projectId, "lexical only");
+    expect(hits.map((h) => h.entityId)).toContain("seg_w");
+  });
 });
