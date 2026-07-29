@@ -83,18 +83,30 @@ export function deleteEmbedding(projectId: string, entityId: string): void {
   getDb(projectId).prepare("DELETE FROM embeddings WHERE entity_id = ?").run(entityId);
 }
 
-/** All stored embeddings (optionally filtered by kind), vectors parsed. */
-export function listEmbeddings(projectId: string, kind?: string): EmbeddingRow[] {
+/**
+ * All stored embeddings, optionally filtered by kind and/or model. Callers on
+ * the search path (search-service.ts) pass the active embedder's model so a
+ * stale vector from a since-changed `MEMORIZE_EMBEDDINGS_MODEL` never reaches
+ * cosine comparison against a new-model query vector — the filter lives in the
+ * SQL `WHERE`, not a JS post-filter, so a large corpus doesn't pay to read rows
+ * it will immediately discard.
+ */
+export function listEmbeddings(projectId: string, kind?: string, model?: string): EmbeddingRow[] {
   const db = getDb(projectId);
-  const rows = (
-    kind
-      ? db
-          .prepare(
-            "SELECT entity_id, kind, model, vector, text_hash FROM embeddings WHERE kind = ?",
-          )
-          .all(kind)
-      : db.prepare("SELECT entity_id, kind, model, vector, text_hash FROM embeddings").all()
-  ) as Array<{
+  const clauses: string[] = [];
+  const params: string[] = [];
+  if (kind) {
+    clauses.push("kind = ?");
+    params.push(kind);
+  }
+  if (model) {
+    clauses.push("model = ?");
+    params.push(model);
+  }
+  const where = clauses.length > 0 ? ` WHERE ${clauses.join(" AND ")}` : "";
+  const rows = db
+    .prepare(`SELECT entity_id, kind, model, vector, text_hash FROM embeddings${where}`)
+    .all(...params) as Array<{
     entity_id: string;
     kind: string;
     model: string;

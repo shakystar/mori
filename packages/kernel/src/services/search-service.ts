@@ -119,7 +119,13 @@ export async function semanticScoresForKind(
   // already supplies queryVec (e.g. retrieveSegments reusing one embed call
   // across the memory and segment corpora) must not be forced through them.
   if (!queryVec && (!embedder || !query.trim())) return new Map();
-  const corpus = listEmbeddings(projectId, kind);
+  // Filter to the active model in SQL: a corpus row stored under a since-
+  // changed MEMORIZE_EMBEDDINGS_MODEL is semantically incomparable to a
+  // current-model query vector (different embedding space, even at matching
+  // dimensionality) and must not surface as a candidate — see mori#73. When
+  // no embedder is known (queryVec-only caller) we cannot name a model, so
+  // the corpus is unfiltered, matching prior behavior for that path.
+  const corpus = listEmbeddings(projectId, kind, embedder?.model);
   if (corpus.length === 0) return new Map();
   let vec = queryVec;
   if (!vec) {
@@ -133,6 +139,12 @@ export async function semanticScoresForKind(
   if (!vec || vec.length === 0) return new Map();
   const scores = new Map<string, number>();
   for (const row of corpus) {
+    // Defense in depth beyond the model filter above: a row stored under the
+    // same model name but a different dimensionality (e.g. a provider changed
+    // its output shape for that model id) must be dropped as a candidate
+    // outright, not scored 0 by cosineSimilarity — a 0 score still occupies a
+    // ranking slot and can outrank a genuinely-dissimilar-but-comparable hit.
+    if (row.vector.length !== vec.length) continue;
     scores.set(row.entityId, cosineSimilarity(vec, row.vector));
   }
   return scores;
