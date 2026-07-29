@@ -294,6 +294,11 @@ export async function ensureSegmentEmbeddings(
     }
     if (!embedder) return { embedded: 0 };
 
+    // `listSegments`'s self-lane default (#72) is load-bearing here, not
+    // incidental: a foreign (union-lane) segment's raw transcript text must
+    // never leave the process via MEMORIZE_EMBEDDINGS_ENDPOINT. Mirrors
+    // ensureEmbeddings, whose `listValidMemories(projectId)` is self-only
+    // for the same reason.
     const segments = listSegments(projectId);
     if (segments.length === 0) return { embedded: 0 };
 
