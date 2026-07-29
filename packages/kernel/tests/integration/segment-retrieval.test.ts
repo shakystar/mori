@@ -5,11 +5,13 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { createProject } from "../../src/domain/entities.js";
+import type { Embedder } from "../../src/index.js";
+import { ensureSegmentEmbeddings } from "../../src/services/embeddings-service.js";
 import { upsertEmbedding } from "../../src/services/embeddings-store.js";
 import { retrieveSegments } from "../../src/services/memory-retrieval-service.js";
 import { rebuildProjectProjection } from "../../src/services/projection-store.js";
 import { hybridSearchSegments, searchByKind } from "../../src/services/search-service.js";
-import { listSegmentTexts } from "../../src/services/segment-store.js";
+import { listSegments, listSegmentTexts } from "../../src/services/segment-store.js";
 import { closeAll, getDb } from "../../src/storage/db.js";
 import { appendEvent } from "../../src/storage/event-store.js";
 
@@ -46,6 +48,8 @@ afterEach(async () => {
   await rm(sandbox, { recursive: true, force: true });
 });
 
+const FOREIGN = "proj_seg_bob";
+
 function insertSegment(id: string, text: string, createdAt: string): void {
   getDb(projectId)
     .prepare(
@@ -54,12 +58,98 @@ function insertSegment(id: string, text: string, createdAt: string): void {
     .run(id, "s1", createdAt, 0, null, text);
 }
 
+/** Simulates a foreign (union-lane) segment carried in from another store. */
+function insertForeignSegment(id: string, text: string, createdAt: string): void {
+  getDb(projectId)
+    .prepare(
+      "INSERT INTO segments (id, session_id, created_at, ordinal, source, source_project_id, text) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    )
+    .run(id, "s1", createdAt, 0, null, FOREIGN, text);
+}
+
 describe("segment-store reads", () => {
   it("listSegmentTexts hydrates text by id", async () => {
     insertSegment("seg_1", "alpha", "2026-01-01T00:00:00.000Z");
     insertSegment("seg_2", "beta", "2026-02-01T00:00:00.000Z");
     expect(listSegmentTexts(projectId).get("seg_1")).toBe("alpha");
     expect(listSegmentTexts(projectId).get("seg_2")).toBe("beta");
+  });
+
+  it("listSegments/listSegmentTexts default to self; union surfaces foreign rows too (#72)", () => {
+    insertSegment("seg_self", "self text", "2026-01-01T00:00:00.000Z");
+    insertForeignSegment("seg_foreign", "foreign text", "2026-01-02T00:00:00.000Z");
+
+    expect(listSegments(projectId).map((s) => s.id)).toEqual(["seg_self"]);
+    expect(
+      listSegments(projectId, "union")
+        .map((s) => s.id)
+        .sort(),
+    ).toEqual(["seg_foreign", "seg_self"]);
+
+    expect([...listSegmentTexts(projectId).keys()]).toEqual(["seg_self"]);
+    expect([...listSegmentTexts(projectId, "union").keys()].sort()).toEqual([
+      "seg_foreign",
+      "seg_self",
+    ]);
+  });
+});
+
+describe("segment embeddings stay self-scoped (#72)", () => {
+  it("ensureSegmentEmbeddings never sends a foreign segment's text to the embedder", async () => {
+    insertSegment("seg_self", "self transcript text", "2026-01-01T00:00:00.000Z");
+    insertForeignSegment("seg_foreign", "foreign transcript text", "2026-01-02T00:00:00.000Z");
+
+    const seenTexts: string[] = [];
+    const stubEmbedder: Embedder = {
+      model: "stub-embedder",
+      embed: async (texts) => {
+        seenTexts.push(...texts);
+        return texts.map(() => [1, 0]);
+      },
+    };
+
+    // Positional embedder since #82 — the options-object form this test used on
+    // main disappeared with the env fallback it existed to override.
+    const result = await ensureSegmentEmbeddings(projectId, stubEmbedder);
+
+    expect(result.embedded).toBe(1);
+    expect(seenTexts).toEqual(["self transcript text"]);
+    expect(seenTexts.join(" ")).not.toContain("foreign");
+  });
+
+  it("hybridSearchSegments never returns a foreign segment, even with a leaked local embedding", async () => {
+    insertForeignSegment(
+      "seg_foreign",
+      "shared vocabulary alpha beta gamma",
+      "2026-01-01T00:00:00.000Z",
+    );
+    await rebuildProjectProjection(projectId, { reindexSearch: true });
+
+    // Simulates residual leakage: a foreign segment's embedding row survived
+    // (e.g. written before this fix, or by a bug elsewhere) even though
+    // ensureSegmentEmbeddings now refuses to embed it going forward.
+    upsertEmbedding(projectId, {
+      entityId: "seg_foreign",
+      kind: "segment",
+      model: "fake",
+      dim: 2,
+      vector: [1, 0],
+      textHash: "foreign",
+      createdAt: new Date(0).toISOString(),
+    });
+
+    const stubEmbedder: Embedder = {
+      model: "fake",
+      embed: async (texts) => texts.map(() => [1, 0]),
+    };
+    const hits = await hybridSearchSegments(
+      projectId,
+      "shared vocabulary alpha beta gamma",
+      10,
+      stubEmbedder,
+    );
+
+    expect(hits.map((h) => h.entityId)).not.toContain("seg_foreign");
   });
 });
 

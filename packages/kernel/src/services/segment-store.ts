@@ -1,4 +1,5 @@
 import { getDb } from "../storage/db.js";
+import { laneWhere, type ProjectionLane } from "./projection-store.js";
 
 /**
  * Read side of the `segments` table (v10) — a DERIVED, bounded short-term
@@ -9,6 +10,13 @@ import { getDb } from "../storage/db.js";
  * (`insertSegments`, `pruneSegments`, consolidate()'s use of this table)
  * belongs to the consolidate-service slice (#64) and is not yet ported, so
  * this table is always empty until then.
+ *
+ * Both readers default to the `self` lane (mirrors `listValidMemories`,
+ * SoT-040): a foreign segment's raw transcript text must never reach the
+ * embedder or a self-context search result (#72). The one caller that
+ * legitimately needs every lane's rows — `rebuildProjectProjection`'s FTS
+ * reindex, which mirrors `source_project_id` into `search_fts` itself —
+ * passes `"union"` explicitly.
  */
 
 export interface SegmentRow {
@@ -49,19 +57,27 @@ function parseRow(r: RawRow): SegmentRow {
   };
 }
 
-/** All segments, newest first. Used for FTS rebuild and embedding. */
-export function listSegments(projectId: string): SegmentRow[] {
+/**
+ * All segments, newest first. Used for FTS rebuild (`lane: "union"`) and
+ * embedding (`ensureSegmentEmbeddings`, self-only default).
+ */
+export function listSegments(projectId: string, lane: ProjectionLane = "self"): SegmentRow[] {
   const rows = getDb(projectId)
     .prepare(
-      "SELECT id, session_id, created_at, ordinal, source, source_project_id, text FROM segments ORDER BY created_at DESC, ordinal ASC",
+      `SELECT id, session_id, created_at, ordinal, source, source_project_id, text FROM segments WHERE ${laneWhere(lane)} ORDER BY created_at DESC, ordinal ASC`,
     )
     .all() as RawRow[];
   return rows.map(parseRow);
 }
 
 /** Map of segment id -> text, for hydrating search hits (text isn't in the projection). */
-export function listSegmentTexts(projectId: string): Map<string, string> {
-  const rows = getDb(projectId).prepare("SELECT id, text FROM segments").all() as Array<{
+export function listSegmentTexts(
+  projectId: string,
+  lane: ProjectionLane = "self",
+): Map<string, string> {
+  const rows = getDb(projectId)
+    .prepare(`SELECT id, text FROM segments WHERE ${laneWhere(lane)}`)
+    .all() as Array<{
     id: string;
     text: string;
   }>;

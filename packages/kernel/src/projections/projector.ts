@@ -68,6 +68,16 @@ export interface MemoryRecord extends ConsolidatedMemory {
 }
 
 /**
+ * An observation plus its provenance lane. Mirrors {@link MemoryRecord}:
+ * undefined = self (this store); a foreign lane is stamped when the
+ * `observation.captured` event was carried in by a workspace union, so
+ * short-term-tail readers can exclude it from local truth by default (#74).
+ */
+export interface ObservationRecord extends Observation {
+  sourceProjectId?: string;
+}
+
+/**
  * Provenance lane for the `(entity, writer)` projection (M2). Every event a
  * store appends itself shares ONE lane — {@link SELF_LANE} — so a single-writer
  * store keys exactly as it did pre-M2 (bare id). Events carried in by a
@@ -153,7 +163,7 @@ export interface ProjectState {
   rules: Record<string, Rule>;
   conflicts: Record<string, Conflict>;
   sessions: Record<string, Session>;
-  observations: Record<string, Observation>;
+  observations: Record<string, ObservationRecord>;
   memories: Record<string, MemoryRecord>;
 }
 
@@ -481,7 +491,12 @@ export function reduceProjectState(events: DomainEvent[], selfProjectId?: string
       case "observation.captured":
         {
           const observation = event.payload as Observation;
-          state.observations[observation.id] = observation;
+          // Same lane-stamping as memory.consolidated below: self stays
+          // untagged (byte-identical to pre-M2), a foreign lane carries its
+          // origin store id so self-scoped readers (short-term tail) can
+          // exclude it by default (#74).
+          state.observations[observation.id] =
+            eventLane === SELF_LANE ? observation : { ...observation, sourceProjectId: eventLane };
         }
         break;
       case "memory.consolidated":
