@@ -1,0 +1,119 @@
+import type { StartupContextPayload } from "../domain/entities.js";
+import { getEmbedder, resolveEmbeddingsConfig } from "./embeddings-service.js";
+import {
+  reinforceInjectedMemories,
+  retrieveMemoryContext,
+  retrieveSegments,
+} from "./memory-retrieval-service.js";
+import { semanticMemoryScores } from "./search-service.js";
+
+/** Tight embed timeout at SessionStart — the network must never block boot. */
+export const SESSION_START_EMBED_TIMEOUT_MS = 5_000;
+
+export type MemoryContext = Pick<
+  StartupContextPayload,
+  "rawSegments" | "consolidatedMemories" | "recentObservations"
+>;
+
+/**
+ * Kernel-scope slice of upstream memorize's `loadStartContext`: the
+ * freshness/relevance-ranked memory context assembly (P3-c semantic boost +
+ * CLS two-layer retrieval + raw-segment channel), reinforcing whatever gets
+ * injected. Everything else upstream's `loadStartContext` also assembles
+ * (project/workstream/task/handoff/checkpoint, other-active-tasks, personal
+ * and shared memory channels, inbound task requests) reads through
+ * project-service/session-service/task-service/workspace-service/
+ * personal-store-service — host-CLI product services with no kernel
+ * consumer yet, so they stay out of this port (mori#63).
+ */
+export async function buildMemoryContext(
+  projectId: string,
+  opts: { taskTitle?: string } = {},
+): Promise<MemoryContext> {
+  // Embed the task title ONCE, up front, and reuse the vector across both
+  // the memory (P3-c) and segment (raw-detail) retrieval paths below. The
+  // two paths used to each resolve their own embedder and embed the same
+  // title independently — two sequential network calls, each against the
+  // SESSION_START_EMBED_TIMEOUT_MS budget, so a slow/unresponsive endpoint
+  // could block SessionStart for roughly double the stated timeout (mori#63
+  // review). Sharing one embedder + one query vector (or none, on failure —
+  // no retry) keeps the wall-clock bound to a single embed call.
+  const config = opts.taskTitle ? resolveEmbeddingsConfig() : undefined;
+  const embedder = config
+    ? getEmbedder({ ...config, timeoutMs: SESSION_START_EMBED_TIMEOUT_MS })
+    : undefined;
+  let queryVec: number[] | undefined;
+  if (opts.taskTitle && embedder) {
+    try {
+      [queryVec] = await embedder.embed([opts.taskTitle]);
+    } catch {
+      queryVec = undefined; // best-effort — both channels fall back to FTS-only below.
+    }
+  }
+
+  // P3-c — semantic relevance boost: score memories by cosine similarity to
+  // the shared query vector (graded boost in retrieveMemoryContext).
+  // Best-effort; degrades to FTS-only when no embeddings endpoint is
+  // configured or the embed above failed/timed out.
+  let semanticScores: Map<string, number> | undefined;
+  if (opts.taskTitle && queryVec) {
+    try {
+      const scores = await semanticMemoryScores(projectId, opts.taskTitle, embedder, queryVec);
+      if (scores.size > 0) semanticScores = scores;
+    } catch {
+      // best-effort — fall back to FTS relevance only.
+    }
+  }
+
+  // CLS two-layer retrieval: rank consolidated memories + the previous
+  // session's observation tail in one pool, then stamp the injected
+  // memories as accessed (reinforcement — projection-only, best-effort).
+  const retrieved = retrieveMemoryContext(projectId, {
+    ...(opts.taskTitle ? { taskTitle: opts.taskTitle } : {}),
+    ...(semanticScores ? { semanticScores } : {}),
+  });
+  reinforceInjectedMemories(projectId, retrieved.memories);
+
+  // Raw-detail channel: verbatim transcript segments for the task, surfaced
+  // ALONGSIDE consolidated memories with their own budget. Best-effort; empty
+  // without a task title or segments. Reuses the query vector computed above
+  // — no separate embed call — and, without one (no embedder, or the embed
+  // above failed), leaves the embedder unset too so this channel degrades to
+  // FTS instead of retrying the same embed that just failed.
+  let rawSegments: StartupContextPayload["rawSegments"] = [];
+  if (opts.taskTitle) {
+    try {
+      rawSegments = await retrieveSegments(projectId, {
+        taskTitle: opts.taskTitle,
+        ...(queryVec ? { embedder, queryVec } : {}),
+      });
+    } catch {
+      // best-effort — segments are augmentative.
+    }
+  }
+
+  return {
+    ...(rawSegments && rawSegments.length > 0 ? { rawSegments } : {}),
+    ...(retrieved.memories.length > 0
+      ? {
+          consolidatedMemories: retrieved.memories.map(({ memory }) => ({
+            id: memory.id,
+            kind: memory.kind,
+            text: memory.text,
+            salience: memory.salience,
+            createdAt: memory.createdAt,
+          })),
+        }
+      : {}),
+    ...(retrieved.observations.length > 0
+      ? {
+          recentObservations: retrieved.observations.map((observation) => ({
+            signal: observation.signal,
+            ...(observation.toolName ? { toolName: observation.toolName } : {}),
+            ...(observation.summary ? { summary: observation.summary } : {}),
+            createdAt: observation.createdAt,
+          })),
+        }
+      : {}),
+  };
+}
