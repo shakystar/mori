@@ -14,8 +14,19 @@ const CTRL_C = "\u0003";
 function terminalPair() {
   const input = new PassThrough();
   const output = new PassThrough();
-  output.resume();
-  return { input, output, source: createTerminalInput(input, output) };
+  const written: string[] = [];
+  output.on("data", (chunk: Buffer) => written.push(chunk.toString()));
+  return {
+    input,
+    output,
+    written: () => written.join(""),
+    source: createTerminalInput(input, output),
+  };
+}
+
+/** Lets whatever the streams have queued be delivered before the test looks at the result. */
+function settle(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
 }
 
 describe("createTerminalInput", () => {
@@ -67,10 +78,51 @@ describe("createTerminalInput", () => {
     const stop = source.onInterrupt(() => interrupts++);
 
     input.write(CTRL_C);
-    await new Promise((resolve) => setImmediate(resolve));
+    await settle();
 
     expect(interrupts).toBe(1);
     stop();
     source.close();
+  });
+
+  it("drops what was typed while no read was pending, echo included", async () => {
+    // The mid-turn case: the interface stays open for Ctrl-C, so without the gate readline
+    // would echo these keystrokes into the streaming response and then hand them to the
+    // next `question()` as a pre-filled buffer — "abc" + "def" would be submitted as
+    // "defabc" and billed as a request the user never made (#26 review).
+    const { input, written, source } = terminalPair();
+
+    input.write("abc");
+    await settle();
+
+    const pending = source.readLine("› ");
+    input.write("def\n");
+
+    expect(await pending).toEqual({ type: "line", value: "def" });
+    expect(written()).not.toContain("abc");
+    source.close();
+  });
+
+  it("puts a real terminal into raw mode and restores it on close", async () => {
+    // readline sets raw mode on whatever stream it reads from, and it reads from the gate —
+    // so mori has to do it for the terminal itself. If this regresses, Ctrl-C goes back to
+    // being a tty-driver SIGINT that kills the process mid-turn.
+    const input = new PassThrough() as PassThrough & Partial<NodeJS.ReadStream>;
+    input.isTTY = true;
+    input.isRaw = false;
+    const rawModes: boolean[] = [];
+    input.setRawMode = (mode: boolean) => {
+      rawModes.push(mode);
+      input.isRaw = mode;
+      return input as unknown as NodeJS.ReadStream;
+    };
+    const output = new PassThrough();
+    output.resume();
+
+    const source = createTerminalInput(input, output);
+    expect(rawModes).toEqual([true]);
+
+    source.close();
+    expect(rawModes).toEqual([true, false]);
   });
 });

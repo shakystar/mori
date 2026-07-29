@@ -49,7 +49,8 @@ save/restore.
 
 The prompt for the next turn is only printed once the previous answer has finished
 streaming, so output and input never interleave. Anything typed while a turn is streaming
-is discarded rather than queued.
+is discarded rather than queued: it is not echoed into the response and does not carry over
+into the next prompt. Ctrl-C is the one keystroke a running turn still listens for.
 
 `mori` with no prompt **only** enters the REPL when stdin is a terminal. With stdin piped,
 redirected, or closed there is nobody to prompt, so it prints usage and exits 1 rather than
