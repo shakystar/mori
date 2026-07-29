@@ -1,7 +1,11 @@
 export type CliCommand =
   | { kind: "login"; providerId?: string }
   | { kind: "logout"; providerId?: string }
-  | { kind: "no-prompt" }
+  /**
+   * No prompt given. On a terminal this enters the REPL (#26); anywhere else there is no
+   * one to prompt, so `runCli` falls back to printing usage (see index.ts).
+   */
+  | { kind: "repl" }
   | { kind: "prompt"; prompt: string };
 
 export function parseCliCommand(argv: string[]): CliCommand {
@@ -15,7 +19,7 @@ export function parseCliCommand(argv: string[]): CliCommand {
 
   const prompt = argv.join(" ").trim();
   if (!prompt) {
-    return { kind: "no-prompt" };
+    return { kind: "repl" };
   }
 
   return { kind: "prompt", prompt };

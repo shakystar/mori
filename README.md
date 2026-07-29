@@ -19,6 +19,43 @@ export ANTHROPIC_API_KEY=sk-ant-...
 mori "hi"
 ```
 
+### REPL
+
+Run `mori` with no prompt from a terminal and it opens a REPL, so a conversation can run
+over several turns instead of one:
+
+```
+$ mori
+mori REPL — /exit 또는 Ctrl-D로 종료, /clear로 대화 초기화
+› what does packages/kernel do?
+...
+› now summarise that in one line
+...
+```
+
+Every turn runs on the same agent, so earlier turns stay in context — the second question
+above can refer to the first answer.
+
+| Input                | Effect                                        |
+| -------------------- | --------------------------------------------- |
+| `/exit`, Ctrl-D      | leave the REPL (exit code 0)                  |
+| `/clear`             | forget the conversation so far and keep going |
+| Ctrl-C during a turn | cancel that turn only; the REPL stays open    |
+| Ctrl-C while idle    | leave the REPL (exit code 0)                  |
+| an empty line        | ignored — no request is sent                  |
+
+There are no other slash commands, and no history file, completion, or session
+save/restore.
+
+The prompt for the next turn is only printed once the previous answer has finished
+streaming, so output and input never interleave. Anything typed while a turn is streaming
+is discarded rather than queued: it is not echoed into the response and does not carry over
+into the next prompt. Ctrl-C is the one keystroke a running turn still listens for.
+
+`mori` with no prompt **only** enters the REPL when stdin is a terminal. With stdin piped,
+redirected, or closed there is nobody to prompt, so it prints usage and exits 1 rather than
+looping — to send a prompt non-interactively, pass it as an argument (`mori "hi"`).
+
 ### Authentication
 
 mori resolves credentials in this order:

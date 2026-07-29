@@ -9,9 +9,10 @@ import type {
   Provider,
 } from "@earendil-works/pi-ai";
 import { createAssistantMessageEventStream, InMemoryCredentialStore } from "@earendil-works/pi-ai";
-import type { StreamFn } from "@earendil-works/pi-agent-core";
+import type { Context, StreamFn } from "@earendil-works/pi-agent-core";
 import { afterEach, describe, expect, it } from "vitest";
 import { EXPERIMENTAL_OPENAI_OAUTH_ENV, OPENAI_OAUTH_PROVIDER_ID } from "./auth/experimental.js";
+import type { ReplInputSource, ReplLine } from "./cli/repl-input.js";
 import { runCli, unauthenticatedMessage } from "./index.js";
 import { createMoriModels } from "./model-wiring.js";
 
@@ -118,6 +119,38 @@ function fakeOAuthProvider(id: string, credential: OAuthCredential): Provider {
       throw new Error("fake provider: the login flow never streams");
     },
   };
+}
+
+/**
+ * A REPL line source that replays `lines` and then reports EOF, standing in for a terminal
+ * the way `deps.openReplInput` is meant to be used (TESTING.md: no test needs a real TTY).
+ * The loop's own behaviour is covered in cli/repl.test.ts; this is the wiring seam.
+ */
+function scriptedInput(lines: string[]) {
+  const state = { reads: 0, closed: false };
+  let next = 0;
+  const handlers = new Set<() => void>();
+
+  const source: ReplInputSource = {
+    async readLine(): Promise<ReplLine> {
+      state.reads++;
+      return next < lines.length ? { type: "line", value: lines[next++] } : { type: "eof" };
+    },
+    onInterrupt: (handler: () => void) => {
+      handlers.add(handler);
+      return () => handlers.delete(handler);
+    },
+    close: () => {
+      state.closed = true;
+    },
+  };
+
+  /** Stands in for the user pressing Ctrl-C while no read is pending. */
+  const interrupt = (): void => {
+    for (const handler of handlers) handler();
+  };
+
+  return { source, state, interrupt };
 }
 
 function captureOutput() {
@@ -255,7 +288,11 @@ describe("runCli", () => {
     expect(io.out()).toBe("hello from mori\n");
   });
 
-  it("prints usage and fails when no prompt is given", async () => {
+  it("prints usage and fails when no prompt is given and there is no terminal to prompt", async () => {
+    // #26 turned "no prompt" into the REPL, but only where a REPL makes sense. With stdin
+    // piped or closed — which `openReplInput` returning undefined stands for, exactly as
+    // the non-TTY default in index.ts does — the pre-REPL behaviour is kept: usage, exit 1,
+    // and no loop that could spin against a stream nobody is typing into.
     const io = captureOutput();
 
     const exitCode = await runCli(
@@ -264,11 +301,98 @@ describe("runCli", () => {
       {
         stdout: io.stdout,
         stderr: io.stderr,
+        openReplInput: () => undefined,
       },
     );
 
     expect(exitCode).toBe(1);
     expect(io.err()).toContain("usage: mori");
+  });
+
+  describe("REPL (no prompt argument, stdin is a terminal)", () => {
+    it("streams every turn and keeps the earlier ones in context", async () => {
+      const io = captureOutput();
+      const seen: Context[] = [];
+      const reply = fakeStreamFn("ok");
+      const input = scriptedInput(["question one", "question two"]);
+
+      const exitCode = await runCli(
+        [],
+        { ANTHROPIC_API_KEY: "sk-ant-test" },
+        {
+          stdout: io.stdout,
+          stderr: io.stderr,
+          credentialStore: new InMemoryCredentialStore(),
+          streamFn: (model, context, options) => {
+            seen.push(context);
+            return reply(model, context, options);
+          },
+          openReplInput: () => input.source,
+        },
+      );
+
+      expect(exitCode).toBe(0);
+      expect(seen).toHaveLength(2);
+      expect(JSON.stringify(seen[1].messages)).toContain("question one");
+      expect(io.out()).toContain("ok");
+      expect(input.state.closed).toBe(true);
+    });
+
+    it("refuses to start when unauthenticated, before reading any input", async () => {
+      const io = captureOutput();
+      const input = scriptedInput(["question one"]);
+
+      const exitCode = await runCli(
+        [],
+        {},
+        {
+          stdout: io.stdout,
+          stderr: io.stderr,
+          credentialStore: new InMemoryCredentialStore(),
+          openReplInput: () => input.source,
+        },
+      );
+
+      expect(exitCode).toBe(1);
+      expect(io.err()).toContain("mori login");
+      // The auth gate runs before the loop: no prompt is ever offered, so the user cannot
+      // type a turn that was doomed from the start.
+      expect(input.state.reads).toBe(0);
+      expect(input.state.closed).toBe(true);
+    });
+
+    it("leaves cleanly when Ctrl-C arrives while startup is still running", async () => {
+      // Opening the terminal is what puts it in raw mode, so Ctrl-C stops being a process
+      // signal from that moment on — before the REPL loop registers a handler for it. A
+      // credential read that never settles stands in for a slow token refresh: without a
+      // handler covering the preparation window there would be no way out of it.
+      const io = captureOutput();
+      const input = scriptedInput(["never read"]);
+      const hangingStore = {
+        read: () => new Promise<undefined>(() => {}),
+        list: async () => [],
+        modify: async () => undefined,
+        delete: async () => {},
+      };
+
+      const running = runCli(
+        [],
+        { ANTHROPIC_API_KEY: "sk-ant-test" },
+        {
+          stdout: io.stdout,
+          stderr: io.stderr,
+          credentialStore: hangingStore,
+          openReplInput: () => input.source,
+        },
+      );
+
+      await new Promise((resolve) => setImmediate(resolve));
+      input.interrupt();
+
+      expect(await running).toBe(0);
+      expect(input.state.reads).toBe(0);
+      expect(input.state.closed).toBe(true);
+    });
   });
 
   it("names the target provider's own API key env var in the unauthenticated message", () => {
