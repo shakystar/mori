@@ -29,5 +29,10 @@ jobs:
           text="✅ 머지됨 · ${REPO}#${NUMBER} — ${TITLE}
           ${HEAD_REF} → ${BASE_REF} (by ${MERGED_BY})
           ${URL}"
+          # 셸·JSON 이스케이프만으로는 부족하다 — Slack은 text를 mrkdwn으로 해석하므로
+          # 제목에 넣은 <!channel>이 채널 전체 멘션이 되고 <url|표시문구>로 링크를 위장할 수 있다.
+          # Slack 규격대로 & < > 를 치환한다 (&를 먼저 해야 이중 이스케이프가 안 난다).
           curl -fsS -m 10 -X POST -H 'Content-Type: application/json' \
-            -d "$(jq -n --arg t "$text" '{text: $t}')" "$WEBHOOK"
+            -d "$(jq -n --arg t "$text" \
+              '{text: ($t | gsub("&"; "&amp;") | gsub("<"; "&lt;") | gsub(">"; "&gt;"))}')" \
+            "$WEBHOOK"
