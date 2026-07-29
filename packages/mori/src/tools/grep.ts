@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 import { Type, type Static } from "@earendil-works/pi-ai";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
@@ -40,6 +40,8 @@ export function grep(root: string, pattern: string, options: GrepOptions = {}): 
   const scopePath = options.path ?? ".";
   const resolved = resolveWithinRoot(root, scopePath);
   if (!resolved.ok) return resolved;
+  // resolveWithinRoot already realpath'd `root` successfully to get here, so this can't throw.
+  const realRoot = realpathSync(root);
 
   let matcher: (line: string) => boolean;
   if (options.regex) {
@@ -91,7 +93,7 @@ export function grep(root: string, pattern: string, options: GrepOptions = {}): 
         return;
       }
       if (matcher(lines[i])) {
-        matches.push({ file: relative(root, filePath), line: i + 1, text: lines[i] });
+        matches.push({ file: relative(realRoot, filePath), line: i + 1, text: lines[i] });
       }
     }
   };
