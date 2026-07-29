@@ -142,8 +142,9 @@ export async function semanticMemoryScores(
   projectId: string,
   query: string,
   embedder: Embedder | undefined = getEmbedder(),
+  queryVec?: number[],
 ): Promise<Map<string, number>> {
-  return semanticScoresForKind(projectId, query, "memory", embedder);
+  return semanticScoresForKind(projectId, query, "memory", embedder, queryVec);
 }
 
 /** Memory hits ranked by embedding similarity (best-first). Empty when off. */

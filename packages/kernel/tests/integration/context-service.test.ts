@@ -2,11 +2,12 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { CURRENT_SCHEMA_VERSION, nowIso } from "../../src/domain/common.js";
 import { createProject } from "../../src/domain/entities.js";
 import { buildMemoryContext } from "../../src/services/context-service.js";
+import { HttpEmbedder } from "../../src/services/embeddings-service.js";
 import {
   listValidMemories,
   rebuildProjectProjection,
@@ -146,5 +147,27 @@ describe("buildMemoryContext", () => {
 
     const ctx = await buildMemoryContext(projectId);
     expect(ctx.rawSegments).toBeUndefined();
+  });
+
+  it("embeds the task title exactly once, reusing it across the memory and segment channels", async () => {
+    await seedMemory("mem_hot", "chose zephyr as the deploy target", 9, NOW);
+    insertSegment("seg_a", "zephyr deploy runbook notes", "2026-01-01T00:00:00.000Z");
+    await rebuildProjectProjection(projectId, { reindexSearch: true });
+
+    process.env.MEMORIZE_EMBEDDINGS_ENDPOINT = "http://localhost:11434/v1";
+    const calls: string[][] = [];
+    const embedSpy = vi
+      .spyOn(HttpEmbedder.prototype, "embed")
+      .mockImplementation(async (texts: string[]) => {
+        calls.push(texts);
+        return texts.map(() => [1, 0, 0]);
+      });
+
+    await buildMemoryContext(projectId, { taskTitle: "zephyr deploy" });
+
+    expect(embedSpy).toHaveBeenCalledTimes(1);
+    expect(calls).toEqual([["zephyr deploy"]]);
+
+    embedSpy.mockRestore();
   });
 });

@@ -30,23 +30,36 @@ export async function buildMemoryContext(
   projectId: string,
   opts: { taskTitle?: string } = {},
 ): Promise<MemoryContext> {
-  // P3-c — semantic relevance boost: embed the task title and score memories
-  // by cosine similarity (graded boost in retrieveMemoryContext). Best-effort
-  // with a tight timeout so SessionStart never blocks on the network; degrades
-  // to FTS-only when no embeddings endpoint is configured or the embed times
-  // out. semanticMemoryScores is itself never-throw, but guard defensively.
-  let semanticScores: Map<string, number> | undefined;
-  if (opts.taskTitle) {
+  // Embed the task title ONCE, up front, and reuse the vector across both
+  // the memory (P3-c) and segment (raw-detail) retrieval paths below. The
+  // two paths used to each resolve their own embedder and embed the same
+  // title independently — two sequential network calls, each against the
+  // SESSION_START_EMBED_TIMEOUT_MS budget, so a slow/unresponsive endpoint
+  // could block SessionStart for roughly double the stated timeout (mori#63
+  // review). Sharing one embedder + one query vector (or none, on failure —
+  // no retry) keeps the wall-clock bound to a single embed call.
+  const config = opts.taskTitle ? resolveEmbeddingsConfig() : undefined;
+  const embedder = config
+    ? getEmbedder({ ...config, timeoutMs: SESSION_START_EMBED_TIMEOUT_MS })
+    : undefined;
+  let queryVec: number[] | undefined;
+  if (opts.taskTitle && embedder) {
     try {
-      const config = resolveEmbeddingsConfig();
-      if (config) {
-        const scores = await semanticMemoryScores(
-          projectId,
-          opts.taskTitle,
-          getEmbedder({ ...config, timeoutMs: SESSION_START_EMBED_TIMEOUT_MS }),
-        );
-        if (scores.size > 0) semanticScores = scores;
-      }
+      [queryVec] = await embedder.embed([opts.taskTitle]);
+    } catch {
+      queryVec = undefined; // best-effort — both channels fall back to FTS-only below.
+    }
+  }
+
+  // P3-c — semantic relevance boost: score memories by cosine similarity to
+  // the shared query vector (graded boost in retrieveMemoryContext).
+  // Best-effort; degrades to FTS-only when no embeddings endpoint is
+  // configured or the embed above failed/timed out.
+  let semanticScores: Map<string, number> | undefined;
+  if (opts.taskTitle && queryVec) {
+    try {
+      const scores = await semanticMemoryScores(projectId, opts.taskTitle, embedder, queryVec);
+      if (scores.size > 0) semanticScores = scores;
     } catch {
       // best-effort — fall back to FTS relevance only.
     }
@@ -63,18 +76,16 @@ export async function buildMemoryContext(
 
   // Raw-detail channel: verbatim transcript segments for the task, surfaced
   // ALONGSIDE consolidated memories with their own budget. Best-effort; empty
-  // without a task title, segments, or embedder. Reuses the session-start
-  // embedder + tight timeout so SessionStart never blocks on the network.
+  // without a task title or segments. Reuses the query vector computed above
+  // — no separate embed call — and, without one (no embedder, or the embed
+  // above failed), leaves the embedder unset too so this channel degrades to
+  // FTS instead of retrying the same embed that just failed.
   let rawSegments: StartupContextPayload["rawSegments"] = [];
   if (opts.taskTitle) {
     try {
-      const config = resolveEmbeddingsConfig();
-      const embedder = config
-        ? getEmbedder({ ...config, timeoutMs: SESSION_START_EMBED_TIMEOUT_MS })
-        : undefined;
       rawSegments = await retrieveSegments(projectId, {
         taskTitle: opts.taskTitle,
-        ...(embedder ? { embedder } : {}),
+        ...(queryVec ? { embedder, queryVec } : {}),
       });
     } catch {
       // best-effort — segments are augmentative.
