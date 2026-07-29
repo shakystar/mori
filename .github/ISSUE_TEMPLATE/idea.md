@@ -1,8 +1,8 @@
 ---
 name: 아이디어 (idea)
 about: 방향성·에픽급 — owner 에이전트가 작업 단위로 분해한다
-title: ''
-labels: 'idea'
+title: ""
+labels: "idea"
 ---
 
 ## 하고 싶은 것

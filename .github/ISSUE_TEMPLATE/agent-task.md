@@ -1,8 +1,8 @@
 ---
 name: 작업 (agent:todo)
 about: developer 에이전트가 한 세션에 끝낼 수 있는 구체적 작업
-title: ''
-labels: 'agent:todo'
+title: ""
+labels: "agent:todo"
 ---
 
 ## 배경
@@ -21,7 +21,7 @@ labels: 'agent:todo'
 <!-- 체크박스로. 각 항목은 기계적으로 검증 가능해야 한다.
      "잘 동작한다"(X) → "grep 결과 0건, PR 본문 첨부"(O) -->
 
-- [ ] 
+- [ ]
 - [ ] `pnpm build`, `pnpm test` 통과
 
 ## 비범위
