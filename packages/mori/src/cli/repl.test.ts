@@ -1,11 +1,10 @@
+import type { Agent, AgentEvent, AgentMessage, StreamFn } from "@earendil-works/pi-agent-core";
 import type {
-  Agent,
-  AgentEvent,
-  AgentMessage,
+  AssistantMessage,
+  AssistantMessageEvent,
   Context,
-  StreamFn,
-} from "@earendil-works/pi-agent-core";
-import type { AssistantMessage, AssistantMessageEvent, Model } from "@earendil-works/pi-ai";
+  Model,
+} from "@earendil-works/pi-ai";
 import { createAssistantMessageEventStream, InMemoryCredentialStore } from "@earendil-works/pi-ai";
 import { BufferKernel } from "@mori/kernel";
 import { describe, expect, it } from "vitest";
