@@ -39,6 +39,9 @@ jobs:
       - name: Build
         run: pnpm build
 
+      - name: Typecheck tests
+        run: pnpm typecheck:test
+
       # Runs vitest directly instead of `pnpm test` so the build above isn't
       # redone via the `pretest` lifecycle hook (that hook exists for `pnpm test`
       # to be self-sufficient in local dev, but CI already built in the step above).
