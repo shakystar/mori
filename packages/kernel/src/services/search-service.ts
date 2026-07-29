@@ -275,7 +275,14 @@ export async function hybridSearchSegments(
       .slice(0, limit)
       .map((hit) => ({ ...hit, snippet: hydrate(hit.entityId, hit.snippet) }));
   }
+  // Embeddings survive segment pruning (the `embeddings` table is a derived,
+  // out-of-band index not rebuilt alongside `segments` — see segment-store.ts),
+  // so `scores` can hold ids for segments already pruned from `texts`. Filter
+  // BEFORE the poolSize slice, or dead ids consume the pool/limit and push out
+  // live matches, surfacing empty-snippet hits. Mirrors semanticSearch's
+  // textById filter above (SoT-050).
   const semanticIds = [...scores.entries()]
+    .filter(([id]) => texts.has(id))
     .sort((a, b) => b[1] - a[1])
     .slice(0, poolSize)
     .map(([id]) => id);
