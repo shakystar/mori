@@ -1,12 +1,13 @@
 #!/usr/bin/env node
 import { isMainEntry } from "./cli/entrypoint.js";
-import { loginNotImplementedMessage, unauthenticatedMessage, usageMessage } from "./cli/messages.js";
+import { runLogin, runLogout } from "./cli/login.js";
+import { unauthenticatedMessage, usageMessage } from "./cli/messages.js";
 import { parseCliCommand } from "./cli/parse-args.js";
 import { runPrompt } from "./cli/runtime.js";
 import type { RunCliDeps } from "./cli/types.js";
-import { resolveProviderSelection, SUPPORTED_PROVIDER_IDS, unknownProviderMessage } from "./provider-selection.js";
+import { resolveProviderSelection, supportedProviderIds, unknownProviderMessage } from "./provider-selection.js";
 
-export { unauthenticatedMessage, loginNotImplementedMessage };
+export { unauthenticatedMessage };
 export type { RunCliDeps };
 
 export async function runCli(
@@ -17,16 +18,24 @@ export async function runCli(
   const stdout = deps.stdout ?? ((chunk: string) => process.stdout.write(chunk));
   const stderr = deps.stderr ?? ((chunk: string) => process.stderr.write(chunk));
 
-  const { providerId } = resolveProviderSelection(env);
-  if (!SUPPORTED_PROVIDER_IDS.includes(providerId)) {
-    stderr(unknownProviderMessage(providerId));
+  const command = parseCliCommand(argv);
+
+  // login/logout may name their own target; everything else acts on whatever `MORI_MODEL`
+  // selects. Either way the id is validated against the providers actually registered for
+  // this environment (see `moriProviders`) before it reaches pi-ai, so a gated-off
+  // experimental provider is rejected here exactly like a typo would be.
+  const named = command.kind === "login" || command.kind === "logout" ? command.providerId : undefined;
+  const providerId = named ?? resolveProviderSelection(env).providerId;
+  if (!supportedProviderIds(env).includes(providerId)) {
+    stderr(unknownProviderMessage(providerId, env));
     return 1;
   }
 
-  const command = parseCliCommand(argv);
   if (command.kind === "login") {
-    stderr(loginNotImplementedMessage(providerId));
-    return 1;
+    return runLogin(providerId, env, deps, { stdout, stderr });
+  }
+  if (command.kind === "logout") {
+    return runLogout(providerId, env, deps, { stdout, stderr });
   }
   if (command.kind === "no-prompt") {
     stderr(usageMessage);
