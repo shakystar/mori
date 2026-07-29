@@ -54,7 +54,28 @@ export async function runCli(
       return 1;
     }
 
-    const prepared = await prepareAgent(providerId, env, deps, { stdout, stderr });
+    // Opening the terminal puts it in raw mode, so from here on Ctrl-C arrives as a
+    // keystroke rather than as a process signal — and `runRepl`'s handler for it does not
+    // exist yet. Covering the preparation window is what keeps a slow credential lookup or
+    // token refresh from being uninterruptible: leaving is a normal exit, code 0.
+    let stopStartupListening = (): void => {};
+    const startupInterrupt = new Promise<"interrupted">((resolve) => {
+      stopStartupListening = input.onInterrupt(() => resolve("interrupted"));
+    });
+
+    const preparing = prepareAgent(providerId, env, deps, { stdout, stderr });
+    const prepared = await Promise.race([preparing, startupInterrupt]);
+    stopStartupListening();
+
+    if (prepared === "interrupted") {
+      // Nothing is awaiting the preparation any more; a later failure from it is not an
+      // unhandled rejection, it is a result nobody asked for.
+      void preparing.catch(() => {});
+      stdout("\n");
+      input.close();
+      return 0;
+    }
+
     if (!prepared.ok) {
       input.close();
       return prepared.exitCode;

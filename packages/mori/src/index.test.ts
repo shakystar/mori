@@ -129,19 +129,28 @@ function fakeOAuthProvider(id: string, credential: OAuthCredential): Provider {
 function scriptedInput(lines: string[]) {
   const state = { reads: 0, closed: false };
   let next = 0;
+  const handlers = new Set<() => void>();
 
   const source: ReplInputSource = {
     async readLine(): Promise<ReplLine> {
       state.reads++;
       return next < lines.length ? { type: "line", value: lines[next++] } : { type: "eof" };
     },
-    onInterrupt: () => () => {},
+    onInterrupt: (handler: () => void) => {
+      handlers.add(handler);
+      return () => handlers.delete(handler);
+    },
     close: () => {
       state.closed = true;
     },
   };
 
-  return { source, state };
+  /** Stands in for the user pressing Ctrl-C while no read is pending. */
+  const interrupt = (): void => {
+    for (const handler of handlers) handler();
+  };
+
+  return { source, state, interrupt };
 }
 
 function captureOutput() {
@@ -348,6 +357,39 @@ describe("runCli", () => {
       expect(io.err()).toContain("mori login");
       // The auth gate runs before the loop: no prompt is ever offered, so the user cannot
       // type a turn that was doomed from the start.
+      expect(input.state.reads).toBe(0);
+      expect(input.state.closed).toBe(true);
+    });
+
+    it("leaves cleanly when Ctrl-C arrives while startup is still running", async () => {
+      // Opening the terminal is what puts it in raw mode, so Ctrl-C stops being a process
+      // signal from that moment on — before the REPL loop registers a handler for it. A
+      // credential read that never settles stands in for a slow token refresh: without a
+      // handler covering the preparation window there would be no way out of it.
+      const io = captureOutput();
+      const input = scriptedInput(["never read"]);
+      const hangingStore = {
+        read: () => new Promise<undefined>(() => {}),
+        list: async () => [],
+        modify: async () => undefined,
+        delete: async () => {},
+      };
+
+      const running = runCli(
+        [],
+        { ANTHROPIC_API_KEY: "sk-ant-test" },
+        {
+          stdout: io.stdout,
+          stderr: io.stderr,
+          credentialStore: hangingStore,
+          openReplInput: () => input.source,
+        },
+      );
+
+      await new Promise((resolve) => setImmediate(resolve));
+      input.interrupt();
+
+      expect(await running).toBe(0);
       expect(input.state.reads).toBe(0);
       expect(input.state.closed).toBe(true);
     });
