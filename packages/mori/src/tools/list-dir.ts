@@ -1,7 +1,8 @@
 import { readdirSync, statSync } from "node:fs";
 import { Type, type Static } from "@earendil-works/pi-ai";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
-import { resolveWithinRoot } from "./paths.js";
+import { resolveWithinRoot, type Failure } from "./paths.js";
+import { errorResult, textResult, truncationNotice } from "./tool-result.js";
 
 /** Entry cap: directories with more entries than this are truncated. */
 export const LIST_DIR_MAX_ENTRIES = 1000;
@@ -19,16 +20,13 @@ export interface ListDirSuccess {
   totalEntries: number;
 }
 
-export interface ListDirFailure {
-  ok: false;
-  reason: string;
-}
+export type ListDirFailure = Failure;
 
 export type ListDirResult = ListDirSuccess | ListDirFailure;
 
 export function listDir(root: string, requestedPath = "."): ListDirResult {
   const resolved = resolveWithinRoot(root, requestedPath);
-  if (!resolved.ok) return { ok: false, reason: resolved.reason };
+  if (!resolved.ok) return resolved;
 
   let stats;
   try {
@@ -83,17 +81,12 @@ export function createListDirTool(root: string = process.cwd()): AgentTool<typeo
     parameters: listDirParameters,
     execute: async (_toolCallId, params: Static<typeof listDirParameters>) => {
       const result = listDir(root, params.path ?? ".");
-
-      if (!result.ok) {
-        return { content: [{ type: "text", text: `Error: ${result.reason}` }], details: result };
-      }
+      if (!result.ok) return errorResult(result);
 
       const lines = result.entries.map((entry) => (entry.type === "directory" ? `${entry.name}/` : entry.name));
-      const notice = result.truncated
-        ? `\n\n[truncated: showing first ${LIST_DIR_MAX_ENTRIES} of ${result.totalEntries} entries]`
-        : "";
+      const notice = result.truncated ? truncationNotice("entries", LIST_DIR_MAX_ENTRIES, result.totalEntries) : "";
 
-      return { content: [{ type: "text", text: lines.join("\n") + notice }], details: result };
+      return textResult(lines.join("\n") + notice, result);
     },
   };
 }

@@ -3,7 +3,8 @@ import { randomBytes } from "node:crypto";
 import { basename, dirname, join } from "node:path";
 import { Type, type Static } from "@earendil-works/pi-ai";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
-import { resolveWithinRoot } from "./paths.js";
+import { resolveWithinRoot, type Failure } from "./paths.js";
+import { errorResult, textResult } from "./tool-result.js";
 
 export interface EditFileSuccess {
   ok: true;
@@ -12,10 +13,7 @@ export interface EditFileSuccess {
   replacements: number;
 }
 
-export interface EditFileFailure {
-  ok: false;
-  reason: string;
-}
+export type EditFileFailure = Failure;
 
 export type EditFileResult = EditFileSuccess | EditFileFailure;
 
@@ -46,7 +44,7 @@ export function editFile(
   }
 
   const resolved = resolveWithinRoot(root, requestedPath);
-  if (!resolved.ok) return { ok: false, reason: resolved.reason };
+  if (!resolved.ok) return resolved;
 
   let stats;
   try {
@@ -175,16 +173,13 @@ export function createEditFileTool(root: string = process.cwd()): AgentTool<type
     parameters: editFileParameters,
     execute: async (_toolCallId, params: Static<typeof editFileParameters>) => {
       const result = editFile(root, params.path, params.oldString, params.newString, params.replaceAll ?? false);
-
-      if (!result.ok) {
-        return { content: [{ type: "text", text: `Error: ${result.reason}` }], details: result };
-      }
+      if (!result.ok) return errorResult(result);
 
       const text = result.created
         ? `Created ${result.path}`
         : `Replaced ${result.replacements} occurrence${result.replacements === 1 ? "" : "s"} in ${result.path}`;
 
-      return { content: [{ type: "text", text }], details: result };
+      return textResult(text, result);
     },
   };
 }

@@ -16,6 +16,14 @@ export interface PathGuardFailure {
 export type PathGuardResult = PathGuardOk | PathGuardFailure;
 
 /**
+ * Shared shape for "operation failed with a reason" results across the tools.
+ * Structurally identical to `PathGuardFailure` — most tool failures either come from a
+ * failed path guard or report the same way, so callers can return the guard's failure
+ * object directly instead of re-wrapping it.
+ */
+export type Failure = PathGuardFailure;
+
+/**
  * Resolves `requestedPath` against `root` and guarantees the result stays inside `root`.
  *
  * Paths that exist are compared after `realpath` resolution, so a symlink pointing
