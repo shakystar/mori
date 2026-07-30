@@ -155,8 +155,14 @@ export async function detectContradictions(
     .filter((memory) => memory.kind === "decision");
   if (decisions.length < 2) return [];
 
+  // Filtered to the active embedder's model (mirrors semanticScoresForKind /
+  // search-service.ts) so a mid-flight `MEMORIZE_EMBEDDINGS_MODEL` change never
+  // mixes vectors from two coordinate spaces into one cosine comparison.
+  // Unlike search-service.ts (which has queryVec-only callers with no
+  // embedder to name a model), this function returns early above when
+  // `embedder` is absent, so there is no no-model case to fall back on here.
   const vectorById = new Map(
-    listEmbeddings(projectId, "memory").map((row) => [row.entityId, row.vector]),
+    listEmbeddings(projectId, "memory", embedder.model).map((row) => [row.entityId, row.vector]),
   );
   const threshold = params.cosineThreshold ?? DEFAULT_COSINE_THRESHOLD;
 

@@ -15,6 +15,7 @@ import {
   type Judge,
 } from "../../src/services/contradiction-service.js";
 import { ensureEmbeddings } from "../../src/services/embeddings-service.js";
+import { listEmbeddings } from "../../src/services/embeddings-store.js";
 import {
   listOpenConflicts,
   listValidMemories,
@@ -252,6 +253,32 @@ describe("contradiction-service", () => {
       cosineThreshold: 0.999,
     });
     expect(judgeCalls).toBe(0);
+  });
+
+  it("never mixes embeddings from a stale model into the cosine prefilter (#118 item 1)", async () => {
+    const staleEmbedder = fakeEmbedder(VECTORS, "stale-embed-v1");
+    await seedMemory(MEM_PG, "2026-01-01T00:00:00.000Z");
+    await seedMemory(MEM_SQLITE, "2026-01-02T00:00:00.000Z");
+    // Corpus is embedded under a model the active embedder no longer is.
+    await ensureEmbeddings(projectId, staleEmbedder);
+    expect(listEmbeddings(projectId, "memory")).toHaveLength(2);
+
+    const activeEmbedder = fakeEmbedder(VECTORS, "active-embed-v2");
+    let judgeCalls = 0;
+    const countingJudge: Judge = async () => {
+      judgeCalls += 1;
+      return { contradicts: true };
+    };
+
+    const results = await detectContradictions({
+      projectId,
+      embedder: activeEmbedder,
+      judge: countingJudge,
+      actor: "test",
+    });
+
+    expect(judgeCalls).toBe(0);
+    expect(results).toEqual([]);
   });
 
   it("default threshold constant is exported and sane", () => {
