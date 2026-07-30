@@ -10,6 +10,7 @@
  */
 
 export * from "./domain/index.js";
+export * from "./kernel/sqlite-memory-kernel.js";
 
 /** LLM seam for consolidation. The harness supplies an in-process implementation. */
 export interface ConsolidatorLlm {
@@ -87,7 +88,16 @@ export interface MemoryKernel<M, E> {
   consolidate(llm: ConsolidatorLlm): Promise<void>;
 }
 
-/** Placeholder kernel: passes context through untouched, buffers events in memory. */
+/**
+ * TEST-ONLY kernel: passes context through untouched, buffers events in memory,
+ * consolidates nothing. Touches no disk and needs no configuration, which is
+ * what makes it the right double for tests about the harness (provider
+ * selection, the toolset, the REPL loop) that have no interest in memory.
+ *
+ * It is no longer the kernel mori runs — {@link SqliteMemoryKernel} replaced it
+ * in that role (#12). Keep new production wiring off it: a `BufferKernel` in a
+ * real code path means events are being dropped on the floor.
+ */
 export class BufferKernel<M, E> implements MemoryKernel<M, E> {
   readonly events: E[] = [];
 
@@ -100,4 +110,7 @@ export class BufferKernel<M, E> implements MemoryKernel<M, E> {
   }
 
   async consolidate(): Promise<void> {}
+
+  /** Nothing to settle — `observe` finished the moment it returned. */
+  async drain(): Promise<void> {}
 }
