@@ -47,3 +47,8 @@ jobs:
       # to be self-sufficient in local dev, but CI already built in the step above).
       - name: Test
         run: pnpm exec vitest run
+
+      # .github/scripts/*.sh는 bash 스크립트라 vitest가 다루지 않는다. 셸로 돌리는 이유는
+      # 검증 대상이 bash의 errexit 의미론과 빈 출력 처리이기 때문이다 (#112).
+      - name: CI script tests
+        run: pnpm test:ci-scripts
