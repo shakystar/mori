@@ -93,9 +93,9 @@ export function createBashTool(
       const result = await runBash(params.command, {
         root,
         timeoutMs,
-        maxOutputChars: options.maxOutputChars,
-        env: options.env,
-        signal,
+        ...(options.maxOutputChars !== undefined ? { maxOutputChars: options.maxOutputChars } : {}),
+        ...(options.env ? { env: options.env } : {}),
+        ...(signal ? { signal } : {}),
       });
 
       return textResult(formatBashResult(result), result);

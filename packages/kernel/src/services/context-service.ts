@@ -93,7 +93,7 @@ export async function buildMemoryContext(
     try {
       rawSegments = await retrieveSegments(projectId, {
         taskTitle: opts.taskTitle,
-        ...(queryVec ? { embedder, queryVec } : {}),
+        ...(queryVec && embedder ? { embedder, queryVec } : {}),
       });
     } catch {
       // best-effort — segments are augmentative.

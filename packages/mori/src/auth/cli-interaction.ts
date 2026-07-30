@@ -53,7 +53,7 @@ async function promptSelect(
     const answer = (await io.question(`번호를 선택하세요 (1-${prompt.options.length}): `)).trim();
     const index = Number.parseInt(answer, 10);
     if (Number.isInteger(index) && index >= 1 && index <= prompt.options.length) {
-      return prompt.options[index - 1].id;
+      return prompt.options[index - 1]!.id;
     }
     io.stdout(`유효하지 않은 선택입니다: "${answer}"\n`);
   }

@@ -27,7 +27,10 @@ import { hidingOAuth } from "./auth/resolve-credentials.js";
  */
 function apiKeyOnlyAnthropicProvider() {
   const provider = anthropicProvider();
-  return { ...provider, auth: { apiKey: provider.auth.apiKey } };
+  return {
+    ...provider,
+    auth: { ...(provider.auth.apiKey ? { apiKey: provider.auth.apiKey } : {}) },
+  };
 }
 
 /** Reads env vars from the injected `env`, not ambient `process.env`. */
