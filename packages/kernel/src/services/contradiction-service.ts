@@ -137,12 +137,16 @@ function pickWinner(a: MemoryRecord, b: MemoryRecord): [MemoryRecord, MemoryReco
  * Conflict). Returns the contradictions actually applied, in detection order.
  *
  * Deliberately a single boundary pass over a snapshot of the valid set taken
- * at call time (mirrors ensureEmbeddings' stale-batch model) — a memory that
- * loses one pairwise judgement is not re-excluded from later pairs in the
- * same call, so a memory transitively contradicted by two others can end up
- * `supersededBy` only the first; that's an accepted limitation of a
- * from-scratch pass, not a partial-application bug (a later call re-scans the
- * post-supersede valid set and only compares still-valid memories).
+ * at call time (mirrors ensureEmbeddings' stale-batch model): `decisions` and
+ * `vectorById` are read once up front, so a memory superseded earlier in this
+ * same pass still occupies its snapshot slot — but the `alreadyResolved` set
+ * (populated as each pair resolves) excludes it from every later comparison,
+ * both as a further `a` and as a future `b`, so no already-lost memory is
+ * ever re-judged in the same call. A memory that survives as winner keeps
+ * scanning the rest of the snapshot in the same pass, so if it contradicts
+ * two different memories, both are applied here; only a memory that itself
+ * loses stops being scanned further (a later call re-scans the post-supersede
+ * valid set and only compares still-valid memories).
  */
 export async function detectContradictions(
   params: DetectContradictionsParams,
@@ -232,7 +236,11 @@ export async function detectContradictions(
 
       alreadyResolved.add(loser.id);
       results.push({ winnerId: winner.id, loserId: loser.id, reason, conflict });
-      break;
+      // Only stop scanning `a` when `a` itself lost — a surviving winner
+      // must keep comparing against the rest of the snapshot in this same
+      // pass, or a second contradiction in one call would be missed (#118
+      // item 4).
+      if (loser.id === a.id) break;
     }
   }
 
