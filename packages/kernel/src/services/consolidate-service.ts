@@ -6,11 +6,18 @@ import {
   type ConsolidatedMemoryKind,
   type MemorySupersededPayload,
   type Observation,
+  type Project,
 } from "../domain/entities.js";
 import type { DomainEvent } from "../domain/events.js";
 import type { ConsolidatorLlm, ConversationSource, Embedder } from "../index.js";
+import { laneOf, SELF_LANE } from "../projections/projector.js";
 import { getDb } from "../storage/db.js";
-import { appendEvents, readEventsSince, type AppendEventInput } from "../storage/event-store.js";
+import {
+  appendEvents,
+  readEventsSince,
+  readGenesisEvents,
+  type AppendEventInput,
+} from "../storage/event-store.js";
 import { detectContradictions, makeLlmJudge } from "./contradiction-service.js";
 import { ensureEmbeddings, ensureSegmentEmbeddings } from "./embeddings-service.js";
 import { listValidMemories, rebuildProjectProjection } from "./projection-store.js";
@@ -799,12 +806,30 @@ export async function consolidate(params: ConsolidateParams): Promise<Consolidat
     const rawObservationEvents = eventsSince.filter(
       (event) => event.type === "observation.captured",
     ) as DomainEvent<Observation>[];
-    pendingObservations = rawObservationEvents.length;
+
+    // #113 item②: consolidation must see only THIS store's own observations.
+    // `readEventsSince` has no lane concept — it scans the whole per-project
+    // db, which in a workspace union also holds synced siblings' events — so
+    // without this filter a foreign member's `observation.captured` gets
+    // distilled into a memory THIS store then asserts as self-lane truth
+    // (and inflates the threshold-trigger math below). Apply the exact same
+    // provenance test `listRecentObservations` uses on the projection side
+    // (`laneWhere` / `source_project_id IS NULL`) via the shared `laneOf`
+    // helper, so the two can never drift apart. `isUnion` is resolved from
+    // just the log's genesis events (cheap — at most one row per union
+    // member) rather than a full `readEvents` replay.
+    const genesisEvents = await readGenesisEvents(params.projectId);
+    const genesisIds = new Set(genesisEvents.map((event) => (event.payload as Project).id));
+    const isUnion = genesisIds.size > 1;
+    const selfObservationEvents = rawObservationEvents.filter(
+      (event) => laneOf(event, params.projectId, isUnion) === SELF_LANE,
+    );
+    pendingObservations = selfObservationEvents.length;
 
     // Dedup guard for watermark loss (see consumedObservationIds): drop
     // observations a previous consolidation already distilled.
     const consumed = consumedObservationIds(params.projectId);
-    const observationEvents = rawObservationEvents.filter(
+    const observationEvents = selfObservationEvents.filter(
       (event) => !consumed.has(event.payload.id),
     );
     const observations = observationEvents.map((event) => event.payload);

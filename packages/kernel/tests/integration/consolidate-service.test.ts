@@ -72,6 +72,27 @@ async function seedObservation(
   return observation.id;
 }
 
+/** A `observation.captured` carried in by a workspace union sibling (#113
+ *  item②) — same db, foreign lane, via the same `sourceProjectId` provenance
+ *  override `projection-lane.test.ts` uses for tasks/memories. */
+async function seedForeignObservation(
+  summary: string,
+  signal: ObservationSignal = "decision-keyword",
+): Promise<string> {
+  const observation = createObservation({ projectId, signal, summary, toolName: "Bash" });
+  await appendEvent({
+    type: "observation.captured",
+    projectId,
+    scopeType: "session",
+    scopeId: projectId,
+    actor: "test",
+    sourceProjectId: "proj_lane_foreign_sibling",
+    payload: observation,
+  });
+  return observation.id;
+}
+
+
 /** A `ConsolidatorLlm` that replays canned replies and records every prompt. */
 function fakeLlm(replies: string[]): ConsolidatorLlm & { prompts: string[] } {
   const prompts: string[] = [];
@@ -509,5 +530,45 @@ describe("consolidate — rule-based fallback never echoes write-tool content (#
     const texts = listValidMemories(projectId).map((r) => r.memory.text);
     expect(texts).toContain("Edited 2 file(s)");
     expect(texts.some((t) => t.includes(pathA) || t.includes(pathB))).toBe(false);
+  });
+});
+
+// #113 ② — readEventsSince has no lane concept, so a synced sibling's
+// observation.captured events (same db, foreign `source_project_id`) must be
+// filtered out before they reach the extractor or the backlog count, the same
+// way listRecentObservations already scopes to self by default.
+describe("consolidate — excludes foreign-lane observations (#113)", () => {
+  it("does not fold a foreign-lane observation into a consolidated memory", async () => {
+    await seedObservation("decided to keep this self decision");
+    await seedForeignObservation("decided to leak this foreign decision");
+
+    const result = await consolidate({ projectId, actor: "test" });
+
+    expect(result.observationsProcessed).toBe(1);
+    const texts = listValidMemories(projectId).map((r) => r.memory.text);
+    expect(texts).toContain("decided to keep this self decision");
+    expect(texts).not.toContain("decided to leak this foreign decision");
+  });
+
+  it("excludes foreign-lane observations from the pendingObservations attempt telemetry", async () => {
+    await seedObservation("self decision");
+    await seedForeignObservation("foreign decision one");
+    await seedForeignObservation("foreign mutation two", "mutating-bash");
+
+    await consolidate({ projectId, actor: "test" });
+
+    expect(readLastConsolidateAttempt(projectId)).toMatchObject({ pendingObservations: 1 });
+  });
+
+  it("still advances past a foreign-only window instead of rescanning it forever", async () => {
+    await seedForeignObservation("foreign only, no self observations");
+
+    const result = await consolidate({ projectId, actor: "test" });
+
+    expect(result).toMatchObject({ observationsProcessed: 0, outcome: "noop" });
+    expect(getConsolidateWatermark(projectId)).toBeDefined();
+
+    const second = await consolidate({ projectId, actor: "test" });
+    expect(second).toMatchObject({ observationsProcessed: 0, outcome: "noop" });
   });
 });
