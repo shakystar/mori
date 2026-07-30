@@ -1364,11 +1364,14 @@ export async function consolidate(params: ConsolidateParams): Promise<Consolidat
       await appendEvents(params.projectId, inputs);
     }
 
-    // Retention BEFORE the reindex: pruneSegments deletes from segments/embeddings
-    // but not search_fts, and the reindex below re-emits kind='segment' rows from
-    // the segments table. Pruning first means the reindex repopulates FTS from the
-    // survivors only — pruning after would leave stale snippets retrievable until a
-    // later rebuild. Only boundaries that WROTE segments prune: retention is
+    // Retention BEFORE the reindex: pruneSegments (#116) deletes its own
+    // matching segments/embeddings/search_fts rows, so this ordering is no
+    // longer what keeps FTS consistent with a prune — that's now a guarantee
+    // of pruneSegments itself, regardless of caller order. Pruning first is
+    // still correct because the reindex below re-emits kind='segment' rows
+    // from the segments table, so running prune first means the reindex
+    // repopulates FTS from the survivors in one pass instead of a stale
+    // pre-prune snapshot. Only boundaries that WROTE segments prune: retention is
     // maintenance of the buffer this boundary just grew, and a boundary that added
     // nothing has nothing to push over the age/count caps that the next writing
     // boundary won't catch. Never-throw: derived-buffer maintenance can't fail the
