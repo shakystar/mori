@@ -2,115 +2,99 @@ name: Recheck open PRs
 
 # main이 앞서 나가도 열린 PR의 CI는 다시 돌지 않는다. 그래서 낡은 베이스에서 얻은 그린 체크가
 # 그대로 남고, 텍스트 충돌이 없는 시맨틱 충돌(시그니처 변경 등)은 아무 관문에도 걸리지 않는다
-# (#98 · PR #90/#96 사례). 이 워크플로는 main push마다 열린 PR을 러너에서 현재 main과 직접
-# 머지해 검증하고, 레드면 그 PR에 코멘트로 알린다.
+# (#98 · PR #90/#96 사례). 이 워크플로는 열린 PR을 러너에서 현재 main과 직접 머지해 검증하고,
+# 레드면 그 PR에 코멘트로 알린다.
 # required status check를 대체하지는 못한다 — 자세한 한계는 CONTRIBUTING.md "머지 권한" 참조.
+#
+# 판정 로직은 .github/scripts/recheck-{select,verdict,report}.sh로 분리돼 있고 같은 디렉터리의
+# *.test.sh가 검증한다 (`pnpm test:ci-scripts`). 이 워크플로의 규율은
+# **"출력 부재를 특정 상태로 단정하지 않는다"** — 선행 단계가 실패해 판정이 없으면 그린도
+# 충돌도 아니라 "판정 불가"로 보고한다 (#112).
 on:
   push:
     branches: [main]
+  # main push만으로는 낡은 판정이 무효화되지 않는다: PR이 한 번 레드로 찍히면 developer가
+  # 고쳐도 재평가 트리거가 없어 레드가 남고, 그 PR이 막혀 있으니 main push도 없어 재검증이
+  # 안 된다 (#53 드레인 모드에서 정확히 이 교착이 만들어진다). head 갱신에서 다시 돈다.
+  pull_request:
+    branches: [main]
+    types: [synchronize, reopened, ready_for_review]
 
 # main에 연속 push가 들어오면 앞선 스윕은 이미 낡은 base를 보고 있으므로 취소한다.
+# pull_request 이벤트의 github.ref는 PR별로 다르므로 같은 PR의 앞선 실행만 취소된다.
 concurrency:
   group: recheck-open-prs-${{ github.ref }}
   cancel-in-progress: true
 
-# 기본값에 기대지 않고 최소 권한을 명시한다. 코드는 읽기만 하고 결과는 PR 코멘트로만 남긴다.
-# (PR 브랜치에 push하거나 워크플로를 재실행하지 않으므로 contents: write / actions: write 불필요)
+# 기본값에 기대지 않고 최소 권한을 명시한다. 워크플로 기본은 읽기 전용이고, PR 코멘트를 쓰는
+# 권한은 report 잡에만 준다 — recheck 잡은 PR에서 온 코드를 돌리므로 쓰기 토큰을 쥐지 않는다
+# (#112 항목 5).
 permissions:
   contents: read
-  pull-requests: write
 
 jobs:
   discover:
     name: Select open PRs
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
     outputs:
+      base_sha: ${{ steps.list.outputs.base_sha }}
       prs: ${{ steps.list.outputs.prs }}
       count: ${{ steps.list.outputs.count }}
+      unverified: ${{ steps.list.outputs.unverified }}
+      report: ${{ steps.list.outputs.report }}
+      report_count: ${{ steps.list.outputs.report_count }}
     steps:
-      - name: List open PRs targeting main
+      - name: Checkout scripts from the default branch
+        uses: actions/checkout@v4
+        with:
+          # pull_request 이벤트의 기본 ref는 PR 머지 커밋이다. 고정하지 않으면 대상 PR 목록과
+          # base_sha를 **PR이 고칠 수 있는 recheck-select.sh**가 정하고, 그 base_sha를
+          # recheck·report 두 잡의 checkout이 그대로 쓴다 — report 잡의 "현재 main의
+          # 스크립트로 보고한다"는 전제가 거기서 무너진다. 적의가 없어도 걸린다: PR이
+          # recheck-select.sh를 깨뜨리면 이 잡이 죽고, report 잡의 if가 막아 보고가 통째로
+          # 사라진다 = CONTRIBUTING.md 기준 "코멘트 없음 = 통과". PR이 자기 게이트를
+          # 침묵시킬 수 있다는 뜻이라 신뢰 ref로 고정한다.
+          # push 이벤트에서 github.sha는 곧 이 브랜치의 head이므로 동작은 달라지지 않는다.
+          ref: ${{ github.event.repository.default_branch }}
+          sparse-checkout: .github/scripts
+
+      # 위 checkout이 스크립트를 신뢰 ref에서 가져오므로, pull_request 실행에서는 워크플로
+      # YAML(PR head에서 온다)과 스크립트(기본 브랜치에서 온다)의 버전이 어긋날 수 있다.
+      # 스크립트가 아직 기본 브랜치에 없으면 아래 스텝이 bash의 exit 127로 죽어 원인이
+      # 드러나지 않는다 — 이 워크플로를 처음 들여오는 PR이 정확히 그 상태다. 조용히 넘어가면
+      # 게이트가 사라지므로(코멘트 없음 = 통과) 넘어가지 않고, 이유만 밝히고 죽는다.
+      - name: Verify the trusted scripts exist
+        env:
+          TRUSTED_REF: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          if [ ! -f .github/scripts/recheck-select.sh ]; then
+            echo "::error::신뢰 ref(${TRUSTED_REF})에 .github/scripts/recheck-select.sh가 없습니다. 판정 스크립트가 아직 기본 브랜치에 머지되지 않았습니다 — 머지되면 이 경로가 성립합니다."
+            exit 1
+          fi
+
+      - name: List PRs to recheck
         id: list
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          BASE_SHA: ${{ github.sha }}
-        run: |
-          set -euo pipefail
-
-          {
-            echo "## 재검증 대상 선정"
-            echo
-            echo "기준 base: \`main\` @ \`${BASE_SHA}\`"
-            echo
-          } >> "$GITHUB_STEP_SUMMARY"
-
-          numbers=$(gh api --paginate "repos/${REPO}/pulls?state=open&base=main&per_page=100" --jq '.[].number')
-
-          # 열린 PR이 0건이면 할 일이 없다 — 빈 목록으로 성공 종료한다(recheck 잡은 if로 스킵).
-          if [ -z "$numbers" ]; then
-            echo "열린 PR 0건 — 재검증할 것이 없습니다." >> "$GITHUB_STEP_SUMMARY"
-            echo "prs=[]" >> "$GITHUB_OUTPUT"
-            echo "count=0" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          # PR 하나의 분류가 실패해도 나머지 스윕은 계속돼야 한다. 함수 안에서 set -e로 죽어도
-          # 호출부의 `|| reason=...`이 그 실패를 잡으므로 루프 전체가 조용히 끝나지 않는다.
-          classify() {
-            local n="$1" json draft mergeable state attempt
-            for attempt in 1 2 3 4 5; do
-              json=$(gh api "repos/${REPO}/pulls/${n}")
-              draft=$(jq -r '.draft' <<< "$json")
-              mergeable=$(jq -r '.mergeable' <<< "$json")
-              state=$(jq -r '.mergeable_state' <<< "$json")
-
-              # 드래프트는 아직 리뷰 대상이 아니다.
-              if [ "$draft" = "true" ]; then
-                echo "skip:draft"
-                return 0
-              fi
-
-              # mergeable이 null이면 GitHub이 머지 가능성을 아직 계산 중이다(이 GET이 계산을 촉발한다).
-              if [ "$mergeable" != "null" ] && [ "$state" != "unknown" ]; then
-                case "$state" in
-                  # 충돌(dirty) 건은 developer가 merge로 해소할 몫이다. 여기서 손대봐야 실패만 쌓인다.
-                  dirty) echo "skip:conflict" ;;
-                  *) echo "run" ;;
-                esac
-                return 0
-              fi
-              sleep 5
-            done
-            echo "skip:mergeability-unknown"
-          }
-
-          sel=""
-          for n in $numbers; do
-            reason=$(classify "$n") || reason="error:classify-failed"
-            case "$reason" in
-              run)
-                sel="${sel} ${n}"
-                echo "- #${n} → 재검증" >> "$GITHUB_STEP_SUMMARY"
-                ;;
-              skip:*)
-                echo "- #${n} → 건너뜀 (${reason#skip:})" >> "$GITHUB_STEP_SUMMARY"
-                ;;
-              *)
-                echo "- #${n} → 실패 (${reason}) — 다음 push에서 다시 시도합니다" >> "$GITHUB_STEP_SUMMARY"
-                ;;
-            esac
-          done
-
-          prs=$(jq -c -n --arg s "$sel" '$s | split(" ") | map(select(length > 0)) | map(tonumber)')
-          count=$(jq -r 'length' <<< "$prs")
-          echo "prs=${prs}" >> "$GITHUB_OUTPUT"
-          echo "count=${count}" >> "$GITHUB_OUTPUT"
+          EVENT_NAME: ${{ github.event_name }}
+          PUSH_SHA: ${{ github.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: bash .github/scripts/recheck-select.sh
 
   recheck:
     name: Recheck PR
     needs: discover
     if: needs.discover.outputs.count != '0'
     runs-on: ubuntu-latest
+    # PR에서 온 코드(pnpm install이 실행하는 의존성 install script를 포함해)가 이 잡에서 돈다.
+    # 그래서 pull-requests: write를 주지 않는다 — 보고는 별도 report 잡의 몫이다.
+    permissions:
+      contents: read
     strategy:
       # 한 PR이 레드/실패여도 나머지 PR 검증은 끝까지 돌아야 한다.
       fail-fast: false
@@ -120,14 +104,31 @@ jobs:
       - name: Checkout current main
         uses: actions/checkout@v4
         with:
+          # pull_request 이벤트의 기본 ref는 PR 머지 커밋이라 "현재 main"이 아니다.
+          ref: ${{ needs.discover.outputs.base_sha }}
           # PR head를 받아 러너에서 직접 머지하므로 전체 히스토리가 필요하다.
           fetch-depth: 0
+
+      # 판정 스크립트는 **머지 전 main의 것**을 쓴다. 아래 머지가 끝나면 작업 트리의
+      # .github/scripts는 PR이 고칠 수 있는 버전이 되고, 그 버전으로 판정하면 PR이 자기
+      # 판정을 그린으로 쓸 수 있다. 머지 전에 RUNNER_TEMP로 복사해 그 경우를 막는다.
+      #
+      # 이 복사는 신뢰 경계가 **아니다**. RUNNER_TEMP는 러너 안이고 같은 잡에서 도는 것은
+      # 무엇이든(아래 pnpm install이 실행하는 의존성 install script를 포함해) 이 경로에 쓸 수
+      # 있다. 막는 것: 머지가 작업 트리의 판정 스크립트를 PR의 버전으로 바꾸는 평범한 경우.
+      # 막지 못하는 것: 같은 잡에서 실행되는 코드가 이 사본을 덮어쓰는 경우. 후자는 이 리포의
+      # 위협모델 밖이라(#112 항목 5 — 적대적 PR 작성자 없음) 설계를 바꾸지 않았다.
+      - name: Pin the base verdict script
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/base-scripts"
+          cp .github/scripts/recheck-verdict.sh "${RUNNER_TEMP}/base-scripts/"
 
       - name: Merge the PR into current main (on the runner)
         id: merge
         env:
           PR: ${{ matrix.pr }}
-          BASE_SHA: ${{ github.sha }}
+          BASE_SHA: ${{ needs.discover.outputs.base_sha }}
         run: |
           set -euo pipefail
 
@@ -139,29 +140,42 @@ jobs:
           # 그 ref를 믿으면 이 워크플로가 막으려는 "낡은 베이스 검증"을 되풀이하므로, 머지는
           # 러너에서 직접 만든다. 여기서 만든 머지는 러너 안의 로컬 main에만 존재하고
           # 어디에도 push하지 않는다 (permissions는 contents: read다).
+          #
+          # fetch가 실패하면 이 단계는 set -e로 죽고 outcome 출력이 남지 않는다. 그 부재를
+          # 충돌로 단정하지 않는 것이 recheck-verdict.sh의 몫이다.
           git fetch --no-tags --force origin "refs/pull/${PR}/head:refs/remotes/pull/${PR}/head"
+
+          head_sha=$(git rev-parse "refs/remotes/pull/${PR}/head")
+          echo "head_sha=${head_sha}" >> "$GITHUB_OUTPUT"
 
           if git -c user.name='github-actions[bot]' \
                  -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
                  merge --no-edit --no-ff "refs/remotes/pull/${PR}/head"; then
-            echo "merged=true" >> "$GITHUB_OUTPUT"
+            echo "outcome=merged" >> "$GITHUB_OUTPUT"
             echo "merge_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-          else
+          elif [ -n "$(git ls-files --unmerged)" ]; then
             # discover의 dirty 필터는 GitHub이 옛 base로 계산한 값이라 여기서 처음 드러나는
             # 충돌이 있을 수 있다. 충돌 해소는 developer 몫이므로 검증하지 않고 알리기만 한다.
             git merge --abort || true
-            echo "merged=false" >> "$GITHUB_OUTPUT"
+            echo "outcome=conflict" >> "$GITHUB_OUTPUT"
             echo "- 충돌: 현재 main과 텍스트 충돌이 있어 검증하지 못했습니다" >> "$GITHUB_STEP_SUMMARY"
+          else
+            # 미해결 경로가 하나도 없는데 merge가 실패했다 = 충돌이 아닌 이유다. 이것을 충돌로
+            # 보고하면 developer에게 없는 충돌을 고치라고 시키게 된다. outcome을 남기지 않고
+            # 죽어서 "판정 불가"로 수렴시킨다.
+            git merge --abort || true
+            echo "머지가 충돌이 아닌 이유로 실패했습니다" >&2
+            exit 1
           fi
 
       - name: Setup pnpm
-        if: steps.merge.outputs.merged == 'true'
+        if: steps.merge.outputs.outcome == 'merged'
         uses: pnpm/action-setup@v4
         with:
           version: 10.30.3
 
       - name: Setup Node
-        if: steps.merge.outputs.merged == 'true'
+        if: steps.merge.outputs.outcome == 'merged'
         uses: actions/setup-node@v4
         with:
           node-version: 22.23.1
@@ -169,7 +183,7 @@ jobs:
 
       - name: Run repo checks
         id: checks
-        if: steps.merge.outputs.merged == 'true'
+        if: steps.merge.outputs.outcome == 'merged'
         env:
           PR: ${{ matrix.pr }}
           LOG: ${{ runner.temp }}/checks.log
@@ -185,6 +199,7 @@ jobs:
             "pnpm build"
             "pnpm typecheck:test"
             "pnpm exec vitest run"
+            "pnpm test:ci-scripts"
           )
 
           failed=""
@@ -213,70 +228,67 @@ jobs:
             echo "- 🟢 현재 main 기준 그린" >> "$GITHUB_STEP_SUMMARY"
           fi
 
-      - name: Report result on the PR
+      # 앞의 어느 단계가 실패해도 판정은 남아야 한다. 이 단계마저 못 돌면 아티팩트가 없고,
+      # 그때는 report 잡이 "판정 불가"로 처리한다 — 어느 쪽으로 갈라져도 그린이 되지 않는다.
+      - name: Decide the verdict
         if: ${{ !cancelled() }}
+        env:
+          PR: ${{ matrix.pr }}
+          MERGE_RESULT: ${{ steps.merge.outputs.outcome }}
+          MERGE_OUTCOME: ${{ steps.merge.outcome }}
+          MERGE_SHA: ${{ steps.merge.outputs.merge_sha }}
+          HEAD_SHA: ${{ steps.merge.outputs.head_sha }}
+          CHECKS_STATUS: ${{ steps.checks.outputs.status }}
+          CHECKS_OUTCOME: ${{ steps.checks.outcome }}
+          FAILED: ${{ steps.checks.outputs.failed }}
+          OUT_DIR: ${{ runner.temp }}/result
+          LOG: ${{ runner.temp }}/checks.log
+        run: bash "${RUNNER_TEMP}/base-scripts/recheck-verdict.sh"
+
+      - name: Upload the verdict
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: recheck-result-${{ matrix.pr }}
+          path: ${{ runner.temp }}/result
+          retention-days: 7
+          if-no-files-found: error
+
+  report:
+    name: Report results on the PRs
+    needs: [discover, recheck]
+    # recheck가 실패·스킵돼도 보고는 돌아야 한다 — 보고가 사라지면 CONTRIBUTING.md 기준으로
+    # "코멘트 없음 = 통과"가 되고, 그게 이 게이트의 가장 큰 구멍이다.
+    if: ${{ !cancelled() && needs.discover.result == 'success' && needs.discover.outputs.report_count != '0' }}
+    runs-on: ubuntu-latest
+    # 쓰기 토큰은 이 잡에만 있다. 그리고 이 잡은 PR 코드를 체크아웃하지도 실행하지도 않는다.
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Checkout scripts from the base commit
+        uses: actions/checkout@v4
+        with:
+          # PR이 아니라 **현재 main**의 스크립트로 보고한다.
+          ref: ${{ needs.discover.outputs.base_sha }}
+          sparse-checkout: .github/scripts
+
+      - name: Download the verdicts
+        # 판정 아티팩트가 하나도 없으면(모든 recheck 잡이 죽은 경우) 이 액션은 실패한다.
+        # 그때도 보고는 해야 하므로 계속 진행하고, 없는 판정은 "판정 불가"가 된다.
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          path: results
+          pattern: recheck-result-*
+
+      - name: Comment on each PR
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          PR: ${{ matrix.pr }}
-          BASE_SHA: ${{ github.sha }}
-          MERGED: ${{ steps.merge.outputs.merged }}
-          MERGE_SHA: ${{ steps.merge.outputs.merge_sha }}
-          STATUS: ${{ steps.checks.outputs.status }}
-          FAILED: ${{ steps.checks.outputs.failed }}
-          LOG: ${{ runner.temp }}/checks.log
+          PRS: ${{ needs.discover.outputs.report }}
+          UNVERIFIED: ${{ needs.discover.outputs.unverified }}
+          RESULTS_DIR: results
+          BASE_SHA: ${{ needs.discover.outputs.base_sha }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: |
-          set -euo pipefail
-
-          # 같은 PR에 main push마다 코멘트가 쌓이면 소음이다 — 이 마커로 기존 코멘트를 찾아 갱신한다.
-          marker="<!-- recheck-open-prs -->"
-          body="${RUNNER_TEMP}/body.md"
-
-          {
-            echo "🤖 [ci]"
-            echo
-            echo "$marker"
-            if [ "$MERGED" != "true" ]; then
-              echo "⚠️ **현재 \`main\` 기준 재검증을 하지 못했습니다 — 이 PR은 현재 main과 충돌합니다.**"
-              echo
-              echo "GitHub이 보고하는 \`mergeable\`은 PR이 마지막으로 갱신된 시점의 base로 계산된 값이라"
-              echo "\`clean\`으로 보일 수 있습니다. \`main\`을 merge로 받아넣어 해소해 주세요"
-              echo "(rebase·force push 금지)."
-            elif [ "$STATUS" = "red" ]; then
-              echo "🔴 **이 PR은 현재 main 기준으로 레드입니다.**"
-              echo
-              echo "실패한 명령: \`${FAILED}\`"
-              echo
-              echo "이 PR에 붙은 기존 CI 그린은 더 낡은 base의 결과입니다. main을 merge로 받아넣고"
-              echo "(rebase·force push 금지) 고친 뒤 다시 push하세요."
-              echo
-              echo "<details><summary>출력 마지막 부분</summary>"
-              echo
-              echo '```'
-              tail -c 3000 "$LOG" || true
-              echo '```'
-              echo
-              echo "</details>"
-            else
-              echo "🟢 이 PR은 현재 main 기준으로 그린입니다."
-            fi
-            echo
-            echo "- base: \`${BASE_SHA}\`"
-            echo "- 검증한 머지 커밋: \`${MERGE_SHA:-N/A}\`"
-            echo "- 실행 로그: ${RUN_URL}"
-          } > "$body"
-
-          existing=$(gh api --paginate "repos/${REPO}/issues/${PR}/comments?per_page=100" \
-            | jq -s -r --arg m "$marker" 'add | map(select(.body | contains($m))) | last | .id // empty')
-
-          if [ -n "$existing" ]; then
-            gh api --silent --method PATCH "repos/${REPO}/issues/comments/${existing}" -F "body=@${body}"
-            echo "- 코멘트 ${existing} 갱신" >> "$GITHUB_STEP_SUMMARY"
-          elif [ "$MERGED" != "true" ] || [ "$STATUS" = "red" ]; then
-            gh pr comment "$PR" -R "$REPO" --body-file "$body"
-            echo "- 코멘트 신설" >> "$GITHUB_STEP_SUMMARY"
-          else
-            # 그린인데 이력도 없으면 알릴 것이 없다 — 코멘트를 만들지 않는다.
-            echo "- 그린이고 기존 코멘트도 없어 코멘트를 남기지 않았습니다" >> "$GITHUB_STEP_SUMMARY"
-          fi
+        run: bash .github/scripts/recheck-report.sh

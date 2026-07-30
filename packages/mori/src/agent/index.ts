@@ -13,7 +13,7 @@ import {
   supportedProviderIds,
   unknownProviderMessage,
 } from "./provider-selection.js";
-import { createBashBeforeToolCall, createMoriTools } from "./tools/index.js";
+import { createBashBeforeToolCall, createMoriTools } from "../tools/index.js";
 
 export { createMoriModels };
 

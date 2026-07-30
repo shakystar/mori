@@ -12,8 +12,8 @@ import type {
 import { createAssistantMessageEventStream, InMemoryCredentialStore } from "@earendil-works/pi-ai";
 import { BufferKernel } from "@mori/kernel";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { createMoriAgent, createMoriModels } from "./agent.js";
-import { EXPERIMENTAL_OPENAI_OAUTH_ENV, OPENAI_OAUTH_PROVIDER_ID } from "./auth/experimental.js";
+import { createMoriAgent, createMoriModels } from "./index.js";
+import { EXPERIMENTAL_OPENAI_OAUTH_ENV, OPENAI_OAUTH_PROVIDER_ID } from "../auth/experimental.js";
 
 const ONE_HOUR_MS = 60 * 60 * 1000;
 const GATE_ON = { [EXPERIMENTAL_OPENAI_OAUTH_ENV]: "1" } as const;
