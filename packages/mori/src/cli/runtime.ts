@@ -48,7 +48,9 @@ export async function prepareAgent(
   const kernel = new BufferKernel<AgentMessage, AgentEvent>();
   let agent: Agent;
   try {
-    agent = createMoriAgent(kernel, credentialStore, env, deps.streamFn, { root: deps.root });
+    agent = createMoriAgent(kernel, credentialStore, env, deps.streamFn, {
+      ...(deps.root ? { root: deps.root } : {}),
+    });
   } catch (err) {
     // Unknown-model errors from createMoriAgent are already a plain, user-facing message
     // (see agent.ts) — surface it as CLI output, not an uncaught stack trace.
