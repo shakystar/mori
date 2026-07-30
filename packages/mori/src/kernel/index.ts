@@ -12,6 +12,7 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import type { AgentEvent, AgentMessage } from "@earendil-works/pi-agent-core";
 import {
+  createId,
   observedShell,
   observedWrite,
   projectStoreExists,
@@ -147,6 +148,15 @@ export interface CreateMoriKernelOptions {
    */
   embedder?: Embedder;
   /**
+   * Session this kernel's observations and consolidation boundary belong to.
+   * Defaults to a freshly minted id — one kernel is built per CLI process
+   * invocation (`prepareAgent`, once for `runPrompt`, once for the whole
+   * `runRepl` lifetime), so "one kernel" and "one session" are the same
+   * lifetime and a single id minted at construction covers every turn the
+   * kernel sees. Overridable so tests can assert on a known id.
+   */
+  sessionId?: string;
+  /**
    * Sink for a capture that failed after the turn moved on. Called at most once
    * per kernel: a store that is broken is broken for every later event, and the
    * agent's output is not a log.
@@ -179,6 +189,7 @@ export function createMoriKernel(
     projectId: moriProjectId(root),
     actor: MORI_ACTOR,
     project: { title: path.basename(root) || root, rootPath: root },
+    sessionId: options.sessionId ?? createId("session"),
     observeEvent: createAgentEventObserver(),
     ...(embedder ? { embedder } : {}),
     onCaptureError: (error: unknown) => {
