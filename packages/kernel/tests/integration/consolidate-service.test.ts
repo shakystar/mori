@@ -446,3 +446,68 @@ describe("consolidate — semantic wiring", () => {
     expect(listOpenConflicts(projectId)).toHaveLength(0);
   });
 });
+
+
+// #113 ① — the rule-based fallback must never promote a write-tool
+// observation's raw content into a searchable memory. `evaluateCapture`'s own
+// type is an unenforced plain string, so this simulates a caller that hands
+// it file content anyway (the #109/PR #127 path contract lives at the harness
+// wiring layer, not here) and asserts the leak is structurally impossible.
+describe("consolidate — rule-based fallback never echoes write-tool content (#113)", () => {
+  it("never puts a write-tool observation's summary/filePath value into memory text", async () => {
+    const secret = "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
+    const observation = createObservation({
+      projectId,
+      signal: "write-tool",
+      toolName: "Write",
+      summary: `Write: ${secret}`,
+      filePath: secret,
+    });
+    await appendEvent({
+      type: "observation.captured",
+      projectId,
+      scopeType: "session",
+      scopeId: projectId,
+      actor: "test",
+      payload: observation,
+    });
+
+    const result = await consolidate({ projectId, actor: "test" });
+
+    expect(result).toMatchObject({ extractor: "rule-based", outcome: "ok" });
+    const texts = listValidMemories(projectId).map((r) => r.memory.text);
+    expect(texts.some((t) => t.startsWith("Edited 1 file(s)"))).toBe(true);
+    for (const text of texts) {
+      expect(text).not.toContain(secret);
+      expect(text).not.toContain("AWS_SECRET_ACCESS_KEY");
+    }
+  });
+
+  it("dedups the edit count by the structured filePath without ever emitting a path", async () => {
+    const pathA = "/repo/src/a.ts";
+    const pathB = "/repo/src/b.ts";
+    for (const filePath of [pathA, pathA, pathB]) {
+      const observation = createObservation({
+        projectId,
+        signal: "write-tool",
+        toolName: "Edit",
+        summary: `Edit: ${filePath}`,
+        filePath,
+      });
+      await appendEvent({
+        type: "observation.captured",
+        projectId,
+        scopeType: "session",
+        scopeId: projectId,
+        actor: "test",
+        payload: observation,
+      });
+    }
+
+    await consolidate({ projectId, actor: "test" });
+
+    const texts = listValidMemories(projectId).map((r) => r.memory.text);
+    expect(texts).toContain("Edited 2 file(s)");
+    expect(texts.some((t) => t.includes(pathA) || t.includes(pathB))).toBe(false);
+  });
+});

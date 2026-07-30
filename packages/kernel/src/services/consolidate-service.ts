@@ -109,20 +109,24 @@ export class RuleBasedConsolidator implements Consolidator {
     const out: ExtractedMemory[] = [];
     const edits = input.observations.filter((o) => o.signal === "write-tool");
     if (edits.length > 0) {
-      const files = [
-        ...new Set(
-          edits
-            .map((o) => o.summary ?? "")
-            .map((s) => s.replace(/^(Write|Edit|MultiEdit):\s*/, ""))
-            .filter(Boolean),
-        ),
-      ];
+      // #113: never echo a write-tool observation's `summary`/`filePath` into
+      // the memory body. The kernel-level contract for what `toolInputText`
+      // contains (path, per #109/PR #127 — see capture-service.ts) is
+      // enforced by the harness wiring layer, NOT by this package's own
+      // types (`CaptureObservationParams.toolInputText` is a plain string) —
+      // a caller that violates it must not be able to promote file content
+      // (a `.env` prefix, a secret) into a long-lived, searchable memory via
+      // this "never worse than nothing" fallback. Dedup by the structured
+      // `filePath` field (present only for write signals) WITHOUT ever
+      // reading its value — only its count is used.
+      const uniqueFiles = new Set(
+        edits.map((o) => o.filePath).filter((f): f is string => Boolean(f)),
+      );
+      const fileCount = uniqueFiles.size > 0 ? uniqueFiles.size : edits.length;
       out.push({
         kind: "progress",
-        text: `Edited ${files.length} file(s): ${files.slice(0, 10).join(", ")}${
-          files.length > 10 ? ", …" : ""
-        }`,
-        salience: clampSalience(3 + Math.min(2, Math.floor(files.length / 5))),
+        text: `Edited ${fileCount} file(s)`,
+        salience: clampSalience(3 + Math.min(2, Math.floor(fileCount / 5))),
       });
     }
     for (const obs of input.observations) {

@@ -103,8 +103,22 @@ const TASK_TRANSITION_PATTERN =
 
 /**
  * Decision-keyword heuristic (tuning parameter — seed list). Matched against
- * the Bash command text only; write-tool inputs are file contents where
- * these words are far too common to be a signal.
+ * the Bash command text only — the write-tool branch above returns before
+ * this pattern is ever evaluated, so it never sees write-tool input either
+ * way.
+ *
+ * #113 (resolving the #109 contract question this file used to beg): write
+ * signals do NOT carry file contents in `toolInputText`. `toolInputText` is a
+ * PATH for write tools, a raw patch body for `apply_patch` (whose `*** …
+ * File:` headers name the paths, extracted above), and command text for
+ * shell tools — pinned at the type level by `observedWrite` / `observedPatch`
+ * / `observedShell` in `packages/kernel/src/kernel/sqlite-memory-kernel.ts`
+ * (PR #127, #109's approved resolution: "path + separate field", not
+ * content). `evaluateCapture` itself stays defensive regardless: it never
+ * assumes a caller honored that contract (its own parameter type is a plain
+ * `string`, unenforced), so nothing downstream — see
+ * `RuleBasedConsolidator.extract()` in consolidate-service.ts — treats a
+ * write-tool observation's `summary`/`filePath` as safe-to-echo content.
  */
 const DECISION_KEYWORD_PATTERN =
   /결정|선택|포기|대신|하기로|방향|\bdecided?\b|\bdecision\b|\bchose\b|\binstead of\b|\babandon\b/i;
