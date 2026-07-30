@@ -262,6 +262,15 @@ export async function readEventsSince(
  * window without paying for the whole log.
  */
 export async function readGenesisEvents(projectId: string): Promise<DomainEvent[]> {
+  return readGenesisEventsSync(projectId);
+}
+
+/** {@link readGenesisEvents} for SYNC callers. The read itself was always
+ *  synchronous (the async signature is this module's convention); the
+ *  consolidation THRESHOLD path needs the same self/foreign classification and
+ *  is sync all the way up to `shouldTriggerThresholdConsolidate`, so it takes
+ *  this door rather than forcing a public API to go async. */
+export function readGenesisEventsSync(projectId: string): DomainEvent[] {
   const rows = getDb(projectId)
     .prepare("SELECT * FROM events WHERE type = 'project.created' ORDER BY seq")
     .all() as EventRow[];

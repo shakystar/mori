@@ -15,7 +15,7 @@ import { getDb } from "../storage/db.js";
 import {
   appendEvents,
   readEventsSince,
-  readGenesisEvents,
+  readGenesisEventsSync,
   type AppendEventInput,
 } from "../storage/event-store.js";
 import { detectContradictions, makeLlmJudge } from "./contradiction-service.js";
@@ -577,9 +577,12 @@ function writeLastConsolidateAttempt(projectId: string, attempt: ConsolidateAtte
 }
 
 export interface ConsolidationStatus {
-  /** observation.captured events past the current watermark. */
+  /** SELF-LANE observation.captured events past the current watermark — the
+   *  same backlog `consolidate()` would actually distill. A workspace union's
+   *  synced siblings share this db; their observations are not this store's
+   *  work and are excluded (#113 item②). */
   pendingObservations: number;
-  /** created_at of the oldest pending observation, when any. */
+  /** created_at of the oldest pending self-lane observation, when any. */
   oldestPendingAt?: string;
   lastAttempt?: ConsolidateAttempt;
 }
@@ -594,16 +597,43 @@ export function getConsolidationStatus(projectId: string): ConsolidationStatus {
       { seq: number } | undefined;
     if (row) sinceSeq = row.seq;
   }
-  const pending = db
-    .prepare(
-      "SELECT COUNT(*) AS n, MIN(created_at) AS oldest FROM events " +
-        "WHERE type = 'observation.captured' AND seq > ?",
-    )
-    .get(sinceSeq) as { n: number; oldest: string | null };
+  // #113 item②: the backlog this reports is the one a boundary would consume,
+  // so it applies the SAME `laneOf` self/foreign test `run()` does — a COUNT(*)
+  // over the type alone let a foreign-only backlog cross the local threshold in
+  // `shouldTriggerThresholdConsolidate` and fire a boundary that then found
+  // nothing of its own to do (Codex P2 on PR #136). Classifying needs the
+  // provenance columns rather than a count, but reads only those two plus
+  // `created_at`, and only for events past the watermark.
+  const isUnion = isUnionLog(projectId);
+  const pending = (
+    db
+      .prepare(
+        "SELECT project_id, source_project_id, created_at FROM events " +
+          "WHERE type = 'observation.captured' AND seq > ? ORDER BY seq",
+      )
+      .all(sinceSeq) as { project_id: string; source_project_id: string | null; created_at: string }[]
+  ).filter(
+    (row) =>
+      laneOf(
+        {
+          projectId: row.project_id,
+          ...(row.source_project_id !== null ? { sourceProjectId: row.source_project_id } : {}),
+        },
+        projectId,
+        isUnion,
+      ) === SELF_LANE,
+  );
+  // Oldest by `created_at`, not by `seq`: the two agree for locally appended
+  // events but a synced block arrives at whatever seq it lands on, so keep the
+  // MIN semantics the previous SQL had.
+  const oldestPendingAt = pending.reduce<string | undefined>(
+    (oldest, row) => (oldest === undefined || row.created_at < oldest ? row.created_at : oldest),
+    undefined,
+  );
   const lastAttempt = readLastConsolidateAttempt(projectId);
   return {
-    pendingObservations: pending.n,
-    ...(pending.oldest ? { oldestPendingAt: pending.oldest } : {}),
+    pendingObservations: pending.length,
+    ...(oldestPendingAt !== undefined ? { oldestPendingAt } : {}),
     ...(lastAttempt ? { lastAttempt } : {}),
   };
 }
@@ -703,6 +733,19 @@ export interface LifecycleEvidenceReport {
   /** The free-form expiry conditions verbatim — their SHAPE is the evidence. */
   obsoleteWhen: Array<{ kind: string; condition: string }>;
   kindMisfitReasons: Array<{ kind: string; reason?: string; text: string }>;
+/**
+ * `laneOf`'s `isUnion` flag for this log — more than one genesis identity means
+ * synced members share the db. Cheap (at most one row per member) and the one
+ * place that decides it, so the boundary and the backlog count below can never
+ * classify the same event differently.
+ */
+function isUnionLog(projectId: string): boolean {
+  const genesisIds = new Set(
+    readGenesisEventsSync(projectId).map((event) => (event.payload as Project).id),
+  );
+  return genesisIds.size > 1;
+}
+
 }
 
 /**
@@ -920,12 +963,10 @@ export async function consolidate(params: ConsolidateParams): Promise<Consolidat
     // (and inflates the threshold-trigger math below). Apply the exact same
     // provenance test `listRecentObservations` uses on the projection side
     // (`laneWhere` / `source_project_id IS NULL`) via the shared `laneOf`
-    // helper, so the two can never drift apart. `isUnion` is resolved from
-    // just the log's genesis events (cheap — at most one row per union
-    // member) rather than a full `readEvents` replay.
-    const genesisEvents = await readGenesisEvents(params.projectId);
-    const genesisIds = new Set(genesisEvents.map((event) => (event.payload as Project).id));
-    const isUnion = genesisIds.size > 1;
+    // helper, so the two can never drift apart. `isUnion` comes from the same
+    // `isUnionLog` the backlog count uses, so the boundary and the threshold
+    // that fires it classify identically.
+    const isUnion = isUnionLog(params.projectId);
     const selfObservationEvents = rawObservationEvents.filter(
       (event) => laneOf(event, params.projectId, isUnion) === SELF_LANE,
     );

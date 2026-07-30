@@ -24,9 +24,11 @@ import {
   chunkConversation,
   consolidate,
   getConsolidateWatermark,
+  getConsolidationStatus,
   parseExtractedMemories,
   readLastConsolidateAttempt,
   setConsolidateWatermark,
+  shouldTriggerThresholdConsolidate,
   type Consolidator,
 } from "../../src/services/consolidate-service.js";
 import { listOpenConflicts, listValidMemories } from "../../src/services/projection-store.js";
@@ -564,6 +566,19 @@ describe("consolidate — excludes foreign-lane observations (#113)", () => {
 
   it("still advances past a foreign-only window instead of rescanning it forever", async () => {
     await seedForeignObservation("foreign only, no self observations");
+  it("excludes foreign-lane observations from the threshold backlog that fires a boundary", async () => {
+    await seedObservation("self decision");
+    for (let i = 0; i < 25; i++) {
+      await seedForeignObservation(`foreign decision ${i}`);
+    }
+
+    // The backlog a boundary would actually distill is 1, not 26 — otherwise a
+    // foreign-only backlog crosses the local threshold and fires a boundary
+    // that immediately finds nothing of its own to do.
+    expect(getConsolidationStatus(projectId).pendingObservations).toBe(1);
+    expect(shouldTriggerThresholdConsolidate(projectId)).toBe(false);
+  });
+
 
     const result = await consolidate({ projectId, actor: "test" });
 

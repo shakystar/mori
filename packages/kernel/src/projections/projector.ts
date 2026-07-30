@@ -137,10 +137,12 @@ function isSelfKey(key: string): boolean {
  * event-log-side `consolidate()` boundary — can apply this exact same
  * self/foreign test to raw events, instead of re-deriving its own notion of
  * "self lane" and risking divergence from {@link laneWhere}'s projection-table
- * criterion.
+ * criterion. Takes only the two provenance fields (not a whole `DomainEvent`)
+ * so a caller reading just those columns — the consolidation backlog count —
+ * can classify without materializing events it does not otherwise need.
  */
 export function laneOf(
-  event: DomainEvent,
+  event: Pick<DomainEvent, "projectId" | "sourceProjectId">,
   selfProjectId: string | undefined,
   isUnion: boolean,
 ): string {
