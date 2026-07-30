@@ -266,6 +266,39 @@ describe("mori turn -> sqlite store", () => {
     expect(prompts[0]).toContain("notes.md");
   });
 
+  it("lands one turn's bash call in the store as a consolidatable observation", async () => {
+    const exitCode = await run([
+      // Not itself a capture signal (evaluateCapture's mutating-bash pattern doesn't match
+      // plain redirection) — it only sets up the file the next call renames.
+      { toolCall: { name: "bash", arguments: { command: "echo 기억은 커널이 남긴다 > src.txt" } } },
+      // `mv` matches MUTATING_BASH_PATTERN (capture-service.ts), so this is the call the
+      // observer and the capture filter both have to let through end to end.
+      { toolCall: { name: "bash", arguments: { command: "mv src.txt shell-notes.txt" } } },
+      { text: "실행했습니다" },
+    ]);
+
+    expect(exitCode).toBe(0);
+    // The commands really ran, so this was a real turn and not a scripted no-op.
+    expect(readFileSync(join(root, "shell-notes.txt"), "utf8")).toContain("기억은 커널이 남긴다");
+    // `runCli` settled its kernel before returning — same non-blocking drain guarantee
+    // edit_file's turn above relies on, exercised here through the `bash` capture family.
+    expect(readdirSync(store)).toContain("projects");
+
+    const prompts: string[] = [];
+    const llm: ConsolidatorLlm = {
+      async complete(prompt: string): Promise<string> {
+        prompts.push(prompt);
+        return "[]";
+      },
+    };
+    const result = await createMoriKernel({ root, env: {} }).consolidateWithResult(llm);
+
+    // Exactly one observation: the `echo` redirect never passed the capture filter, so
+    // only the `mv` call reached the store.
+    expect(result.observationsProcessed).toBe(1);
+    expect(prompts[0]).toContain("mv src.txt shell-notes.txt");
+  });
+
   it("the session-end trigger (#107) lands a real boundary's memories in the event log", async () => {
     const exitCode = await run([
       {
