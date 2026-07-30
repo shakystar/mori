@@ -23,6 +23,11 @@ export class PiConsolidatorLlm implements ConsolidatorLlm {
    * FTS5), consolidation has no such fallback: the kernel's
    * `consolidate-service` needs "LLM failed" distinguishable from "nothing to
    * distill" at its own boundary, not collapsed into a silent empty string.
+   *
+   * Any `stopReason` other than `"stop"` throws, not just `"error"`/`"aborted"`:
+   * a `"length"` truncation can still end on syntactically valid partial JSON,
+   * which the kernel's memory parser would then silently accept as complete,
+   * permanently advancing the consolidation watermark past dropped memories.
    */
   async complete(prompt: string): Promise<string> {
     const model = this.models.getModel(this.providerId, this.modelId);
@@ -35,8 +40,8 @@ export class PiConsolidatorLlm implements ConsolidatorLlm {
     const result = await this.models.completeSimple(model, {
       messages: [{ role: "user", content: prompt, timestamp: Date.now() }],
     });
-    if (result.stopReason === "error" || result.stopReason === "aborted") {
-      throw new Error(result.errorMessage ?? `consolidator LLM stream ${result.stopReason}`);
+    if (result.stopReason !== "stop") {
+      throw new Error(result.errorMessage ?? `consolidator LLM stream ended: ${result.stopReason}`);
     }
     return contentText(result.content);
   }

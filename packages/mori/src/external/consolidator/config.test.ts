@@ -27,11 +27,14 @@ describe("resolveConsolidatorConfig", () => {
 });
 
 describe("getConsolidatorLlm", () => {
-  it("returns undefined when unconfigured, so the kernel gets an explicit off", () => {
-    // Resolve against an EMPTY env, not `undefined` — passing undefined would
-    // fire getConsolidatorLlm's `= resolveConsolidatorConfig()` default and
-    // read the ambient process.env (see ../embeddings/config.test.ts, PR #90
-    // review — same failure mode applies here).
+  it("returns undefined when explicitly resolved off, without falling back to ambient env", () => {
+    // resolveConsolidatorConfig({}) itself evaluates to `undefined` — passing
+    // that through is indistinguishable from omitting the argument to a
+    // defaulted parameter, which is exactly why getConsolidatorLlm takes
+    // `config` as a rest tuple instead: `configArg.length > 0` here is 1, so
+    // the explicit `undefined` is honored rather than re-reading
+    // process.env (see index.ts's doc comment; PR #90 review raised the
+    // same failure mode for ../embeddings).
     // A real Models instance is never touched when config is undefined.
     expect(getConsolidatorLlm(createModels(), resolveConsolidatorConfig({}))).toBeUndefined();
   });

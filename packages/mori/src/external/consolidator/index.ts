@@ -21,10 +21,18 @@ export { PiConsolidatorLlm } from "./pi-consolidator.js";
  * the already-wired `Models`/`MutableModels` from `createMoriModels`
  * (`../../model-wiring.ts`) — this function does not read credentials or
  * register providers itself.
+ *
+ * `config` is a rest tuple, not a defaulted parameter: a plain `config:
+ * ConsolidatorConfig | undefined = resolveConsolidatorConfig()` can't tell
+ * "the caller omitted this, resolve from ambient env" apart from "the caller
+ * already resolved a config and got `undefined` (explicitly disabled)" —
+ * both look like `undefined` to a default parameter, so the second case
+ * would silently re-read `process.env` instead of staying off.
  */
 export function getConsolidatorLlm(
   models: Models,
-  config: ConsolidatorConfig | undefined = resolveConsolidatorConfig(),
+  ...configArg: [config: ConsolidatorConfig | undefined] | []
 ): ConsolidatorLlm | undefined {
+  const config = configArg.length > 0 ? configArg[0] : resolveConsolidatorConfig();
   return config ? new PiConsolidatorLlm(models, config.providerId, config.modelId) : undefined;
 }

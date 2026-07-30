@@ -37,6 +37,20 @@ describe("PiConsolidatorLlm", () => {
     await expect(llm.complete("prompt")).rejects.toThrow("rate limited");
   });
 
+  it("throws on token-limit truncation instead of returning a partial result", async () => {
+    // A "length" stop can still end on syntactically valid partial JSON, which
+    // the kernel's memory parser would otherwise accept as a complete
+    // consolidation and advance the watermark past the dropped remainder.
+    const faux = fauxProvider();
+    const models = createModels();
+    models.setProvider(faux.provider);
+    faux.setResponses([fauxAssistantMessage('[{"truncated": tr', { stopReason: "length" })]);
+
+    const llm = new PiConsolidatorLlm(models, faux.provider.id, faux.getModel().id);
+
+    await expect(llm.complete("prompt")).rejects.toThrow(/length/);
+  });
+
   it("throws when the configured provider/model is not registered", async () => {
     const models = createModels();
 
