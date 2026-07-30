@@ -61,6 +61,21 @@ jobs:
           ref: ${{ github.event.repository.default_branch }}
           sparse-checkout: .github/scripts
 
+      # 위 checkout이 스크립트를 신뢰 ref에서 가져오므로, pull_request 실행에서는 워크플로
+      # YAML(PR head에서 온다)과 스크립트(기본 브랜치에서 온다)의 버전이 어긋날 수 있다.
+      # 스크립트가 아직 기본 브랜치에 없으면 아래 스텝이 bash의 exit 127로 죽어 원인이
+      # 드러나지 않는다 — 이 워크플로를 처음 들여오는 PR이 정확히 그 상태다. 조용히 넘어가면
+      # 게이트가 사라지므로(코멘트 없음 = 통과) 넘어가지 않고, 이유만 밝히고 죽는다.
+      - name: Verify the trusted scripts exist
+        env:
+          TRUSTED_REF: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          if [ ! -f .github/scripts/recheck-select.sh ]; then
+            echo "::error::신뢰 ref(${TRUSTED_REF})에 .github/scripts/recheck-select.sh가 없습니다. 판정 스크립트가 아직 기본 브랜치에 머지되지 않았습니다 — 머지되면 이 경로가 성립합니다."
+            exit 1
+          fi
+
       - name: List PRs to recheck
         id: list
         env:
