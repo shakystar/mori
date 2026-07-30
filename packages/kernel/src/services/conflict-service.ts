@@ -38,6 +38,17 @@ export interface ResolveConflictParams {
  * `conflict.detected` event and row are never touched).
  */
 export async function resolveConflict(params: ResolveConflictParams): Promise<Conflict> {
+  // The projection read + assertConflictStatusTransition check below and the
+  // appendEvent write further down are NOT one atomic unit — two concurrent
+  // callers resolving the same `detected` conflict could both read the
+  // unchanged projection, both pass the transition check, and then append
+  // conflicting outcomes (e.g. `resolved` and `escalated`) that replay
+  // (projector.ts) would apply as a last-write-wins overwrite, landing on a
+  // status the state machine forbids. This is safe ONLY under the kernel's
+  // documented single-writer premise (consolidate-service.ts:43 — "there is
+  // no second process to serialize against"); the moment a concurrent caller
+  // of `resolveConflict` exists, this read-check-append span must be wrapped
+  // in a transaction (#118 item 5 — deliberately no lock/CAS added here).
   const existing = getConflict(params.projectId, params.conflictId);
   if (!existing) {
     throw new MemorizeError(`Conflict not found: ${params.conflictId}`);
