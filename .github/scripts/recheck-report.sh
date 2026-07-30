@@ -5,6 +5,9 @@
 # 위함이다. 이 스크립트는 `pull-requests: write` 토큰을 쥐는 유일한 지점이므로 PR에서 온
 # 코드를 돌리는 잡과 **분리된 잡**에서만 실행된다 (#112 항목 5).
 #
+# 코멘트를 쓰기 전에 대상 PR의 현재 head를 조회한다 — 낡은 판정이 최신 판정을 덮지 않게 하기
+# 위함이다(current_head 참조). 그래서 이 스크립트에는 PR 읽기 권한도 필요하다.
+#
 # 입력(환경변수):
 #   REPO         owner/repo
 #   PRS          코멘트를 남길 PR 번호 JSON 배열
@@ -44,6 +47,23 @@ find_existing() {
       '(add // [])
        | map(select(((.user.login // "") == $bot) and ((.body // "") | contains($m))))
        | first | .id // empty'
+}
+
+# 이 판정이 **지금의** PR head 기준인지 확인한다. main push 스윕(github.ref=refs/heads/main)과
+# 같은 PR의 synchronize 실행(refs/pull/N/merge)은 concurrency 그룹이 달라 서로를 취소하지
+# 못한다. 스윕은 열린 PR 전체를 매트릭스로 돌아 더 느리므로, 늦게 끝난 스윕이 낡은 head의
+# 판정으로 최신 판정을 덮어쓸 수 있다 (#112 리뷰 1번 — 이 워크플로가 새로 만든 false-green).
+# 실패하면 빈 문자열을 돌려준다 = "확인 불가"이고, 확인 불가는 그린이 아니다.
+current_head() {
+  local pr="$1" sha
+  if ! sha=$(gh api "repos/${REPO}/pulls/${pr}" --jq '.head.sha'); then
+    return 0
+  fi
+  # 개행·공백이 섞여 오면 비교가 어긋난다. SHA 모양이 아니면 확인 불가로 다룬다.
+  sha="$(tr -d '[:space:]' <<<"$sha")"
+  if [[ "$sha" =~ ^[0-9a-f]{7,40}$ ]]; then
+    echo "$sha"
+  fi
 }
 
 post_new() {
@@ -91,6 +111,20 @@ build_body() {
       echo "GitHub이 보고하는 \`mergeable\`은 PR이 마지막으로 갱신된 시점의 base로 계산된 값이라"
       echo "\`clean\`으로 보일 수 있습니다. \`main\`을 merge로 받아넣어 해소해 주세요"
       echo "(rebase·force push 금지)."
+      ;;
+    stale)
+      # 낡은/확인 불가 head의 판정. 그린도 레드도 아니고, 무엇보다 **그린이 아니다**.
+      echo "⛔ **판정 불가 — 이 재검증 결과가 현재 PR head 기준인지 확인되지 않습니다.**"
+      echo
+      echo "**이 코멘트는 그린도 레드도 아닙니다.** 재검증에 쓰인 head가 현재 head와 다르거나"
+      echo "확인되지 않아, 이 결과를 현재 head의 근거로 삼을 수 없습니다."
+      if [ -n "$detail" ]; then
+        echo
+        echo "원인: ${detail}"
+      fi
+      echo
+      echo "현재 head에 대한 재검증은 head 갱신(\`synchronize\`)이나 다음 \`main\` push에서 다시"
+      echo "돌고, 그 결과가 이 코멘트를 갱신합니다."
       ;;
     *)
       # 알 수 없는/빈 판정은 그린이 아니다. "부재 ⇒ 불명"이 이 워크플로의 규율이다.
@@ -149,12 +183,6 @@ report_one() {
     fi
   fi
 
-  local body="${TMPDIR:-/tmp}/recheck-body-${pr}.md"
-  if ! build_body "$verdict" "$detail" "$failed" "$merge_sha" "$head_sha" "$logfile" >"$body"; then
-    log "- #${pr}: 코멘트 본문 생성 실패"
-    return 1
-  fi
-
   local existing
   if ! existing=$(find_existing "$pr"); then
     # 조회에 실패하면 기존 코멘트 유무를 알 수 없다. 보고가 사라지는 쪽보다 중복되는 쪽이
@@ -162,6 +190,36 @@ report_one() {
     log "- #${pr}: 기존 코멘트 조회 실패 — 새 코멘트로 남깁니다"
     existing=""
     force_new=1
+  fi
+
+  # 판정을 쓰기 전에 "이 판정이 최신 head 기준인가"를 확인한다. 세 갈래로 나뉜다:
+  #   일치     — 그대로 보고한다
+  #   불일치   — 이 판정은 낡았다. 기존 코멘트를 **덮지 않는다**(최신 head의 판정이 이미 거기
+  #              있을 수 있고, 낡은 그린이 그것을 덮는 것이 바로 이 결함이다). 기존 코멘트가
+  #              없으면 침묵하지 않고 "판정 불가"로 남긴다 — 코멘트 없음은 통과로 읽힌다.
+  #   확인 불가 — 현재 head를 조회하지 못했거나 판정에 head가 없다. 그린으로 단정하지 않고
+  #              "판정 불가"로 강등한다. 레드·충돌·판정 불가는 그대로 둔다(그린으로 덮는
+  #              경로만 막으면 되고, 막는 쪽이 보수적이다).
+  local current
+  current=$(current_head "$pr")
+  if [ -n "$current" ] && [ -n "$head_sha" ] && [ "$current" != "$head_sha" ]; then
+    if [ -n "$existing" ]; then
+      log "- #${pr}: 검증한 head(\`${head_sha}\`)가 현재 head(\`${current}\`)와 달라 기존 코멘트 ${existing}를 덮지 않았습니다 (${verdict})"
+      return 0
+    fi
+    verdict="stale"
+    detail="이 재검증은 PR head \`${head_sha}\` 기준인데 현재 head는 \`${current}\`입니다 — 판정이 낡았습니다."
+  elif [ -z "$current" ] || [ -z "$head_sha" ]; then
+    if [ "$verdict" = "green" ]; then
+      verdict="stale"
+      detail="현재 PR head를 확인하지 못해(조회 실패 또는 판정에 head 없음) 이 그린이 최신 head 기준인지 알 수 없습니다."
+    fi
+  fi
+
+  local body="${TMPDIR:-/tmp}/recheck-body-${pr}.md"
+  if ! build_body "$verdict" "$detail" "$failed" "$merge_sha" "$head_sha" "$logfile" >"$body"; then
+    log "- #${pr}: 코멘트 본문 생성 실패"
+    return 1
   fi
 
   if [ -n "$existing" ]; then
