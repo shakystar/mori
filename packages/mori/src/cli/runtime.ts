@@ -1,7 +1,7 @@
-import type { Agent, AgentEvent, AgentMessage } from "@earendil-works/pi-agent-core";
-import { BufferKernel } from "@mori/kernel";
-import { createMoriAgent, createMoriModels } from "../agent.js";
+import type { Agent } from "@earendil-works/pi-agent-core";
+import { createMoriAgent, createMoriModels, type MoriKernel } from "../agent.js";
 import { defaultCredentialsPath, FileCredentialStore } from "../auth/credential-store.js";
+import { createMoriKernel } from "../kernel-wiring.js";
 import { unauthenticatedMessage } from "./messages.js";
 import type { RunCliDeps } from "./types.js";
 
@@ -14,7 +14,8 @@ export interface RunPromptIO {
  * Either an agent ready to take prompts, or the exit code the caller should return — in
  * which case the user-facing message has already been written to stderr.
  */
-export type PreparedAgent = { ok: true; agent: Agent } | { ok: false; exitCode: number };
+export type PreparedAgent =
+  { ok: true; agent: Agent; kernel: MoriKernel } | { ok: false; exitCode: number };
 
 /**
  * Everything that must happen before the first turn: credential store -> auth gate ->
@@ -45,7 +46,10 @@ export async function prepareAgent(
     return { ok: false, exitCode: 1 };
   }
 
-  const kernel = new BufferKernel<AgentMessage, AgentEvent>();
+  // The real memory kernel (#12), sharing the toolset's working root so "which
+  // checkout is this" has one answer. It writes nothing until an observation
+  // passes the capture filter, so preparing an agent stays side-effect-free.
+  const kernel = createMoriKernel({ root: deps.root ?? process.cwd(), env, warn: stderr });
   let agent: Agent;
   try {
     agent = createMoriAgent(kernel, credentialStore, env, deps.streamFn, { root: deps.root });
@@ -62,7 +66,7 @@ export async function prepareAgent(
     }
   });
 
-  return { ok: true, agent };
+  return { ok: true, agent, kernel };
 }
 
 /**
@@ -79,9 +83,17 @@ export async function runPrompt(
   const prepared = await prepareAgent(providerId, env, deps, io);
   if (!prepared.ok) return prepared.exitCode;
 
-  const { agent } = prepared;
+  const { agent, kernel } = prepared;
 
-  await agent.prompt(prompt);
+  try {
+    await agent.prompt(prompt);
+  } finally {
+    // The caller exits the process on return, and `observe` is fire-and-forget by
+    // contract — so this is the one place that can keep the turn's last
+    // observation from being lost to `process.exit`. In the `finally` because a
+    // turn that failed still observed everything that happened before it did.
+    await kernel.drain();
+  }
   io.stdout("\n");
 
   const last = agent.state.messages.at(-1);

@@ -1,0 +1,226 @@
+import { mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { AgentEvent, StreamFn } from "@earendil-works/pi-agent-core";
+import type { AssistantMessage, AssistantMessageEvent, ToolCall } from "@earendil-works/pi-ai";
+import { createAssistantMessageEventStream, InMemoryCredentialStore } from "@earendil-works/pi-ai";
+import type { ConsolidatorLlm } from "@mori/kernel";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { runCli } from "./index.js";
+import {
+  createAgentEventObserver,
+  createMoriKernel,
+  moriProjectId,
+  toolCaptureVerdict,
+} from "./kernel-wiring.js";
+import { createMoriTools } from "./tools/index.js";
+
+const USAGE = {
+  input: 0,
+  output: 0,
+  cacheRead: 0,
+  cacheWrite: 0,
+  totalTokens: 0,
+  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+};
+
+type FakeTurn =
+  { toolCall: { name: string; arguments: Record<string, unknown> } } | { text: string };
+
+/** Plays back one scripted turn per model call: a tool call, then a final answer. */
+function scriptedStreamFn(turns: FakeTurn[]): StreamFn {
+  let call = 0;
+  return (model) => {
+    const turn = turns[call] ?? turns.at(-1)!;
+    call++;
+    const stream = createAssistantMessageEventStream();
+    const base = {
+      role: "assistant" as const,
+      api: model.api,
+      provider: model.provider,
+      model: model.id,
+      usage: USAGE,
+      timestamp: 0,
+    };
+    const message: AssistantMessage =
+      "toolCall" in turn
+        ? {
+            ...base,
+            content: [
+              {
+                type: "toolCall",
+                id: `call-${call}`,
+                name: turn.toolCall.name,
+                arguments: turn.toolCall.arguments,
+              } satisfies ToolCall,
+            ],
+            stopReason: "toolUse",
+          }
+        : { ...base, content: [{ type: "text", text: turn.text }], stopReason: "stop" };
+
+    stream.push({ type: "start", partial: message } satisfies AssistantMessageEvent);
+    stream.push({
+      type: "done",
+      reason: message.stopReason === "toolUse" ? "toolUse" : "stop",
+      message,
+    } satisfies AssistantMessageEvent);
+    return stream;
+  };
+}
+
+function toolStart(toolCallId: string, toolName: string, args: unknown): AgentEvent {
+  return { type: "tool_execution_start", toolCallId, toolName, args };
+}
+
+function toolEnd(toolCallId: string, toolName: string, isError = false): AgentEvent {
+  return { type: "tool_execution_end", toolCallId, toolName, result: {}, isError };
+}
+
+describe("moriProjectId", () => {
+  it("is stable for one root and distinct across roots", () => {
+    expect(moriProjectId("/repos/mori")).toBe(moriProjectId("/repos/mori/"));
+    expect(moriProjectId("/repos/mori")).not.toBe(moriProjectId("/repos/other"));
+    // It is also a directory name, so it must satisfy the kernel's id pattern.
+    expect(moriProjectId("/repos/mori")).toMatch(/^[a-z][a-z0-9]*(?:_[a-z0-9]+)+$/);
+  });
+});
+
+describe("tool capture coverage", () => {
+  it("classifies every tool mori registers", () => {
+    // Drift guard: a new tool that ships without a verdict is invisible to memory.
+    const unclassified = createMoriTools("/tmp")
+      .map((tool) => tool.name)
+      .filter((name) => toolCaptureVerdict(name) === undefined);
+
+    expect(unclassified).toEqual([]);
+  });
+});
+
+describe("createAgentEventObserver", () => {
+  it("reports an edit_file call as its path alone, never the replacement text", () => {
+    const observe = createAgentEventObserver();
+    const args = { path: "src/index.ts", oldString: "a", newString: "b" };
+
+    expect(observe(toolStart("c1", "edit_file", args))).toBeUndefined();
+    const observed = observe(toolEnd("c1", "edit_file"));
+
+    expect(observed).toEqual({ toolName: "edit_file", toolInputText: "src/index.ts" });
+  });
+
+  it("reports a bash call as its command text", () => {
+    const observe = createAgentEventObserver();
+
+    observe(toolStart("c1", "bash", { command: "git commit -m wip", timeoutMs: 1000 }));
+
+    expect(observe(toolEnd("c1", "bash"))).toEqual({
+      toolName: "bash",
+      toolInputText: "git commit -m wip",
+    });
+  });
+
+  it("ignores a tool call that failed — nothing changed, so it is no work signal", () => {
+    const observe = createAgentEventObserver();
+
+    observe(toolStart("c1", "bash", { command: "git commit -m wip" }));
+
+    expect(observe(toolEnd("c1", "bash", true))).toBeUndefined();
+  });
+
+  it("ignores read-only tools", () => {
+    const observe = createAgentEventObserver();
+
+    observe(toolStart("c1", "read_file", { path: "src/index.ts" }));
+
+    expect(observe(toolEnd("c1", "read_file"))).toBeUndefined();
+  });
+
+  it("forgets arguments of calls that never ended, so an aborted run leaks nothing", () => {
+    const observe = createAgentEventObserver();
+
+    observe(toolStart("c1", "bash", { command: "git commit -m wip" }));
+    observe({ type: "agent_end", messages: [] });
+
+    // The end event arrives with no arguments of its own; without the remembered
+    // ones there is nothing to capture.
+    expect(observe(toolEnd("c1", "bash"))).toBeUndefined();
+  });
+});
+
+describe("mori turn -> sqlite store", () => {
+  let root: string;
+  let store: string;
+
+  beforeEach(() => {
+    root = realpathSync(mkdtempSync(join(tmpdir(), "mori-kernel-root-")));
+    store = realpathSync(mkdtempSync(join(tmpdir(), "mori-kernel-store-")));
+    // The kernel's path resolver reads MEMORIZE_ROOT from process.env directly
+    // (storage/path-resolver.ts), so redirecting the store means setting it here.
+    process.env.MEMORIZE_ROOT = store;
+  });
+
+  afterEach(() => {
+    delete process.env.MEMORIZE_ROOT;
+    rmSync(root, { recursive: true, force: true });
+    rmSync(store, { recursive: true, force: true });
+  });
+
+  /** One real `mori "…"` invocation: nothing about the kernel is substituted. */
+  async function run(turns: FakeTurn[]): Promise<number> {
+    return runCli(
+      ["한 턴만"],
+      { ANTHROPIC_API_KEY: "sk-ant-test" },
+      {
+        stdout: () => {},
+        stderr: () => {},
+        credentialStore: new InMemoryCredentialStore(),
+        streamFn: scriptedStreamFn(turns),
+        root,
+      },
+    );
+  }
+
+  it("lands one turn's file edit in the store as a consolidatable observation", async () => {
+    const exitCode = await run([
+      {
+        toolCall: {
+          name: "edit_file",
+          arguments: { path: "notes.md", oldString: "", newString: "기억은 커널이 남긴다\n" },
+        },
+      },
+      { text: "만들었습니다" },
+    ]);
+
+    expect(exitCode).toBe(0);
+    // The tool really ran, so this was a real turn and not a scripted no-op.
+    expect(readFileSync(join(root, "notes.md"), "utf8")).toContain("기억은 커널이 남긴다");
+    // `runCli` settled its kernel before returning, so the store is already there —
+    // which is what keeps a one-shot `mori "…"` from losing the turn to process exit.
+    expect(readdirSync(store)).toContain("projects");
+
+    // Read the log back through the only surface the harness has: a boundary over
+    // the observation events appended since the last one. A second kernel on the
+    // same working root addresses the same store, which is what makes the store
+    // (not the instance) the thing under test.
+    const prompts: string[] = [];
+    const llm: ConsolidatorLlm = {
+      async complete(prompt: string): Promise<string> {
+        prompts.push(prompt);
+        return "[]";
+      },
+    };
+    const result = await createMoriKernel({ root, env: {} }).consolidateWithResult(llm);
+
+    expect(result.observationsProcessed).toBe(1);
+    expect(prompts[0]).toContain("notes.md");
+  });
+
+  it("writes nothing at all for a turn that only reads", async () => {
+    const exitCode = await run([
+      { toolCall: { name: "list_dir", arguments: { path: "." } } },
+      { text: "빈 디렉터리입니다" },
+    ]);
+
+    expect(exitCode).toBe(0);
+    expect(readdirSync(store)).toEqual([]);
+  });
+});

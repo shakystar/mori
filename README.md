@@ -129,7 +129,16 @@ apply to it.
 mori's memory kernel keeps its on-disk state under `~/.mori` (override with
 `MEMORIZE_ROOT`) — no per-account nesting, since mori has no CLI account
 concept. Each project's `better-sqlite3` database lives at
-`~/.mori/projects/<projectId>/mori.db`.
+`~/.mori/projects/<projectId>/mori.db`, where `projectId` is derived from the
+working root, so one checkout keeps one store across runs.
+
+What lands there: for every **successful** `edit_file` call, the file path (not
+the file contents); for every successful `bash` call whose command text looks
+state-changing (`git commit`, a package install, an `rm`, …) or reads like a
+decision being recorded, the command text. Read-only tool calls (`read_file` /
+`list_dir` / `grep`) and read-only shell commands are not recorded. Nothing is
+written until the first such call, so a session that only reads leaves no trace
+on disk.
 
 ## Tools
 
