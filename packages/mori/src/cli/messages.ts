@@ -7,7 +7,7 @@ export const usageMessage =
   "       mori logout [provider]    # 저장된 자격증명을 지웁니다\n";
 
 export function replBanner(): string {
-  return "mori REPL — /exit 또는 Ctrl-D로 종료, /clear로 대화 초기화\n";
+  return "mori REPL — /exit 또는 Ctrl-D로 종료, /clear로 대화 초기화, /consolidate로 증류 실행\n";
 }
 
 export function replClearedMessage(): string {
