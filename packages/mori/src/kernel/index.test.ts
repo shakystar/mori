@@ -6,6 +6,7 @@ import type { AssistantMessage, AssistantMessageEvent, ToolCall } from "@earendi
 import { createAssistantMessageEventStream, InMemoryCredentialStore } from "@earendil-works/pi-ai";
 import type { ConsolidatorLlm } from "@mori/kernel";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { consolidateOnSessionEnd } from "../cli/consolidation.js";
 import { runCli } from "../index.js";
 import { createMoriTools } from "../tools/index.js";
 import {
@@ -212,6 +213,40 @@ describe("mori turn -> sqlite store", () => {
 
     expect(result.observationsProcessed).toBe(1);
     expect(prompts[0]).toContain("notes.md");
+  });
+
+  it("the session-end trigger (#107) lands a real boundary's memories in the event log", async () => {
+    const exitCode = await run([
+      {
+        toolCall: {
+          name: "edit_file",
+          arguments: { path: "notes.md", oldString: "", newString: "세션 종료가 증류를 부른다\n" },
+        },
+      },
+      { text: "만들었습니다" },
+    ]);
+    expect(exitCode).toBe(0);
+
+    const prompts: string[] = [];
+    const llm: ConsolidatorLlm = {
+      async complete(prompt: string): Promise<string> {
+        prompts.push(prompt);
+        return "[]";
+      },
+    };
+    const errors: string[] = [];
+    const kernel = createMoriKernel({ root, env: {} });
+
+    await consolidateOnSessionEnd(kernel, llm, (message) => errors.push(message));
+
+    expect(errors).toEqual([]);
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0]).toContain("notes.md");
+
+    // Read the boundary's own outcome back through a second call: the watermark this trigger
+    // advanced means a second real boundary over the same window finds nothing left to do.
+    const second = await kernel.consolidateWithResult(llm);
+    expect(second.outcome).toBe("noop");
   });
 
   it("writes nothing at all for a turn that only reads", async () => {
