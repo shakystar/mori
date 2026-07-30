@@ -6,14 +6,14 @@ import type { AssistantMessage, AssistantMessageEvent, ToolCall } from "@earendi
 import { createAssistantMessageEventStream, InMemoryCredentialStore } from "@earendil-works/pi-ai";
 import type { ConsolidatorLlm } from "@mori/kernel";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { runCli } from "./index.js";
+import { runCli } from "../index.js";
+import { createMoriTools } from "../tools/index.js";
 import {
   createAgentEventObserver,
   createMoriKernel,
   moriProjectId,
   toolCaptureVerdict,
-} from "./kernel-wiring.js";
-import { createMoriTools } from "./tools/index.js";
+} from "./index.js";
 
 const USAGE = {
   input: 0,

@@ -19,8 +19,8 @@ import {
   type ObservedToolCall,
   type ToolCallObserver,
 } from "@mori/kernel";
-import { getEmbedder, resolveEmbeddingsConfig } from "./external/embeddings/index.js";
-import { BASH_TOOL_NAME } from "./tools/bash.js";
+import { getEmbedder, resolveEmbeddingsConfig } from "../external/embeddings/index.js";
+import { BASH_TOOL_NAME } from "../tools/bash.js";
 
 /** Provenance recorded on every event this harness appends. */
 export const MORI_ACTOR = "mori";
@@ -28,7 +28,7 @@ export const MORI_ACTOR = "mori";
 /**
  * How each of mori's tools maps onto the kernel's capture vocabulary.
  *
- * Keep in sync with `createMoriTools` (tools/index.ts) — `kernel-wiring.test.ts`
+ * Keep in sync with `createMoriTools` (tools/index.ts) — `kernel/index.test.ts`
  * fails if a tool ships without a verdict here, because the silent alternative
  * is a new write tool whose edits never reach memory.
  *

@@ -1,7 +1,7 @@
 import type { Agent } from "@earendil-works/pi-agent-core";
 import { createMoriAgent, createMoriModels, type MoriKernel } from "../agent/index.js";
 import { defaultCredentialsPath, FileCredentialStore } from "../auth/credential-store.js";
-import { createMoriKernel } from "../kernel-wiring.js";
+import { createMoriKernel } from "../kernel/index.js";
 import { unauthenticatedMessage } from "./messages.js";
 import type { RunCliDeps } from "./types.js";
 
