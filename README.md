@@ -26,7 +26,7 @@ over several turns instead of one:
 
 ```
 $ mori
-mori REPL — /exit 또는 Ctrl-D로 종료, /clear로 대화 초기화
+mori REPL — /exit 또는 Ctrl-D로 종료, /clear로 대화 초기화, /consolidate로 증류 실행
 › what does packages/kernel do?
 ...
 › now summarise that in one line
@@ -36,16 +36,17 @@ mori REPL — /exit 또는 Ctrl-D로 종료, /clear로 대화 초기화
 Every turn runs on the same agent, so earlier turns stay in context — the second question
 above can refer to the first answer.
 
-| Input                | Effect                                        |
-| -------------------- | --------------------------------------------- |
-| `/exit`, Ctrl-D      | leave the REPL (exit code 0)                  |
-| `/clear`             | forget the conversation so far and keep going |
-| Ctrl-C during a turn | cancel that turn only; the REPL stays open    |
-| Ctrl-C while idle    | leave the REPL (exit code 0)                  |
-| an empty line        | ignored — no request is sent                  |
+| Input                | Effect                                                       |
+| -------------------- | ------------------------------------------------------------ |
+| `/exit`, Ctrl-D      | leave the REPL (exit code 0)                                 |
+| `/clear`             | forget the conversation so far and keep going                |
+| `/consolidate`       | run a consolidation boundary now (see "Consolidation" below) |
+| Ctrl-C during a turn | cancel that turn only; the REPL stays open                   |
+| Ctrl-C while idle    | leave the REPL (exit code 0)                                 |
+| an empty line        | ignored — no request is sent                                 |
 
-There are no other slash commands, and no history file, completion, or session
-save/restore.
+There are no slash commands beyond the three above, and no history file, completion, or
+session save/restore.
 
 The prompt for the next turn is only printed once the previous answer has finished
 streaming, so output and input never interleave. Anything typed while a turn is streaming
@@ -139,6 +140,33 @@ decision being recorded, the command text. Read-only tool calls (`read_file` /
 `list_dir` / `grep`) and read-only shell commands are not recorded. Nothing is
 written until the first such call, so a session that only reads leaves no trace
 on disk.
+
+### Consolidation
+
+Consolidation is the step that turns captured observations into distilled, searchable
+memories. It is off by default — set `MORI_CONSOLIDATE_MODEL` to the model it should use
+(same `[provider/]model` syntax as `MORI_MODEL`; a bare model id resolves against
+`anthropic`):
+
+```bash
+export MORI_CONSOLIDATE_MODEL=claude-opus-5
+```
+
+With it set, two things trigger a boundary:
+
+- **Session end** — automatic, once, right before `mori` or the REPL exits. A boundary
+  failure here is reported to stderr and otherwise ignored: it never changes the exit code
+  or interrupts a running turn, because the next session's session-end boundary retries the
+  same window.
+- **`/consolidate`** — the REPL's explicit trigger (see the command table above). Unlike
+  the automatic one, a failure here is reported to you directly, since you asked for it by
+  name.
+
+`MORI_CONSOLIDATE_MODEL` unset means both triggers quietly do nothing — no error, no
+warning. The same applies when nothing has been captured yet: a session-end boundary over a
+store that was never created (a session that only read files) is skipped rather than being
+the thing that creates it, so the "no trace on disk" guarantee above holds whether or not
+consolidation is configured.
 
 ## Tools
 

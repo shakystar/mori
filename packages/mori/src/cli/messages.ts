@@ -7,7 +7,7 @@ export const usageMessage =
   "       mori logout [provider]    # 저장된 자격증명을 지웁니다\n";
 
 export function replBanner(): string {
-  return "mori REPL — /exit 또는 Ctrl-D로 종료, /clear로 대화 초기화\n";
+  return "mori REPL — /exit 또는 Ctrl-D로 종료, /clear로 대화 초기화, /consolidate로 증류 실행\n";
 }
 
 export function replClearedMessage(): string {
@@ -16,6 +16,19 @@ export function replClearedMessage(): string {
 
 export function replTurnCancelledMessage(): string {
   return "mori: 턴을 취소했습니다.\n";
+}
+
+export function replConsolidateSkippedMessage(): string {
+  return "mori: MORI_CONSOLIDATE_MODEL이 설정되지 않아 증류할 것이 없습니다.\n";
+}
+
+export function replConsolidateOkMessage(): string {
+  return "mori: 증류를 완료했습니다.\n";
+}
+
+export function replConsolidateFailedMessage(error: unknown): string {
+  const reason = error instanceof Error ? error.message : String(error);
+  return `mori: 증류에 실패했습니다 — ${reason}\n`;
 }
 
 export function unauthenticatedMessage(providerId: string): string {

@@ -6,6 +6,7 @@ import type { AssistantMessage, AssistantMessageEvent, ToolCall } from "@earendi
 import { createAssistantMessageEventStream, InMemoryCredentialStore } from "@earendil-works/pi-ai";
 import type { ConsolidatorLlm } from "@mori/kernel";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { consolidateOnSessionEnd } from "../cli/consolidation.js";
 import { runCli } from "../index.js";
 import { createMoriTools } from "../tools/index.js";
 import {
@@ -165,10 +166,10 @@ describe("mori turn -> sqlite store", () => {
   });
 
   /** One real `mori "…"` invocation: nothing about the kernel is substituted. */
-  async function run(turns: FakeTurn[]): Promise<number> {
+  async function run(turns: FakeTurn[], env: NodeJS.ProcessEnv = {}): Promise<number> {
     return runCli(
       ["한 턴만"],
-      { ANTHROPIC_API_KEY: "sk-ant-test" },
+      { ANTHROPIC_API_KEY: "sk-ant-test", ...env },
       {
         stdout: () => {},
         stderr: () => {},
@@ -214,11 +215,57 @@ describe("mori turn -> sqlite store", () => {
     expect(prompts[0]).toContain("notes.md");
   });
 
+  it("the session-end trigger (#107) lands a real boundary's memories in the event log", async () => {
+    const exitCode = await run([
+      {
+        toolCall: {
+          name: "edit_file",
+          arguments: { path: "notes.md", oldString: "", newString: "세션 종료가 증류를 부른다\n" },
+        },
+      },
+      { text: "만들었습니다" },
+    ]);
+    expect(exitCode).toBe(0);
+
+    const prompts: string[] = [];
+    const llm: ConsolidatorLlm = {
+      async complete(prompt: string): Promise<string> {
+        prompts.push(prompt);
+        return "[]";
+      },
+    };
+    const errors: string[] = [];
+    const kernel = createMoriKernel({ root, env: {} });
+
+    await consolidateOnSessionEnd(kernel, llm, (message) => errors.push(message));
+
+    expect(errors).toEqual([]);
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0]).toContain("notes.md");
+
+    // Read the boundary's own outcome back through a second call: the watermark this trigger
+    // advanced means a second real boundary over the same window finds nothing left to do.
+    const second = await kernel.consolidateWithResult(llm);
+    expect(second.outcome).toBe("noop");
+  });
+
   it("writes nothing at all for a turn that only reads", async () => {
     const exitCode = await run([
       { toolCall: { name: "list_dir", arguments: { path: "." } } },
       { text: "빈 디렉터리입니다" },
     ]);
+
+    expect(exitCode).toBe(0);
+    expect(readdirSync(store)).toEqual([]);
+  });
+
+  it("writes nothing at all for a read-only turn even with consolidation configured (#107 review)", async () => {
+    // Sibling of the case above, with MORI_CONSOLIDATE_MODEL set: the session-end trigger
+    // must not be the thing that creates the store for a session that captured nothing.
+    const exitCode = await run(
+      [{ toolCall: { name: "list_dir", arguments: { path: "." } } }, { text: "빈 디렉터리입니다" }],
+      { MORI_CONSOLIDATE_MODEL: "anthropic/claude-x" },
+    );
 
     expect(exitCode).toBe(0);
     expect(readdirSync(store)).toEqual([]);

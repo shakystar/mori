@@ -1,5 +1,6 @@
 import type { StreamFn } from "@earendil-works/pi-agent-core";
 import type { CredentialStore, MutableModels } from "@earendil-works/pi-ai";
+import type { MoriKernel } from "../agent/index.js";
 import type { ReplInputSource } from "./repl-input.js";
 
 export interface RunCliDeps {
@@ -38,4 +39,11 @@ export interface RunCliDeps {
    * real terminal (TESTING.md).
    */
   openReplInput?: () => ReplInputSource | undefined;
+  /**
+   * Test seam for substituting a `MoriKernel` in place of the real `createMoriKernel(...)`
+   * (kernel/index.ts). Lets consolidation-trigger tests (#107) assert call counts and error
+   * handling against a spy/stub kernel without touching disk. Unset — the default — is the
+   * real kernel, exactly like every other production path.
+   */
+  kernel?: MoriKernel;
 }
