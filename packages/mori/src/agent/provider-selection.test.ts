@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { EXPERIMENTAL_OPENAI_OAUTH_ENV, OPENAI_OAUTH_PROVIDER_ID } from "./auth/experimental.js";
+import { EXPERIMENTAL_OPENAI_OAUTH_ENV, OPENAI_OAUTH_PROVIDER_ID } from "../auth/experimental.js";
 import {
   DEFAULT_MODEL_ID,
   DEFAULT_PROVIDER_ID,

@@ -15,7 +15,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { EXPERIMENTAL_OPENAI_OAUTH_ENV, OPENAI_OAUTH_PROVIDER_ID } from "./auth/experimental.js";
 import type { ReplInputSource, ReplLine } from "./cli/repl-input.js";
 import { runCli, unauthenticatedMessage } from "./index.js";
-import { createMoriModels } from "./model-wiring.js";
+import { createMoriModels } from "./agent/model-wiring.js";
 
 const ONE_HOUR_MS = 60 * 60 * 1000;
 const GATE_ON = { [EXPERIMENTAL_OPENAI_OAUTH_ENV]: "1" } as const;

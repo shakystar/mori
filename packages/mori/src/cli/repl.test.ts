@@ -8,7 +8,7 @@ import type {
 import { createAssistantMessageEventStream, InMemoryCredentialStore } from "@earendil-works/pi-ai";
 import { BufferKernel } from "@mori/kernel";
 import { describe, expect, it } from "vitest";
-import { createMoriAgent } from "../agent.js";
+import { createMoriAgent } from "../agent/index.js";
 import type { ReplInputSource, ReplLine } from "./repl-input.js";
 import { runRepl } from "./repl.js";
 

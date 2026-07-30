@@ -11,7 +11,7 @@ import {
   resolveProviderSelection,
   supportedProviderIds,
   unknownProviderMessage,
-} from "./provider-selection.js";
+} from "./agent/provider-selection.js";
 
 export { unauthenticatedMessage };
 export type { RunCliDeps };
