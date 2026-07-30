@@ -65,6 +65,29 @@ export const LAST_ATTEMPT_META_KEY = "cls_consolidate_last_attempt";
 /** Upper bound on memories extracted per boundary (noise guard). */
 const MAX_MEMORIES_PER_BOUNDARY = 12;
 
+/**
+ * #113 item③ — upper bound, in characters, on the FULL rendered extraction
+ * prompt body (observations block + existing-memories block + transcript
+ * tail; see `buildExtractionUserContent`). Before this existed, the input was
+ * unbounded on all three axes — pending-observation backlog, a project's
+ * total valid-memory count, and conversation length — and `parseExtractedMemories`
+ * treats a provider's context-limit rejection as an ordinary extractor
+ * failure, which (by the documented #43 contract just above `run()`)
+ * intentionally does NOT advance the watermark. A context-limit failure is
+ * NOT transient the way a timeout is: without a cap, the same oversized (and
+ * only-growing) window would retry forever.
+ *
+ * Sized relative to `MAX_MEMORIES_PER_BOUNDARY` (12), which bounds OUTPUT, not
+ * input: 12 short one-sentence memories is roughly 2,000-2,500 rendered
+ * output chars, so this leaves the extractor ~8-10x that in raw material to
+ * read from — generous room to actually find 12 durable items — while still
+ * being a small fraction of any deployed model's real context window
+ * (including small local models, the fallback-LLM case this file's docs
+ * already worry about). The exact number is a tuning parameter, like the
+ * other constants in this file; what matters is that it is FINITE.
+ */
+export const MAX_EXTRACTION_INPUT_CHARS = 20_000;
+
 export interface ExtractedMemory {
   kind: ConsolidatedMemoryKind;
   text: string;
@@ -190,7 +213,10 @@ const EXTRACTION_SYSTEM_PROMPT = [
   "Return [] if there is no durable item.",
 ].join(" ");
 
-function buildExtractionUserContent(input: ConsolidationInput): string {
+/** Exported for tests (#113) — lets a test assert the RENDERED prompt for a
+ *  `boundExtractionInput` result stays within `MAX_EXTRACTION_INPUT_CHARS`,
+ *  the same call production code makes inside `LlmConsolidator.extract`. */
+export function buildExtractionUserContent(input: ConsolidationInput): string {
   const observationLines = input.observations.map(
     (o) => `- [${o.signal}${o.toolName ? `/${o.toolName}` : ""}] ${o.summary ?? "(no summary)"}`,
   );
@@ -209,6 +235,85 @@ function buildExtractionUserContent(input: ConsolidationInput): string {
         ]
       : []),
   ].join("\n");
+}
+
+/** {@link boundExtractionInput}'s result: a `ConsolidationInput` that renders
+ *  through `buildExtractionUserContent` within `MAX_EXTRACTION_INPUT_CHARS`. */
+export interface BoundedConsolidationInput extends ConsolidationInput {
+  /**
+   * True when `input.observations` had to be trimmed to a shorter PREFIX to
+   * fit the budget. The caller (`run()`) MUST advance the watermark only past
+   * the last INCLUDED observation in that case — see the comment at the
+   * watermark-advance call site — so the trimmed suffix is retried (and
+   * eventually consolidated) by a later boundary instead of being marked
+   * consumed without ever having been shown to the extractor.
+   */
+  observationsTruncated: boolean;
+}
+
+/**
+ * Trim a `ConsolidationInput` so its rendered prompt (`buildExtractionUserContent`)
+ * fits within `maxChars`. Drops content in priority order — lowest-value
+ * first — re-rendering after each drop so the check is against the real
+ * output, not an estimate:
+ *
+ * 1. The transcript tail goes first: it is background context, not the
+ *    primary extraction signal, and every char of the ORIGINAL (untruncated)
+ *    slice is separately, durably stored as retrievable `segment` rows
+ *    (`chunkConversation`/`insertSegments` in `run()`, which reads
+ *    `slice.text` directly and is untouched by this trim) — so dropping it
+ *    here only affects this boundary's extraction quality, not durability.
+ * 2. Existing memories next, oldest-first: they live in storage independently
+ *    of this boundary (nothing here "consumes" them), so trimming only
+ *    degrades the contradiction/dedup check's context.
+ * 3. Observations last, and NEVER all the way to zero when at least one was
+ *    given: dropped from the end (newest-first), keeping a PREFIX in the
+ *    original (oldest-first) event order. This is the one section a caller
+ *    cannot treat as freely lossy — see `observationsTruncated` — but
+ *    guaranteeing at least one survives means every boundary makes measurable
+ *    progress against the backlog even in the degenerate case of a single
+ *    observation whose own summary exceeds the whole budget. That is what
+ *    makes this self-healing rather than a retry loop: unlike an oversized
+ *    prompt that fails a provider's context limit outright (#43's "extractor
+ *    failure never advances the watermark" contract, which assumes the
+ *    failure is transient), a bounded prompt always fits, so extraction can
+ *    always succeed on SOME prefix of the backlog and the watermark always
+ *    advances past it.
+ */
+export function boundExtractionInput(
+  input: ConsolidationInput,
+  maxChars: number = MAX_EXTRACTION_INPUT_CHARS,
+): BoundedConsolidationInput {
+  let observations = input.observations;
+  let existingMemories = input.existingMemories;
+  let transcriptTail = input.transcriptTail;
+
+  const rendered = (): string =>
+    buildExtractionUserContent({
+      observations,
+      existingMemories,
+      ...(transcriptTail !== undefined ? { transcriptTail } : {}),
+    });
+
+  if (transcriptTail !== undefined && rendered().length > maxChars) {
+    transcriptTail = undefined;
+  }
+
+  while (existingMemories.length > 0 && rendered().length > maxChars) {
+    existingMemories = existingMemories.slice(1);
+  }
+
+  const observationsTruncated = observations.length > 0 && rendered().length > maxChars;
+  while (observations.length > 1 && rendered().length > maxChars) {
+    observations = observations.slice(0, -1);
+  }
+
+  return {
+    observations,
+    existingMemories,
+    ...(transcriptTail !== undefined ? { transcriptTail } : {}),
+    observationsTruncated,
+  };
 }
 
 /**
@@ -868,17 +973,29 @@ export async function consolidate(params: ConsolidateParams): Promise<Consolidat
 
     const existing = listValidMemories(params.projectId).map((row) => row.memory);
 
-    // Extractor failure (LLM timeout, transport error, unparseable reply)
-    // intentionally propagates WITHOUT advancing the watermark — the next
-    // boundary retries the same window. Callers at boundaries catch and degrade.
-    const extracted = await consolidator.extract({
+    // #113 item③: bound what gets rendered into the extraction prompt so a
+    // single call can never fail purely from input size — see
+    // `boundExtractionInput` for the trimming policy. `bounded.observations`
+    // may be a shorter PREFIX of `observations`; the watermark-advance call
+    // below uses it (not the full window) so a budget-truncated suffix is
+    // retried by the next boundary instead of silently dropped.
+    const bounded = boundExtractionInput({
       observations,
       ...(transcriptTail ? { transcriptTail } : {}),
       existingMemories: existing,
     });
 
+    // Extractor failure (LLM timeout, transport error, unparseable reply)
+    // intentionally propagates WITHOUT advancing the watermark — the next
+    // boundary retries the same window. Callers at boundaries catch and degrade.
+    const extracted = await consolidator.extract({
+      observations: bounded.observations,
+      ...(bounded.transcriptTail ? { transcriptTail: bounded.transcriptTail } : {}),
+      existingMemories: bounded.existingMemories,
+    });
+
     const validIds = new Set(existing.map((m) => m.id));
-    const sourceObservationIds = observations.map((o) => o.id);
+    const sourceObservationIds = bounded.observations.map((o) => o.id);
     const inputs: AppendEventInput<ConsolidatedMemory | MemorySupersededPayload>[] = [];
     let supersededCount = 0;
 
@@ -1020,9 +1137,26 @@ export async function consolidate(params: ConsolidateParams): Promise<Consolidat
       await ensureSegmentEmbeddings(params.projectId, params.embedder);
     }
 
-    // Advance the event watermark past the observation window. Guarded: a
-    // conversation-only boundary has no observation events to mark.
-    if (rawObservationEvents.length > 0) {
+    // Advance the event watermark only past what THIS boundary actually
+    // consolidated (#113 item③). `bounded.observations` may be a
+    // budget-truncated PREFIX of `observations` — same order as
+    // `observationEvents`, since `boundExtractionInput` only ever drops from
+    // the end — so its last element's EVENT id is the correct stopping
+    // point: anything after it (the truncated suffix, any self-lane
+    // observation this window's dedup guard skipped, and any foreign-lane
+    // event interleaved by seq — item②) stays unconsumed and is naturally
+    // re-read (and re-filtered) by the NEXT boundary, since
+    // `readEventsSince` resumes strictly after the watermark's `seq`.
+    if (bounded.observations.length > 0) {
+      setConsolidateWatermark(
+        params.projectId,
+        observationEvents[bounded.observations.length - 1]!.id,
+      );
+    } else if (rawObservationEvents.length > 0) {
+      // No self-lane observation was included this boundary (e.g. a
+      // conversation-only window, or every self-lane observation in range was
+      // already consumed) — still skip past the whole scanned range so a
+      // foreign-only or fully-deduped window is not rescanned every boundary.
       setConsolidateWatermark(
         params.projectId,
         rawObservationEvents[rawObservationEvents.length - 1]!.id,
@@ -1038,7 +1172,9 @@ export async function consolidate(params: ConsolidateParams): Promise<Consolidat
     return {
       consolidated: extracted.length,
       superseded: supersededCount,
-      observationsProcessed: observations.length,
+      // #113 item③: what was actually shown to the extractor (and recorded
+      // in sourceObservationIds), not the full pre-bounding window.
+      observationsProcessed: bounded.observations.length,
       extractor: extractorKind,
       backend: backendLabel,
       // #103: matches the ConsolidateResult.outcome doc comment above — "ok"

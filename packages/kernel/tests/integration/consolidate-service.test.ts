@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
+  createConsolidatedMemory,
   createObservation,
   createProject,
   type ObservationSignal,
@@ -17,6 +18,9 @@ import type {
 } from "../../src/index.js";
 import {
   ExtractionParseError,
+  MAX_EXTRACTION_INPUT_CHARS,
+  boundExtractionInput,
+  buildExtractionUserContent,
   chunkConversation,
   consolidate,
   getConsolidateWatermark,
@@ -91,7 +95,6 @@ async function seedForeignObservation(
   });
   return observation.id;
 }
-
 
 /** A `ConsolidatorLlm` that replays canned replies and records every prompt. */
 function fakeLlm(replies: string[]): ConsolidatorLlm & { prompts: string[] } {
@@ -468,7 +471,6 @@ describe("consolidate — semantic wiring", () => {
   });
 });
 
-
 // #113 ① — the rule-based fallback must never promote a write-tool
 // observation's raw content into a searchable memory. `evaluateCapture`'s own
 // type is an unenforced plain string, so this simulates a caller that hands
@@ -570,5 +572,134 @@ describe("consolidate — excludes foreign-lane observations (#113)", () => {
 
     const second = await consolidate({ projectId, actor: "test" });
     expect(second).toMatchObject({ observationsProcessed: 0, outcome: "noop" });
+  });
+});
+
+// #113 ③ — the extraction prompt has no cap on observations / existing
+// memories / conversation tail, and a context-limit rejection is treated as
+// an ordinary (non-advancing) extractor failure, so an oversized window would
+// retry forever, only ever growing. boundExtractionInput fixes the size; the
+// watermark logic in consolidate() uses its result so the excess is retried
+// (never lost) by later boundaries instead.
+describe("boundExtractionInput / buildExtractionUserContent — input budget (#113)", () => {
+  it("keeps the rendered prompt within MAX_EXTRACTION_INPUT_CHARS for an oversized window", () => {
+    const observations = Array.from({ length: 500 }, (_, i) =>
+      createObservation({
+        projectId,
+        signal: "decision-keyword",
+        summary: `decision number ${i} `.repeat(20),
+        toolName: "Bash",
+      }),
+    );
+    const existingMemories = Array.from({ length: 500 }, (_, i) =>
+      createConsolidatedMemory({
+        projectId,
+        kind: "progress",
+        text: `memory ${i} `.repeat(20),
+        salience: 5,
+      }),
+    );
+
+    const bounded = boundExtractionInput({
+      observations,
+      existingMemories,
+      transcriptTail: "x".repeat(50_000),
+    });
+
+    expect(buildExtractionUserContent(bounded).length).toBeLessThanOrEqual(
+      MAX_EXTRACTION_INPUT_CHARS,
+    );
+    expect(bounded.observations.length).toBeGreaterThan(0);
+  });
+
+  it("always keeps at least one observation even when it alone exceeds the budget", () => {
+    const bounded = boundExtractionInput({
+      observations: [
+        createObservation({
+          projectId,
+          signal: "decision-keyword",
+          summary: "z".repeat(MAX_EXTRACTION_INPUT_CHARS * 2),
+          toolName: "Bash",
+        }),
+      ],
+      existingMemories: [],
+    });
+
+    expect(bounded.observations).toHaveLength(1);
+  });
+
+  it("marks observationsTruncated and keeps a PREFIX (oldest-first) when trimming", () => {
+    const observations = Array.from({ length: 500 }, (_, i) =>
+      createObservation({
+        projectId,
+        signal: "decision-keyword",
+        summary: `obs ${i} `.repeat(30),
+        toolName: "Bash",
+      }),
+    );
+
+    const bounded = boundExtractionInput({ observations, existingMemories: [] });
+
+    expect(bounded.observationsTruncated).toBe(true);
+    expect(bounded.observations.length).toBeLessThan(observations.length);
+    expect(bounded.observations[0]).toBe(observations[0]);
+    expect(bounded.observations.at(-1)).toBe(observations[bounded.observations.length - 1]);
+  });
+
+  it("drops the transcript tail before touching observations or existing memories", () => {
+    const bounded = boundExtractionInput({
+      observations: [
+        createObservation({
+          projectId,
+          signal: "decision-keyword",
+          summary: "one decision",
+          toolName: "Bash",
+        }),
+      ],
+      existingMemories: [],
+      transcriptTail: "y".repeat(MAX_EXTRACTION_INPUT_CHARS * 2),
+    });
+
+    expect(bounded.transcriptTail).toBeUndefined();
+    expect(bounded.observations).toHaveLength(1);
+    expect(bounded.observationsTruncated).toBe(false);
+  });
+});
+
+describe("consolidate — bounded input keeps the watermark self-healing (#113)", () => {
+  it("advances on an oversized backlog and drains it over successive boundaries instead of retrying forever", async () => {
+    const bigSummary = "y".repeat(2000);
+    const total = 30;
+    for (let i = 0; i < total; i++) {
+      await seedObservation(`${bigSummary} #${i}`, "decision-keyword");
+    }
+
+    const noopConsolidator: Consolidator = {
+      async extract() {
+        return [];
+      },
+    };
+
+    const first = await consolidate({ projectId, actor: "test", consolidator: noopConsolidator });
+    // The window was too big to show in full — only a bounded PREFIX was
+    // processed, proving a single call can no longer fail purely from size.
+    expect(first.observationsProcessed).toBeGreaterThan(0);
+    expect(first.observationsProcessed).toBeLessThan(total);
+    expect(getConsolidateWatermark(projectId)).toBeDefined();
+
+    // The untouched remainder is retried — not lost — by later boundaries,
+    // draining to zero rather than looping on the same ever-growing window.
+    let remaining = total - first.observationsProcessed;
+    let guard = 0;
+    while (remaining > 0 && guard < total) {
+      const next = await consolidate({ projectId, actor: "test", consolidator: noopConsolidator });
+      expect(next.observationsProcessed).toBeGreaterThan(0);
+      remaining -= next.observationsProcessed;
+      guard += 1;
+    }
+    expect(remaining).toBe(0);
+
+    const drained = await consolidate({ projectId, actor: "test", consolidator: noopConsolidator });
+    expect(drained).toMatchObject({ observationsProcessed: 0, outcome: "noop" });
   });
 });
