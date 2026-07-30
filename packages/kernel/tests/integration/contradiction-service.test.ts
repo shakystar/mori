@@ -22,7 +22,7 @@ import {
   rebuildProjectProjection,
 } from "../../src/services/projection-store.js";
 import { closeAll } from "../../src/storage/db.js";
-import { appendEvent } from "../../src/storage/event-store.js";
+import { appendEvent, readEvents } from "../../src/storage/event-store.js";
 
 let sandbox: string;
 let projectId: string;
@@ -197,6 +197,33 @@ describe("contradiction-service", () => {
     expect([conflicts[0]!.leftVersion, conflicts[0]!.rightVersion].sort()).toEqual(
       [olderId, newerId].sort(),
     );
+  });
+
+  it("writes memory.superseded + conflict.detected back-to-back via one appendEvents batch (#118 item 3)", async () => {
+    // appendEvents' own transactional rollback guarantee already has a
+    // dedicated test (append-atomicity.test.ts) — asserting the failure
+    // mode here again would mean mocking storage internals for no extra
+    // coverage. Instead this asserts the observable consequence of routing
+    // both events through ONE appendEvents call: in the seq-ordered log,
+    // conflict.detected lands in the very next slot after memory.superseded,
+    // with nothing else able to interleave (a two-`appendEvent` version
+    // could not guarantee that adjacency).
+    const embedder = fakeEmbedder(VECTORS);
+    await seedMemory(MEM_PG, "2026-01-01T00:00:00.000Z");
+    await seedMemory(MEM_SQLITE, "2026-01-02T00:00:00.000Z");
+    await ensureEmbeddings(projectId, embedder);
+
+    await detectContradictions({
+      projectId,
+      embedder,
+      judge: alwaysContradicts,
+      actor: "test",
+    });
+
+    const events = await readEvents(projectId);
+    const supersededIdx = events.findIndex((e) => e.type === "memory.superseded");
+    expect(supersededIdx).toBeGreaterThanOrEqual(0);
+    expect(events[supersededIdx + 1]?.type).toBe("conflict.detected");
   });
 
   it("multiple independent contradictions in one pass each persist (no scopeId collision)", async () => {

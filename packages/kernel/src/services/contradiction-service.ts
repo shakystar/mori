@@ -1,11 +1,11 @@
 import type { ConsolidatorLlm } from "../index.js";
 import type { Embedder } from "../index.js";
-import { createConflict, type Conflict } from "../domain/entities.js";
+import { createConflict, type Conflict, type MemorySupersededPayload } from "../domain/entities.js";
 import type { MemoryRecord } from "../projections/projector.js";
 import { cosineSimilarity } from "./embeddings-service.js";
 import { listEmbeddings } from "./embeddings-store.js";
 import { listValidMemories, rebuildProjectProjection } from "./projection-store.js";
-import { appendEvent } from "../storage/event-store.js";
+import { appendEvents } from "../storage/event-store.js";
 
 /**
  * Semantic contradiction detection between `decision`-kind memories — an
@@ -193,15 +193,6 @@ export async function detectContradictions(
         verdict.reason ?? "embedding cosine prefilter + LLM judge flagged a semantic contradiction"
       }`;
 
-      await appendEvent({
-        type: "memory.superseded",
-        projectId,
-        scopeType: "project",
-        scopeId: projectId,
-        actor,
-        payload: { supersedes: loser.id, supersededBy: winner.id, reason },
-      });
-
       const conflict = createConflict({
         projectId,
         scopeType: "decision",
@@ -211,18 +202,33 @@ export async function detectContradictions(
         rightVersion: b.id,
         conflictType: "decision",
       });
-      // scopeId = the conflict's OWN id (see conflict-service.ts comment):
-      // `state.conflicts` is keyed by `event.scopeId` in the projector, so a
-      // second conflict in the same boundary pass must not collide with the
-      // first.
-      await appendEvent({
-        type: "conflict.detected",
-        projectId,
-        scopeType: "project",
-        scopeId: conflict.id,
-        actor,
-        payload: conflict,
-      });
+
+      // One confirmed contradiction is logically a single operation — both
+      // events go through appendEvents (one db.transaction) so a failure on
+      // the second insert can never leave the loser durably superseded
+      // without the conflict that explains why (#118 item 3).
+      await appendEvents<MemorySupersededPayload | Conflict>(projectId, [
+        {
+          type: "memory.superseded",
+          projectId,
+          scopeType: "project",
+          scopeId: projectId,
+          actor,
+          payload: { supersedes: loser.id, supersededBy: winner.id, reason },
+        },
+        // scopeId = the conflict's OWN id (see conflict-service.ts comment):
+        // `state.conflicts` is keyed by `event.scopeId` in the projector, so a
+        // second conflict in the same boundary pass must not collide with the
+        // first.
+        {
+          type: "conflict.detected",
+          projectId,
+          scopeType: "project",
+          scopeId: conflict.id,
+          actor,
+          payload: conflict,
+        },
+      ]);
 
       alreadyResolved.add(loser.id);
       results.push({ winnerId: winner.id, loserId: loser.id, reason, conflict });
