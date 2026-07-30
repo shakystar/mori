@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { consolidateOnSessionEnd } from "./cli/consolidation.js";
 import { isMainEntry } from "./cli/entrypoint.js";
 import { runLogin, runLogout } from "./cli/login.js";
 import { unauthenticatedMessage, usageMessage } from "./cli/messages.js";
@@ -91,11 +92,23 @@ export async function runCli(
       }
 
       try {
-        return await runRepl(prepared.agent, input, { stdout, stderr });
+        return await runRepl(
+          prepared.agent,
+          input,
+          { stdout, stderr },
+          {
+            kernel: prepared.kernel,
+            llm: prepared.llm,
+          },
+        );
       } finally {
         // Same reason as `runPrompt`'s drain: leaving the REPL means the process is
         // about to exit, and queued observations have to land before it does.
         await prepared.kernel.drain();
+        // Session-end consolidation trigger (#107) — see runtime.ts's `runPrompt` for the
+        // one-shot half of this. Never throws (consolidation.ts), so it cannot turn a clean
+        // REPL exit into a nonzero one.
+        await consolidateOnSessionEnd(prepared.kernel, prepared.llm, stderr);
       }
     } finally {
       input.close();

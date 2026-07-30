@@ -1,5 +1,15 @@
 import type { Agent } from "@earendil-works/pi-agent-core";
-import { replBanner, replClearedMessage, replTurnCancelledMessage } from "./messages.js";
+import type { ConsolidatorLlm } from "@mori/kernel";
+import type { MoriKernel } from "../agent/index.js";
+import { consolidateExplicit } from "./consolidation.js";
+import {
+  replBanner,
+  replClearedMessage,
+  replConsolidateFailedMessage,
+  replConsolidateOkMessage,
+  replConsolidateSkippedMessage,
+  replTurnCancelledMessage,
+} from "./messages.js";
 import type { ReplInputSource } from "./repl-input.js";
 
 export interface ReplIO {
@@ -7,9 +17,19 @@ export interface ReplIO {
   stderr: (chunk: string) => void;
 }
 
-/** The only two meta commands the REPL understands (#26 fixes the set at these two). */
+/**
+ * The kernel + consolidator LLM `/consolidate` needs — the same pair `runCli`'s session-end
+ * trigger already holds (index.ts), just handed down one level for the explicit path (#107).
+ */
+export interface ReplConsolidation {
+  kernel: MoriKernel;
+  llm: ConsolidatorLlm | undefined;
+}
+
+/** The meta commands the REPL understands (#26 fixed `/exit`/`/clear`, #107 added `/consolidate`). */
 const EXIT_COMMAND = "/exit";
 const CLEAR_COMMAND = "/clear";
+const CONSOLIDATE_COMMAND = "/consolidate";
 
 const PROMPT = "› ";
 
@@ -26,7 +46,12 @@ const PROMPT = "› ";
  * session — the error is reported and the loop asks for the next line — so this returns 0
  * for every way a user can leave the REPL (EOF, `/exit`, Ctrl-C while idle).
  */
-export async function runRepl(agent: Agent, input: ReplInputSource, io: ReplIO): Promise<number> {
+export async function runRepl(
+  agent: Agent,
+  input: ReplInputSource,
+  io: ReplIO,
+  consolidation: ReplConsolidation,
+): Promise<number> {
   const { stdout, stderr } = io;
 
   // Ctrl-C during a turn cancels that turn only. pi-agent-core threads the run's
@@ -59,6 +84,14 @@ export async function runRepl(agent: Agent, input: ReplInputSource, io: ReplIO):
       if (text === CLEAR_COMMAND) {
         agent.reset();
         stdout(replClearedMessage());
+        continue;
+      }
+
+      if (text === CONSOLIDATE_COMMAND) {
+        const outcome = await consolidateExplicit(consolidation.kernel, consolidation.llm);
+        if (outcome.kind === "skipped") stdout(replConsolidateSkippedMessage());
+        else if (outcome.kind === "ok") stdout(replConsolidateOkMessage());
+        else stderr(replConsolidateFailedMessage(outcome.error));
         continue;
       }
 

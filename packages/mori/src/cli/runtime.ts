@@ -1,7 +1,10 @@
 import type { Agent } from "@earendil-works/pi-agent-core";
+import type { ConsolidatorLlm } from "@mori/kernel";
 import { createMoriAgent, createMoriModels, type MoriKernel } from "../agent/index.js";
 import { defaultCredentialsPath, FileCredentialStore } from "../auth/credential-store.js";
+import { getConsolidatorLlm, resolveConsolidatorConfig } from "../external/consolidator/index.js";
 import { createMoriKernel } from "../kernel/index.js";
+import { consolidateOnSessionEnd } from "./consolidation.js";
 import { unauthenticatedMessage } from "./messages.js";
 import type { RunCliDeps } from "./types.js";
 
@@ -15,7 +18,8 @@ export interface RunPromptIO {
  * which case the user-facing message has already been written to stderr.
  */
 export type PreparedAgent =
-  { ok: true; agent: Agent; kernel: MoriKernel } | { ok: false; exitCode: number };
+  | { ok: true; agent: Agent; kernel: MoriKernel; llm: ConsolidatorLlm | undefined }
+  | { ok: false; exitCode: number };
 
 /**
  * Everything that must happen before the first turn: credential store -> auth gate ->
@@ -40,16 +44,24 @@ export async function prepareAgent(
   // Gate through the exact same Models/provider/store configuration the real turn below
   // uses (see agent.ts's createMoriModels) — the only way "gate passes, turn fails" can't
   // happen is for both to ask the same question of the same instance.
-  const authCheck = await createMoriModels(env, credentialStore).checkAuth(providerId);
+  const models = createMoriModels(env, credentialStore);
+  const authCheck = await models.checkAuth(providerId);
   if (!authCheck) {
     stderr(unauthenticatedMessage(providerId));
     return { ok: false, exitCode: 1 };
   }
 
+  // The consolidation seam (#106/#107): undefined when `MORI_CONSOLIDATE_MODEL` is
+  // unconfigured, in which case both triggers stay off (consolidation.ts). Resolving the
+  // config explicitly, rather than letting `getConsolidatorLlm` re-read `process.env`, is
+  // what makes this respect the injected `env` the rest of `prepareAgent` uses.
+  const llm = getConsolidatorLlm(models, resolveConsolidatorConfig(env));
+
   // The real memory kernel (#12), sharing the toolset's working root so "which
   // checkout is this" has one answer. It writes nothing until an observation
   // passes the capture filter, so preparing an agent stays side-effect-free.
-  const kernel = createMoriKernel({ root: deps.root ?? process.cwd(), env, warn: stderr });
+  const kernel =
+    deps.kernel ?? createMoriKernel({ root: deps.root ?? process.cwd(), env, warn: stderr });
   let agent: Agent;
   try {
     agent = createMoriAgent(kernel, credentialStore, env, deps.streamFn, {
@@ -68,7 +80,7 @@ export async function prepareAgent(
     }
   });
 
-  return { ok: true, agent, kernel };
+  return { ok: true, agent, kernel, llm };
 }
 
 /**
@@ -85,7 +97,7 @@ export async function runPrompt(
   const prepared = await prepareAgent(providerId, env, deps, io);
   if (!prepared.ok) return prepared.exitCode;
 
-  const { agent, kernel } = prepared;
+  const { agent, kernel, llm } = prepared;
 
   try {
     await agent.prompt(prompt);
@@ -95,6 +107,10 @@ export async function runPrompt(
     // observation from being lost to `process.exit`. In the `finally` because a
     // turn that failed still observed everything that happened before it did.
     await kernel.drain();
+    // Session-end consolidation trigger (#107). After drain so the turn's own
+    // observations are in the window being consolidated. Never throws — see
+    // consolidation.ts — so a bad extractor cannot change this turn's exit code.
+    await consolidateOnSessionEnd(kernel, llm, io.stderr);
   }
   io.stdout("\n");
 

@@ -18,6 +18,19 @@ export function replTurnCancelledMessage(): string {
   return "mori: 턴을 취소했습니다.\n";
 }
 
+export function replConsolidateSkippedMessage(): string {
+  return "mori: MORI_CONSOLIDATE_MODEL이 설정되지 않아 증류할 것이 없습니다.\n";
+}
+
+export function replConsolidateOkMessage(): string {
+  return "mori: 증류를 완료했습니다.\n";
+}
+
+export function replConsolidateFailedMessage(error: unknown): string {
+  const reason = error instanceof Error ? error.message : String(error);
+  return `mori: 증류에 실패했습니다 — ${reason}\n`;
+}
+
 export function unauthenticatedMessage(providerId: string): string {
   const apiKeyEnv = apiKeyEnvVarFor(providerId);
   if (!apiKeyEnv) {
