@@ -43,7 +43,7 @@ export async function runLogin(
   const interaction = createCliAuthInteraction({
     stdout: io.stdout,
     question: deps.question ?? readLine,
-    openBrowser: deps.openBrowser,
+    ...(deps.openBrowser ? { openBrowser: deps.openBrowser } : {}),
   });
 
   try {

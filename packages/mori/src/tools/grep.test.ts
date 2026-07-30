@@ -100,7 +100,7 @@ describe("grep", () => {
 
       // The path grep hands back must be directly usable by read_file against the same
       // root — this round trip is the actual contract the production bug violated.
-      const readBack = readFile(linkedRoot, result.matches[0].file);
+      const readBack = readFile(linkedRoot, result.matches[0]!.file);
       expect(readBack.ok).toBe(true);
       if (readBack.ok) expect(readBack.content).toBe("needle here");
     } finally {

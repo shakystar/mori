@@ -135,7 +135,7 @@ function scriptedInput(lines: string[]) {
   const source: ReplInputSource = {
     async readLine(): Promise<ReplLine> {
       state.reads++;
-      return next < lines.length ? { type: "line", value: lines[next++] } : { type: "eof" };
+      return next < lines.length ? { type: "line", value: lines[next++]! } : { type: "eof" };
     },
     onInterrupt: (handler: () => void) => {
       handlers.add(handler);
@@ -334,7 +334,7 @@ describe("runCli", () => {
 
       expect(exitCode).toBe(0);
       expect(seen).toHaveLength(2);
-      expect(JSON.stringify(seen[1].messages)).toContain("question one");
+      expect(JSON.stringify(seen[1]!.messages)).toContain("question one");
       expect(io.out()).toContain("ok");
       expect(input.state.closed).toBe(true);
     });

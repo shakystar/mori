@@ -92,8 +92,9 @@ export function grep(root: string, pattern: string, options: GrepOptions = {}): 
         truncated = true;
         return;
       }
-      if (matcher(lines[i])) {
-        matches.push({ file: relative(realRoot, filePath), line: i + 1, text: lines[i] });
+      const line = lines[i]!;
+      if (matcher(line)) {
+        matches.push({ file: relative(realRoot, filePath), line: i + 1, text: line });
       }
     }
   };
@@ -152,7 +153,10 @@ export function createGrepTool(
       "Skips node_modules, .git, and dist.",
     parameters: grepParameters,
     execute: async (_toolCallId, params: Static<typeof grepParameters>) => {
-      const result = grep(root, params.pattern, { path: params.path, regex: params.regex });
+      const result = grep(root, params.pattern, {
+        ...(params.path !== undefined ? { path: params.path } : {}),
+        ...(params.regex !== undefined ? { regex: params.regex } : {}),
+      });
       if (!result.ok) return errorResult(result);
 
       const lines = result.matches.map((match) => `${match.file}:${match.line}:${match.text}`);
