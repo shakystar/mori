@@ -95,6 +95,23 @@ describe("conflict-service", () => {
     expect(listOpenConflicts(projectId).find((c) => c.id === conflictId)).toBeUndefined();
   });
 
+  it("auto_resolved conflicts drop out of listOpenConflicts but stay readable (#118 item 2)", async () => {
+    const conflictId = await seedConflict();
+
+    const autoResolved = await resolveConflict({
+      projectId,
+      conflictId,
+      status: "auto_resolved",
+      actor: "test",
+    });
+
+    expect(autoResolved.status).toBe("auto_resolved");
+    expect(autoResolved.resolvedAt).toBeDefined();
+    expect(listOpenConflicts(projectId).find((c) => c.id === conflictId)).toBeUndefined();
+    // invalidate-not-delete: still readable via readConflict/getConflict.
+    expect(readConflict(projectId, conflictId)?.status).toBe("auto_resolved");
+  });
+
   it("escalated conflicts stamp no resolvedAt (only resolved/auto_resolved do)", async () => {
     const conflictId = await seedConflict();
     const escalated = await resolveConflict({

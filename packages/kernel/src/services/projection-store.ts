@@ -14,6 +14,7 @@ import type {
   TaskRequestStatus,
   Workstream,
 } from "../domain/entities.js";
+import { TERMINAL_CONFLICT_STATUSES } from "../domain/state-machines.js";
 import {
   buildMemoryIndex,
   parseLaneKey,
@@ -681,10 +682,19 @@ export function getConflict(projectId: string, conflictId: string): Conflict | u
   return parse<Conflict>(row);
 }
 
+/**
+ * Open = not in a terminal status. `TERMINAL_CONFLICT_STATUSES` (derived from
+ * `conflictTransitions`, the state machine) currently covers `resolved` AND
+ * `auto_resolved` — both have no outgoing transition, so a conflict the
+ * pipeline auto-resolved must stop showing up here just like an explicitly
+ * resolved one (#118 item 2). `escalated` still transitions to `resolved`, so
+ * it stays open.
+ */
 export function listOpenConflicts(projectId: string): Conflict[] {
+  const placeholders = TERMINAL_CONFLICT_STATUSES.map(() => "?").join(", ");
   const rows = db(projectId)
-    .prepare("SELECT data FROM conflicts WHERE status != 'resolved'")
-    .all() as Array<{ data: string }>;
+    .prepare(`SELECT data FROM conflicts WHERE status NOT IN (${placeholders})`)
+    .all(...TERMINAL_CONFLICT_STATUSES) as Array<{ data: string }>;
   return parseAll<Conflict>(rows);
 }
 
