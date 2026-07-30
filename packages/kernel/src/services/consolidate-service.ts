@@ -250,10 +250,40 @@ const TRIM_MARKER = "…[trimmed to fit the extraction budget]…";
 
 /** Floor for re-admitting a clipped transcript tail (see step 3 of
  *  {@link boundExtractionInput}). Below this the fragment is too small to
- *  extract anything from, and its only effect would be to mark the whole
- *  conversation slice "shown" — which is what lets `run()` advance the
- *  conversation cursor past it. */
+ *  extract anything from, so the prompt space it would take is better spent
+ *  on the sections above it. Clipping no longer decides whether the slice is
+ *  consumed — `"clipped"` coverage holds the cursor exactly like `"dropped"`
+ *  (see {@link TranscriptTailCoverage}) — so this floor is a usefulness
+ *  threshold only. */
 const MIN_USEFUL_TAIL_CHARS = 200;
+
+/**
+ * How much of `input.transcriptTail` the extractor was actually shown.
+ *
+ * Only `"absent"`/`"whole"` let `run()` consume the conversation slice when
+ * the raw buffer is off: `ConversationSlice.newOffset` is opaque to the kernel
+ * (a slice is consumed whole or not at all), so advancing the cursor over a
+ * tail that was only PARTLY shown loses the unshown prefix as surely as
+ * dropping it did (Codex P1 on PR #136, owner-adjudicated: the test was never
+ * "whole vs. partial", it was "shown or stored, or else not consumed").
+ */
+export type TranscriptTailCoverage = "absent" | "whole" | "clipped" | "dropped";
+
+/** Options for {@link boundExtractionInput}. */
+export interface BoundExtractionOptions {
+  /** Char budget for the rendered prompt. Defaults to `MAX_EXTRACTION_INPUT_CHARS`. */
+  maxChars?: number;
+  /**
+   * True when this boundary durably stores the raw slice elsewhere — i.e.
+   * `MEMORIZE_RAW_SEGMENTS` is on, so `run()` writes `segment` rows and the
+   * transcript tail is NOT its only copy. That is what makes shortening the
+   * tail a REVERSIBLE sacrifice and lets it take the leftover budget.
+   *
+   * Defaults to FALSE, the conservative reading: mistaking an only-copy tail
+   * for a recoverable one is precisely the data loss this option prevents.
+   */
+  tailPersistedElsewhere?: boolean;
+}
 
 /** {@link boundExtractionInput}'s result: a `ConsolidationInput` that renders
  *  through `buildExtractionUserContent` within `MAX_EXTRACTION_INPUT_CHARS`. */
@@ -268,13 +298,11 @@ export interface BoundedConsolidationInput extends ConsolidationInput {
    */
   observationsTruncated: boolean;
   /**
-   * True when a non-empty `input.transcriptTail` was dropped ENTIRELY (not
-   * merely clipped) because nothing was left of the budget. `run()` must then
-   * NOT advance the conversation cursor: the slice was neither shown to the
-   * extractor nor — when `MEMORIZE_RAW_SEGMENTS=0` disables the raw buffer —
-   * stored anywhere, so consuming it would lose it outright.
+   * How much of a non-empty `input.transcriptTail` reached the returned input.
+   * `run()` may consume the conversation slice only on `"whole"`/`"absent"`,
+   * or when the raw buffer stored the slice regardless.
    */
-  transcriptTailDropped: boolean;
+  transcriptTailCoverage: TranscriptTailCoverage;
 }
 
 /**
@@ -289,34 +317,48 @@ export interface BoundedConsolidationInput extends ConsolidationInput {
  *    omission COSTS something (the watermark is advanced past what was shown).
  *    Kept as a PREFIX in the original oldest-first event order, dropping from
  *    the end, and never all the way to zero: see `observationsTruncated`. When
- *    even a single observation renders past the whole budget, its `summary` is
- *    CLIPPED (`TRIM_MARKER`) rather than left oversized — the loop stopping at
- *    one item was still handing back a prompt over `maxChars` (Codex P1 on
- *    PR #136), which is exactly the shape that ratchets: an oversized prompt a
- *    provider rejects is an extractor failure, #43 keeps the watermark put on
- *    failure, and the same window then retries forever, only ever growing.
- *    Clipping keeps the observation's `id`/provenance intact, so the watermark
- *    still advances past an observation the extractor genuinely saw.
- * 2. Existing memories, keeping the NEWEST (dropping oldest first): they live
- *    in storage independently of this boundary (nothing here "consumes" them),
- *    so trimming only degrades the contradiction/dedup check's context. They
- *    get whatever the observations left.
- * 3. The transcript tail, keeping its NEWEST chars: background context, and
- *    the section a boundary can most afford to shorten. It gets the remaining
- *    budget and is CLIPPED to fit rather than dropped outright — dropping it
- *    is not free the way this function's first version assumed. That version
- *    argued the raw slice is durably stored as `segment` rows regardless, but
- *    those writes are gated on `MEMORIZE_RAW_SEGMENTS` (`run()`), so with the
- *    raw buffer off a dropped tail was neither extracted NOR stored while its
- *    cursor advanced anyway — a silently lost conversation slice (Codex P1 on
- *    PR #136). If not even `MIN_USEFUL_TAIL_CHARS` remain the tail is dropped
- *    and flagged (`transcriptTailDropped`) so `run()` holds the cursor instead
- *    and a later, roomier boundary gets the slice.
+ *    even a single observation renders past the whole budget, its rendered
+ *    fields are CLIPPED (`TRIM_MARKER`) rather than left oversized — the loop
+ *    stopping at one item was still handing back a prompt over `maxChars`
+ *    (Codex P1 on PR #136), which is exactly the shape that ratchets: an
+ *    oversized prompt a provider rejects is an extractor failure, #43 keeps
+ *    the watermark put on failure, and the same window then retries forever,
+ *    only ever growing. Clipping keeps the observation's `id`/provenance
+ *    intact, so the watermark still advances past an observation the extractor
+ *    genuinely saw.
+ * 2/3. Existing memories and the transcript tail, in an order decided by which
+ *    sacrifice is REVERSIBLE at this boundary:
+ *
+ *    - Existing memories live in storage independently of this boundary
+ *      (nothing here "consumes" them), so trimming them only degrades the
+ *      contradiction/dedup check's context — recoverable, and recovered by the
+ *      next boundary. They keep the NEWEST, dropping oldest first.
+ *    - The transcript tail, when `MEMORIZE_RAW_SEGMENTS` is off
+ *      (`tailPersistedElsewhere: false`), is the ONLY copy of that
+ *      conversation: not showing it is the one irreversible sacrifice here.
+ *
+ *    So with the raw buffer OFF the tail is RESERVED, not left over: it is
+ *    allocated before existing memories and takes the whole slice even if that
+ *    means zero memories. Giving memories a greedy first pick instead starved
+ *    the tail permanently (Codex P1 on PR #136, owner-adjudicated): the
+ *    leftover is by construction "less than one memory line", the next
+ *    boundary makes the same allocation, and memory history never shrinks — so
+ *    the conversation cursor, held by `run()` on an unshown tail, would never
+ *    move again. With the raw buffer ON the old order stands: the slice is
+ *    durably stored either way, so the tail is genuinely the cheapest section
+ *    to shorten and it takes what the sections above left.
+ *
+ *    Whatever the order, a tail that cannot be shown WHOLE is reported as
+ *    `"clipped"`/`"dropped"` and `run()` then holds the conversation cursor —
+ *    a partly-shown slice is not a consumed slice.
  *
  * Because every section is measured, the returned input ALWAYS renders within
- * `maxChars` — a bounded prompt cannot fail on size, so extraction can always
- * succeed on SOME prefix of the backlog and the boundary always advances.
- * That is what makes this self-healing rather than a retry loop, while #43's
+ * `maxChars` — with no exception, which is the whole value of the guarantee:
+ * a prompt that cannot fail on size is what lets the ratchet argument above be
+ * unconditional. (The residual floor is structural: the section headers plus
+ * one fully-clipped observation line, ~350 chars, so `maxChars` below that
+ * cannot be honoured by any trimming.) Extraction can therefore always succeed
+ * on SOME prefix of the backlog and the boundary always advances, while #43's
  * "a failed extraction does not advance the watermark" rule keeps applying,
  * untouched, to the transient failures it was written for.
  *
@@ -329,8 +371,9 @@ export interface BoundedConsolidationInput extends ConsolidationInput {
  */
 export function boundExtractionInput(
   input: ConsolidationInput,
-  maxChars: number = MAX_EXTRACTION_INPUT_CHARS,
+  options: BoundExtractionOptions = {},
 ): BoundedConsolidationInput {
+  const maxChars = options.maxChars ?? MAX_EXTRACTION_INPUT_CHARS;
   const render = (candidate: ConsolidationInput): number =>
     buildExtractionUserContent(candidate).length;
 
@@ -366,51 +409,92 @@ export function boundExtractionInput(
   const observationsTruncated = observations.length < input.observations.length;
 
   // The one observation the floor above forced in may not fit on its own.
-  // Clip its summary — the section headers are the only other contributor, so
-  // there is always room for a clipped one at any sane `maxChars`.
+  // Clip EVERY field the renderer puts on its line, in ascending order of
+  // value, until the line fits: `summary` first, then `toolName`. Clipping
+  // only `summary` left the postcondition conditional — `toolName` is rendered
+  // separately (`[${signal}/${toolName}]`) and is never clipped upstream
+  // either (`capture-service`'s 240-char `clip()` applies to the summary
+  // alone), so one long `toolName` from a custom harness or a synced row broke
+  // the bound with the summary already at zero chars (Codex P2 on PR #136).
+  // `signal` needs no clip: `ObservationSignal` is a closed four-value union.
   if (observations.length > 0 && render({ observations, existingMemories: [] }) > maxChars) {
     const last = observations[observations.length - 1]!;
+    const withLast = (o: Observation): Observation[] => [...observations.slice(0, -1), o];
     const summary = last.summary ?? "";
     // The untrimmed summary is already known not to fit (this branch), so the
     // marker-free top step is out and `[0, length - 1]` is monotone.
     const keptChars = largestFitting(Math.max(summary.length - 1, 0), (n) => ({
-      observations: [...observations.slice(0, -1), { ...last, summary: clippedTo(summary, n) }],
+      observations: withLast({ ...last, summary: clippedTo(summary, n) }),
       existingMemories: [],
     }));
-    observations = [
-      ...observations.slice(0, -1),
-      { ...last, summary: clippedTo(summary, keptChars) },
-    ];
+    let clipped: Observation = { ...last, summary: clippedTo(summary, keptChars) };
+
+    // Still over with the summary clipped ⇒ the overflow is in `toolName`.
+    const toolName = clipped.toolName;
+    if (
+      toolName !== undefined &&
+      render({ observations: withLast(clipped), existingMemories: [] }) > maxChars
+    ) {
+      const keptName = largestFitting(Math.max(toolName.length - 1, 0), (n) => ({
+        observations: withLast({ ...clipped, toolName: clippedTo(toolName, n) }),
+        existingMemories: [],
+      }));
+      clipped = { ...clipped, toolName: clippedTo(toolName, keptName) };
+    }
+    observations = withLast(clipped);
   }
 
-  // 2. Existing memories fill next, newest-first (drop from the front).
-  const keptMemories = largestFitting(input.existingMemories.length, (n) => ({
-    observations,
-    existingMemories: input.existingMemories.slice(input.existingMemories.length - n),
-  }));
-  const existingMemories = input.existingMemories.slice(
-    input.existingMemories.length - keptMemories,
-  );
+  // 2/3. Existing memories and the tail — order per the doc above.
+  /** Newest-first fill of the memory section around a fixed tail. */
+  const fitMemories = (tail: string | undefined): ConsolidatedMemory[] => {
+    const kept = largestFitting(input.existingMemories.length, (n) => ({
+      observations,
+      existingMemories: input.existingMemories.slice(input.existingMemories.length - n),
+      ...(tail !== undefined ? { transcriptTail: tail } : {}),
+    }));
+    return input.existingMemories.slice(input.existingMemories.length - kept);
+  };
 
-  // 3. The tail takes what is left, keeping its newest chars.
+  const full = input.transcriptTail ?? "";
+  let existingMemories: ConsolidatedMemory[];
   let transcriptTail: string | undefined;
-  let transcriptTailDropped = false;
-  if (input.transcriptTail !== undefined && input.transcriptTail.length > 0) {
-    const full = input.transcriptTail;
-    if (render({ observations, existingMemories, transcriptTail: full }) <= maxChars) {
-      transcriptTail = full;
-    } else {
-      // Untrimmed is out, so `[0, length - 1]` — every step of which carries
-      // the marker — is monotone.
-      const keptTail = largestFitting(full.length - 1, (n) => ({
-        observations,
-        existingMemories,
-        transcriptTail: tailClippedTo(full, n),
-      }));
-      if (keptTail >= MIN_USEFUL_TAIL_CHARS) {
-        transcriptTail = tailClippedTo(full, keptTail);
+  let transcriptTailCoverage: TranscriptTailCoverage = full.length > 0 ? "dropped" : "absent";
+
+  if (
+    full.length > 0 &&
+    options.tailPersistedElsewhere !== true &&
+    render({ observations, existingMemories: [], transcriptTail: full }) <= maxChars
+  ) {
+    // RESERVED: the tail is this conversation's only copy and it fits once the
+    // (recoverable) memory section is sacrificed. Take it whole, then give the
+    // memories whatever is left — so the slice is consumable and the cursor
+    // moves, which is what stops the conversation axis from stalling forever.
+    transcriptTail = full;
+    transcriptTailCoverage = "whole";
+    existingMemories = fitMemories(full);
+  } else {
+    // Either the tail is recoverable (raw buffer on), or it cannot fit even
+    // with zero memories. In the latter case the cursor is held regardless of
+    // what we show, so keeping the dedup/contradiction context is strictly
+    // better: without it every boundary would re-extract the same held slice
+    // with no way to notice it is re-emitting the same memories.
+    existingMemories = fitMemories(undefined);
+    if (full.length > 0) {
+      if (render({ observations, existingMemories, transcriptTail: full }) <= maxChars) {
+        transcriptTail = full;
+        transcriptTailCoverage = "whole";
       } else {
-        transcriptTailDropped = true;
+        // Untrimmed is out, so `[0, length - 1]` — every step of which carries
+        // the marker — is monotone.
+        const keptTail = largestFitting(full.length - 1, (n) => ({
+          observations,
+          existingMemories,
+          transcriptTail: tailClippedTo(full, n),
+        }));
+        if (keptTail >= MIN_USEFUL_TAIL_CHARS) {
+          transcriptTail = tailClippedTo(full, keptTail);
+          transcriptTailCoverage = "clipped";
+        }
       }
     }
   }
@@ -420,7 +504,7 @@ export function boundExtractionInput(
     existingMemories,
     ...(transcriptTail !== undefined ? { transcriptTail } : {}),
     observationsTruncated,
-    transcriptTailDropped,
+    transcriptTailCoverage,
   };
 }
 
@@ -656,6 +740,10 @@ export interface ConsolidateAttempt {
   durationMs: number;
   /** memory.consolidated events appended (success only). */
   consolidated?: number;
+  /** #113: set only when this boundary held its conversation cursor — see
+   *  `ConsolidateResult.conversationSliceHeld`. Absent means "did not happen",
+   *  so an old row without the field reads correctly. */
+  conversationSliceHeld?: boolean;
   /** Truncated failure message (failures only). */
   error?: string;
 }
@@ -997,6 +1085,16 @@ export interface ConsolidateResult {
   outcome: "ok" | "noop";
   /** Raw-detail segments written from this boundary's conversation slice. */
   segmentsWritten: number;
+  /**
+   * #113: true when this boundary did NOT consume its conversation slice —
+   * the budget could not show the tail WHOLE and the raw buffer did not store
+   * it either, so the cursor was held rather than advanced over content that
+   * was neither shown nor stored. A slice that keeps failing to fit (one
+   * larger than the budget on its own) pins the conversation axis until the
+   * `ConversationSource` contract gains a resumable offset, so this must be
+   * observable rather than silent.
+   */
+  conversationSliceHeld: boolean;
 }
 
 export interface ConsolidateParams {
@@ -1132,6 +1230,7 @@ export async function consolidate(params: ConsolidateParams): Promise<Consolidat
         backend: backendLabel,
         outcome: "noop",
         segmentsWritten: 0,
+        conversationSliceHeld: false,
       };
     }
 
@@ -1143,11 +1242,21 @@ export async function consolidate(params: ConsolidateParams): Promise<Consolidat
     // may be a shorter PREFIX of `observations`; the watermark-advance call
     // below uses it (not the full window) so a budget-truncated suffix is
     // retried by the next boundary instead of silently dropped.
-    const bounded = boundExtractionInput({
-      observations,
-      ...(transcriptTail ? { transcriptTail } : {}),
-      existingMemories: existing,
-    });
+    const bounded = boundExtractionInput(
+      {
+        observations,
+        ...(transcriptTail ? { transcriptTail } : {}),
+        existingMemories: existing,
+      },
+      // Whether the raw slice gets a second copy decides the section order:
+      // with the buffer off the tail is reserved ahead of existing memories,
+      // because not showing it is then the only irreversible loss. Read the
+      // same env var the segment write below is gated on — the write itself
+      // happens after extraction, so this is the boundary's INTENT; a write
+      // that then fails is caught by the `segmentsWritten > 0` check at the
+      // cursor-advance site, which uses the actual outcome.
+      { tailPersistedElsewhere: process.env.MEMORIZE_RAW_SEGMENTS !== "0" },
+    );
 
     // Extractor failure (LLM timeout, transport error, unparseable reply)
     // intentionally propagates WITHOUT advancing the watermark — the next
@@ -1335,19 +1444,30 @@ export async function consolidate(params: ConsolidateParams): Promise<Consolidat
     }
 
     // Advance the per-conversation offset in lockstep — the extractor has now
-    // seen this slice, so the next boundary reads only what is new. NOT when
-    // the budget dropped the tail outright (`transcriptTailDropped`) and the
-    // raw buffer did not catch it either: `newOffset` is opaque to the kernel
-    // (`ConversationSlice`), so a slice can only be consumed whole or not at
-    // all, and consuming one that was neither shown nor stored loses it. This
-    // holds the cursor instead, and the next boundary — with this boundary's
-    // observations already consumed, hence more budget for the tail — gets the
-    // slice. An EMPTY slice has nothing to lose and always advances, so an
-    // idle conversation never pins the cursor.
+    // seen this slice, so the next boundary reads only what is new. The
+    // invariant is "shown WHOLE or stored WHOLE, or not consumed":
+    // `newOffset` is opaque to the kernel (`ConversationSlice`), so a slice can
+    // only be consumed whole or not at all, and a tail that was merely CLIPPED
+    // leaves its oldest part neither shown to the extractor nor — with the raw
+    // buffer off — stored anywhere, which is the same loss as dropping it
+    // (owner adjudication on PR #136). So anything short of `"whole"` holds
+    // the cursor, and the next boundary — with this boundary's observations
+    // already consumed, hence more budget, and with the tail reserved ahead of
+    // existing memories — gets the slice. An EMPTY slice has nothing to lose
+    // and always advances, so an idle conversation never pins the cursor.
+    let conversationSliceHeld = false;
     if (source && slice) {
-      const shownOrStored = !bounded.transcriptTailDropped || segmentsWritten > 0;
-      if (shownOrStored || slice.text.length === 0) {
+      const shownWhole =
+        bounded.transcriptTailCoverage === "whole" || bounded.transcriptTailCoverage === "absent";
+      if (shownWhole || segmentsWritten > 0 || slice.text.length === 0) {
         writeConversationOffset(params.projectId, source.id, slice.newOffset);
+      } else {
+        // The remaining stuck case is a single slice too large for the budget
+        // even with zero memories — a `ConversationSource` contract limit
+        // (no resumable offset), tracked separately. Holding is correct, but
+        // it must not be SILENT: surface it on the result and the attempt
+        // telemetry so a pinned conversation axis is observable from outside.
+        conversationSliceHeld = true;
       }
     }
 
@@ -1367,6 +1487,7 @@ export async function consolidate(params: ConsolidateParams): Promise<Consolidat
       // early return is ever restructured.
       outcome: observations.length > 0 || transcriptTail !== undefined ? "ok" : "noop",
       segmentsWritten,
+      conversationSliceHeld,
     };
   };
 
@@ -1384,9 +1505,11 @@ export async function consolidate(params: ConsolidateParams): Promise<Consolidat
   // #103: mirror result.outcome exactly rather than re-deriving it from
   // observationsProcessed — a conversation-only boundary (0 observations,
   // outcome "ok") must still get its `consolidated` count recorded.
-  recordAttempt(
-    result.outcome,
-    result.outcome === "ok" ? { consolidated: result.consolidated } : {},
-  );
+  recordAttempt(result.outcome, {
+    ...(result.outcome === "ok" ? { consolidated: result.consolidated } : {}),
+    // #113: recorded on any outcome — a held slice is exactly the state an
+    // operator needs to see, and it can coexist with a memory-0 boundary.
+    ...(result.conversationSliceHeld ? { conversationSliceHeld: true } : {}),
+  });
   return result;
 }

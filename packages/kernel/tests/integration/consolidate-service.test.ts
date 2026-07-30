@@ -31,7 +31,11 @@ import {
   shouldTriggerThresholdConsolidate,
   type Consolidator,
 } from "../../src/services/consolidate-service.js";
-import { listOpenConflicts, listValidMemories } from "../../src/services/projection-store.js";
+import {
+  listOpenConflicts,
+  listValidMemories,
+  rebuildProjectProjection,
+} from "../../src/services/projection-store.js";
 import { listSegments } from "../../src/services/segment-store.js";
 import { closeAll } from "../../src/storage/db.js";
 import { appendEvent, readEvents } from "../../src/storage/event-store.js";
@@ -727,7 +731,7 @@ describe("boundExtractionInput / buildExtractionUserContent — input budget (#1
       transcriptTail: tail,
     });
 
-    expect(bounded.transcriptTailDropped).toBe(false);
+    expect(bounded.transcriptTailCoverage).toBe("clipped");
     expect(bounded.transcriptTail).toBeDefined();
     // Keeps the turns NEAREST the boundary.
     expect(bounded.transcriptTail!.endsWith(tail.slice(-200))).toBe(true);
@@ -751,7 +755,89 @@ describe("boundExtractionInput / buildExtractionUserContent — input budget (#1
     });
 
     expect(bounded.transcriptTail).toBeUndefined();
-    expect(bounded.transcriptTailDropped).toBe(true);
+    expect(bounded.transcriptTailCoverage).toBe("dropped");
+  });
+
+  // Owner adjudication on PR #136 (Codex P2 `:377`): the postcondition is
+  // "the returned input ALWAYS renders within maxChars", with no exception —
+  // and clipping only `summary` left one: the renderer puts `toolName` on the
+  // same line as a separate field, and nothing upstream clips it.
+  it("clips a toolName that overruns the budget on its own", () => {
+    const observation = createObservation({
+      projectId,
+      signal: "decision-keyword",
+      summary: "short",
+      toolName: "T".repeat(MAX_EXTRACTION_INPUT_CHARS * 2),
+    });
+
+    const bounded = boundExtractionInput({ observations: [observation], existingMemories: [] });
+
+    expect(bounded.observations).toHaveLength(1);
+    expect(buildExtractionUserContent(bounded).length).toBeLessThanOrEqual(
+      MAX_EXTRACTION_INPUT_CHARS,
+    );
+    // Clipped, not dropped: id/provenance survive, so the watermark may still
+    // advance past an observation the extractor genuinely saw.
+    expect(bounded.observations[0]!.id).toBe(observation.id);
+    expect(bounded.observations[0]!.toolName!.length).toBeLessThan(observation.toolName!.length);
+  });
+
+  // Owner adjudication on PR #136 (Codex P1 `:393`): with the raw buffer off
+  // the tail is the conversation's only copy, so it must be RESERVED ahead of
+  // the (recoverable) existing-memory section rather than fed the leftovers.
+  it("reserves the whole tail ahead of existing memories when the raw buffer is off", () => {
+    const existingMemories = Array.from({ length: 500 }, (_, i) =>
+      createConsolidatedMemory({
+        projectId,
+        kind: "progress",
+        text: `memory ${i} `.repeat(20),
+        salience: 5,
+      }),
+    );
+    const tail = Array.from({ length: 300 }, (_, i) => `USER: turn ${i}`).join("\n\n");
+
+    const reserved = boundExtractionInput(
+      {
+        observations: [
+          createObservation({
+            projectId,
+            signal: "decision-keyword",
+            summary: "one decision",
+            toolName: "Bash",
+          }),
+        ],
+        existingMemories,
+        transcriptTail: tail,
+      },
+      { tailPersistedElsewhere: false },
+    );
+
+    expect(reserved.transcriptTailCoverage).toBe("whole");
+    expect(reserved.transcriptTail).toBe(tail);
+    expect(buildExtractionUserContent(reserved).length).toBeLessThanOrEqual(
+      MAX_EXTRACTION_INPUT_CHARS,
+    );
+
+    // With the raw buffer ON the same slice is stored as segments either way,
+    // so shortening it is the cheap sacrifice again and memories fill first.
+    const leftover = boundExtractionInput(
+      {
+        observations: [
+          createObservation({
+            projectId,
+            signal: "decision-keyword",
+            summary: "one decision",
+            toolName: "Bash",
+          }),
+        ],
+        existingMemories,
+        transcriptTail: tail,
+      },
+      { tailPersistedElsewhere: true },
+    );
+
+    expect(leftover.existingMemories.length).toBeGreaterThan(reserved.existingMemories.length);
+    expect(leftover.transcriptTailCoverage).not.toBe("whole");
   });
 
   it("stays fast on a large valid-memory history (binary search, not drop-one-at-a-time)", () => {
@@ -879,6 +965,100 @@ describe("consolidate — never consumes a conversation slice it neither showed 
     expect(conversation.offsets).toEqual([0, 512]);
   });
 
+  /** A valid-memory history that alone overruns the extraction budget — the
+   *  premise of item ③ (`listValidMemories` is unbounded). Projections are
+   *  rebuilt at the end: `appendEvent` only writes the log, and `consolidate`
+   *  reads the memory section through `listValidMemories`, so without this the
+   *  history would be invisible and the budget pressure fictional. */
+  async function seedOversizedMemoryHistory(): Promise<void> {
+    for (let i = 0; i < 300; i++) {
+      await appendEvent({
+        type: "memory.consolidated",
+        projectId,
+        scopeType: "session",
+        scopeId: projectId,
+        actor: "test",
+        payload: createConsolidatedMemory({
+          projectId,
+          kind: "progress",
+          text: `filler memory ${i} `.repeat(20),
+          salience: 5,
+        }),
+      });
+    }
+    await rebuildProjectProjection(projectId, { reindexSearch: false });
+  }
+
+  // Owner adjudication on PR #136 (Codex P1 `:393`): letting existing memories
+  // take the budget greedily and the tail have the leftovers starved the tail
+  // FOREVER once the memory history outgrew the budget — the leftover is by
+  // construction under one memory line, the next boundary allocates the same
+  // way, and memory history never shrinks. Two consecutive boundaries are the
+  // minimum that can catch it: a single-boundary test sees a held cursor and
+  // cannot tell "held once" from "held for good".
+  it("advances the conversation cursor over successive boundaries when the memory history alone exceeds the budget", async () => {
+    process.env.MEMORIZE_RAW_SEGMENTS = "0";
+    await seedOversizedMemoryHistory();
+    // Slices comfortably inside the budget on their own, but larger than the
+    // crumb a greedy memory fill leaves behind (under one memory line) — which
+    // is exactly the size a leftover-allocated tail can never grow past.
+    const sliceText = (label: string): string =>
+      Array.from({ length: 40 }, (_, i) => `USER: ${label} turn ${i} `.repeat(2)).join("\n\n");
+    const conversation = fakeConversation([
+      { text: sliceText("first"), newOffset: 512 },
+      { text: sliceText("second"), newOffset: 900 },
+    ]);
+    const seen: Array<string | undefined> = [];
+    const consolidator: Consolidator = {
+      async extract(input) {
+        seen.push(input.transcriptTail);
+        return [];
+      },
+    };
+
+    const first = await consolidate({ projectId, actor: "test", conversation, consolidator });
+    expect(seen[0]).toBe(sliceText("first"));
+    expect(first.conversationSliceHeld).toBe(false);
+    expect(listSegments(projectId)).toHaveLength(0);
+
+    const second = await consolidate({ projectId, actor: "test", conversation, consolidator });
+    expect(seen[1]).toBe(sliceText("second"));
+    expect(second.conversationSliceHeld).toBe(false);
+    // Second read starts where the first slice ended: the cursor moved, and
+    // kept moving, instead of pinning the conversation axis.
+    expect(conversation.offsets).toEqual([0, 512]);
+  });
+
+  // Owner adjudication on PR #136 (Codex P1 `:1350`): a CLIPPED tail was
+  // treated as "shown", so the cursor advanced over a prefix the extractor
+  // never saw — the same loss as dropping it, moved to a different branch.
+  it("holds the cursor for a merely CLIPPED tail, and says so on the result and the attempt", async () => {
+    process.env.MEMORIZE_RAW_SEGMENTS = "0";
+    // One slice larger than the whole budget: not even zero memories make room
+    // for it, so no allocation policy can show it whole.
+    const huge = Array.from({ length: 4000 }, (_, i) => `USER: line ${i}`).join("\n\n");
+    const conversation = fakeConversation([
+      { text: huge, newOffset: 512 },
+      { text: `${huge}\n\nUSER: later`, newOffset: 900 },
+    ]);
+    const seen: Array<string | undefined> = [];
+    const consolidator: Consolidator = {
+      async extract(input) {
+        seen.push(input.transcriptTail);
+        return [];
+      },
+    };
+
+    const first = await consolidate({ projectId, actor: "test", conversation, consolidator });
+    // Partly shown — and therefore NOT consumed.
+    expect(seen[0]!.length).toBeLessThan(huge.length);
+    expect(first.conversationSliceHeld).toBe(true);
+    expect(readLastConsolidateAttempt(projectId)?.conversationSliceHeld).toBe(true);
+
+    await consolidate({ projectId, actor: "test", conversation, consolidator });
+    expect(conversation.offsets).toEqual([0, 0]);
+  });
+
   it("advances the cursor for an empty slice, which has nothing to lose", async () => {
     process.env.MEMORIZE_RAW_SEGMENTS = "0";
     await seedObservation("decided x");
@@ -930,9 +1110,13 @@ describe("consolidate — supersedes only what the extractor was shown (#113)", 
       });
     }
     await seedObservation("decided something new");
+    // `appendEvent` writes the log only; without this the memory section
+    // `consolidate` reads would be empty and the trim under test fictional.
+    await rebuildProjectProjection(projectId, { reindexSearch: false });
 
     const consolidator: Consolidator = {
       async extract(input) {
+        expect(input.existingMemories.length).toBeGreaterThan(0);
         expect(input.existingMemories.some((m) => m.id === trimmed.id)).toBe(false);
         return [
           {
