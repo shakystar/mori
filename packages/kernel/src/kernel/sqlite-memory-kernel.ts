@@ -133,8 +133,14 @@ export class SqliteMemoryKernel<M, E> implements MemoryKernel<M, E> {
    */
   private tail: Promise<void> = Promise.resolve();
 
-  /** Memoized genesis bootstrap — at most one `project.created` per store. */
-  private genesis?: Promise<void>;
+  /**
+   * Memoized genesis bootstrap — at most one `project.created` per store.
+   *
+   * Explicitly `| undefined` rather than optional: the memo is CLEARED on a failed
+   * bootstrap (see {@link ensureGenesis}), and `exactOptionalPropertyTypes` (#111)
+   * rejects assigning `undefined` to an optional property.
+   */
+  private genesis: Promise<void> | undefined;
 
   constructor(options: SqliteMemoryKernelOptions<E>) {
     this.options = options;
