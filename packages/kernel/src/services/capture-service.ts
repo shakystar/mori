@@ -21,8 +21,22 @@ import { rebuildProjectProjection } from "./projection-store.js";
  *  Recognizing a superset is harmless: a harness that never emits a given name
  *  simply never matches it. (Gemini and Hermes tool names confirmed via
  *  conformance dogfood; Cursor's are documented, not live-dogfooded — it has no
- *  headless CLI.) */
-const WRITE_TOOLS = new Set(["Write", "Edit", "MultiEdit", "write_file", "replace", "patch"]);
+ *  headless CLI.)
+ *
+ *  `edit_file` is mori's OWN write tool (packages/mori/src/tools/edit-file.ts),
+ *  added when the kernel stopped being a placeholder and started observing this
+ *  harness's loop (#12). Naming it here rather than translating it to `Edit` at
+ *  the wiring layer keeps the observation row's `toolName` honest — collision
+ *  detection and telemetry read that field. */
+const WRITE_TOOLS = new Set([
+  "Write",
+  "Edit",
+  "MultiEdit",
+  "write_file",
+  "replace",
+  "patch",
+  "edit_file",
+]);
 
 /**
  * Codex performs file edits through a single `apply_patch` tool rather than
@@ -150,9 +164,11 @@ export function evaluateCapture(
   }
 
   // Shell-tool branch across harnesses: Claude `Bash`, Codex `shell`, Gemini
-  // CLI `run_shell_command`, Hermes `terminal`, Cursor `Shell`.
+  // CLI `run_shell_command`, Hermes `terminal`, Cursor `Shell`, and mori's own
+  // lowercase `bash` (#12 — see WRITE_TOOLS on why the name is not translated).
   if (
     toolName === "Bash" ||
+    toolName === "bash" ||
     toolName === "shell" ||
     toolName === "run_shell_command" ||
     toolName === "terminal" ||

@@ -17,7 +17,20 @@ import { createBashBeforeToolCall, createMoriTools } from "../tools/index.js";
 
 export { createMoriModels };
 
-export type MoriKernel = MemoryKernel<AgentMessage, AgentEvent>;
+/**
+ * The kernel seam as mori instantiates it, plus `drain`.
+ *
+ * `drain` is not on `MemoryKernel` — the seam's `observe` is synchronous, so a
+ * kernel that persists anything has to finish that work after `observe` returned,
+ * and only the HOST knows when it is about to stop giving it the chance. `mori
+ * "…"` exits the process as soon as the turn ends, so without a settle point the
+ * last observation of every one-shot run would be lost. Requiring it here rather
+ * than widening the replaceable seam keeps that a harness-lifecycle concern.
+ */
+export interface MoriKernel extends MemoryKernel<AgentMessage, AgentEvent> {
+  /** Settle whatever `observe` queued. Resolves when the store has caught up. */
+  drain(): Promise<void>;
+}
 
 export interface CreateMoriAgentOptions {
   /**

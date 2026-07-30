@@ -90,7 +90,13 @@ export async function runCli(
         return prepared.exitCode;
       }
 
-      return await runRepl(prepared.agent, input, { stdout, stderr });
+      try {
+        return await runRepl(prepared.agent, input, { stdout, stderr });
+      } finally {
+        // Same reason as `runPrompt`'s drain: leaving the REPL means the process is
+        // about to exit, and queued observations have to land before it does.
+        await prepared.kernel.drain();
+      }
     } finally {
       input.close();
     }
