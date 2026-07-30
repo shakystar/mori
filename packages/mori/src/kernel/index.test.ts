@@ -161,7 +161,25 @@ describe("createAgentEventObserver", () => {
     expect(observe(toolEnd("c1", "bash"))).toBeUndefined();
   });
 
-  it("keeps concurrent calls' arguments apart, keyed by their own tool-call id", () => {
+  it("keeps concurrent calls of the same tool apart, keyed by their own tool-call id", () => {
+    const observe = createAgentEventObserver();
+
+    observe(toolStart("c1", "edit_file", { path: "a.ts" }));
+    observe(toolStart("c2", "edit_file", { path: "b.ts" }));
+
+    // c2 ends first: if pending were keyed by toolName instead of toolCallId,
+    // c1 would resolve to "b.ts" too.
+    expect(observe(toolEnd("c2", "edit_file"))).toEqual({
+      toolName: "edit_file",
+      toolInputText: "b.ts",
+    });
+    expect(observe(toolEnd("c1", "edit_file"))).toEqual({
+      toolName: "edit_file",
+      toolInputText: "a.ts",
+    });
+  });
+
+  it("keeps concurrent calls of different tools apart without cross-family interference", () => {
     const observe = createAgentEventObserver();
 
     observe(toolStart("c1", "edit_file", { path: "a.ts" }));
