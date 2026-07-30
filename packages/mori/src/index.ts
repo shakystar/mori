@@ -1,11 +1,12 @@
 #!/usr/bin/env node
+import { consolidateOnSessionEnd } from "./cli/consolidation.js";
 import { isMainEntry } from "./cli/entrypoint.js";
 import { runLogin, runLogout } from "./cli/login.js";
 import { unauthenticatedMessage, usageMessage } from "./cli/messages.js";
 import { parseCliCommand } from "./cli/parse-args.js";
 import { createTerminalInput, type ReplInputSource } from "./cli/repl-input.js";
 import { runRepl } from "./cli/repl.js";
-import { prepareAgent, runPrompt } from "./cli/runtime.js";
+import { prepareAgent, runPrompt, sessionEndLlm } from "./cli/runtime.js";
 import type { RunCliDeps } from "./cli/types.js";
 import {
   resolveProviderSelection,
@@ -91,11 +92,24 @@ export async function runCli(
       }
 
       try {
-        return await runRepl(prepared.agent, input, { stdout, stderr });
+        return await runRepl(
+          prepared.agent,
+          input,
+          { stdout, stderr },
+          {
+            kernel: prepared.kernel,
+            llm: prepared.llm,
+          },
+        );
       } finally {
         // Same reason as `runPrompt`'s drain: leaving the REPL means the process is
         // about to exit, and queued observations have to land before it does.
         await prepared.kernel.drain();
+        // Session-end consolidation trigger (#107) — see runtime.ts's `runPrompt` for the
+        // one-shot half of this. Never throws (consolidation.ts), so it cannot turn a clean
+        // REPL exit into a nonzero one. `sessionEndLlm` skips a store that was never created
+        // (a session that only read files) so this leaves no trace on disk either.
+        await consolidateOnSessionEnd(prepared.kernel, sessionEndLlm(prepared.llm, deps), stderr);
       }
     } finally {
       input.close();

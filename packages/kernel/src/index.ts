@@ -11,6 +11,7 @@
 
 export * from "./domain/index.js";
 export * from "./kernel/sqlite-memory-kernel.js";
+export { projectStoreExists } from "./storage/event-store.js";
 
 /** LLM seam for consolidation. The harness supplies an in-process implementation. */
 export interface ConsolidatorLlm {

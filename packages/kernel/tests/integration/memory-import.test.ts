@@ -4,13 +4,13 @@ import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { createProject } from "../../src/domain/entities.js";
+import { createConsolidatedMemory, createProject } from "../../src/domain/entities.js";
 import type { ConsolidatorLlm, Embedder } from "../../src/index.js";
 import { ExtractionParseError } from "../../src/services/consolidate-service.js";
 import { IMPORT_MAX_ITEMS, importMemories } from "../../src/services/memory-import-service.js";
 import { listOpenConflicts, listValidMemories } from "../../src/services/projection-store.js";
 import { closeAll } from "../../src/storage/db.js";
-import { appendEvent } from "../../src/storage/event-store.js";
+import { appendEvent, readEvents } from "../../src/storage/event-store.js";
 
 let sandbox: string;
 let projectId: string;
@@ -68,7 +68,7 @@ describe("importMemories", () => {
       itemsJson,
     });
 
-    expect(result).toEqual({ imported: 2, skippedDuplicates: 0 });
+    expect(result).toEqual({ imported: 2, skippedDuplicates: 0, droppedByCap: 0 });
 
     const memories = listValidMemories(projectId).map((row) => row.memory);
     expect(memories).toHaveLength(2);
@@ -117,11 +117,11 @@ describe("importMemories", () => {
       { kind: "decision", text: "Use SQLite for the local store", salience: 7 },
     ]);
     const first = await importMemories({ projectId, actor: "test", source: "docs", itemsJson });
-    expect(first).toEqual({ imported: 1, skippedDuplicates: 0 });
+    expect(first).toEqual({ imported: 1, skippedDuplicates: 0, droppedByCap: 0 });
 
     // Re-running the same import (e.g. a retried agent call) must not duplicate.
     const second = await importMemories({ projectId, actor: "test", source: "docs", itemsJson });
-    expect(second).toEqual({ imported: 0, skippedDuplicates: 1 });
+    expect(second).toEqual({ imported: 0, skippedDuplicates: 1, droppedByCap: 0 });
     expect(listValidMemories(projectId)).toHaveLength(1);
   });
 
@@ -131,10 +131,10 @@ describe("importMemories", () => {
       { kind: "decision", text: "  USE SQLITE FOR THE LOCAL STORE  ", salience: 6 },
     ]);
     const result = await importMemories({ projectId, actor: "test", source: "docs", itemsJson });
-    expect(result).toEqual({ imported: 1, skippedDuplicates: 1 });
+    expect(result).toEqual({ imported: 1, skippedDuplicates: 1, droppedByCap: 0 });
   });
 
-  it("caps a batch at IMPORT_MAX_ITEMS", async () => {
+  it("caps unique new items at IMPORT_MAX_ITEMS and reports the drop via droppedByCap", async () => {
     const items = Array.from({ length: IMPORT_MAX_ITEMS + 20 }, (_, i) => ({
       kind: "progress" as const,
       text: `distilled note #${i}`,
@@ -146,7 +146,94 @@ describe("importMemories", () => {
       source: "docs",
       itemsJson: JSON.stringify(items),
     });
-    expect(result.imported).toBe(IMPORT_MAX_ITEMS);
+    expect(result).toEqual({ imported: IMPORT_MAX_ITEMS, skippedDuplicates: 0, droppedByCap: 20 });
+  });
+
+  it("#114 ①: the cap applies to unique items AFTER dedup, so pre-existing duplicates cannot crowd out real new items", async () => {
+    // Seed exactly IMPORT_MAX_ITEMS existing memories — these will all be
+    // duplicates on the next import.
+    const alreadyKnown = Array.from({ length: IMPORT_MAX_ITEMS }, (_, i) => ({
+      kind: "progress" as const,
+      text: `already known #${i}`,
+      salience: 3,
+    }));
+    await importMemories({
+      projectId,
+      actor: "test",
+      source: "docs",
+      itemsJson: JSON.stringify(alreadyKnown),
+    });
+    expect(listValidMemories(projectId)).toHaveLength(IMPORT_MAX_ITEMS);
+
+    // Re-run with the same IMPORT_MAX_ITEMS duplicates PLUS one genuinely new
+    // item after them. Before the fix, parseExtractedMemories sliced to
+    // IMPORT_MAX_ITEMS before dedup ran, so the new item never even reached
+    // the loop — this would come back as { imported: 0, skippedDuplicates: 100 }
+    // and the new item would be silently and permanently lost.
+    const items = [
+      ...alreadyKnown,
+      { kind: "progress" as const, text: "brand new item past the duplicates", salience: 3 },
+    ];
+    const result = await importMemories({
+      projectId,
+      actor: "test",
+      source: "docs",
+      itemsJson: JSON.stringify(items),
+    });
+
+    expect(result).toEqual({
+      imported: 1,
+      skippedDuplicates: IMPORT_MAX_ITEMS,
+      droppedByCap: 0,
+    });
+    const texts = listValidMemories(projectId).map((row) => row.memory.text);
+    expect(texts).toContain("brand new item past the duplicates");
+  });
+
+  it("#114 ②: an event appended but never reflected in the projection (crash before rebuild) is still seen as a duplicate on retry", async () => {
+    // Simulate a prior import call that appended the event but crashed before
+    // its own rebuildProjectProjection — the projection has never heard of
+    // this memory, so a naive read-then-append would re-import it.
+    const memory = createConsolidatedMemory({
+      projectId,
+      kind: "decision",
+      text: "Use SQLite for the local store",
+      salience: 7,
+      sourceObservationIds: [],
+      importSource: "docs",
+    });
+    await appendEvent({
+      type: "memory.consolidated",
+      projectId,
+      scopeType: "session",
+      scopeId: projectId,
+      actor: "test",
+      payload: memory,
+    });
+    expect(listValidMemories(projectId)).toHaveLength(0); // projection not yet rebuilt
+
+    const itemsJson = JSON.stringify([
+      { kind: "decision", text: "Use SQLite for the local store", salience: 7 },
+    ]);
+    const result = await importMemories({ projectId, actor: "test", source: "docs", itemsJson });
+
+    expect(result).toEqual({ imported: 0, skippedDuplicates: 1, droppedByCap: 0 });
+    expect(listValidMemories(projectId)).toHaveLength(1);
+  });
+
+  it("#114 ②: two imports for the same project racing each other do not duplicate", async () => {
+    const itemsJson = JSON.stringify([
+      { kind: "decision", text: "Use SQLite for the local store", salience: 7 },
+    ]);
+
+    const [a, b] = await Promise.all([
+      importMemories({ projectId, actor: "test", source: "docs", itemsJson }),
+      importMemories({ projectId, actor: "test", source: "docs", itemsJson }),
+    ]);
+
+    expect(a.imported + b.imported).toBe(1);
+    expect(a.skippedDuplicates + b.skippedDuplicates).toBe(1);
+    expect(listValidMemories(projectId)).toHaveLength(1);
   });
 
   it("is a no-op event-wise when every item is a duplicate (no rebuild/embeddings/contradiction pass)", async () => {
@@ -171,7 +258,7 @@ describe("importMemories", () => {
       itemsJson,
       embedder: countingEmbedder,
     });
-    expect(result).toEqual({ imported: 0, skippedDuplicates: 1 });
+    expect(result).toEqual({ imported: 0, skippedDuplicates: 1, droppedByCap: 0 });
     expect(embedCalls).toBe(0);
   });
 
@@ -274,5 +361,91 @@ describe("importMemories", () => {
     });
     const [memory] = listValidMemories(projectId).map((row) => row.memory);
     expect(memory!.sessionId).toBe("sess-1");
+  });
+});
+
+describe("importMemories — supersede hints (#114 ③)", () => {
+  it("supersedes a currently-valid target id referenced by supersedesMemoryId", async () => {
+    await importMemories({
+      projectId,
+      actor: "test",
+      source: "docs",
+      itemsJson: JSON.stringify([{ kind: "decision", text: "old truth", salience: 7 }]),
+    });
+    const oldId = listValidMemories(projectId)[0]!.memory.id;
+
+    const result = await importMemories({
+      projectId,
+      actor: "test",
+      source: "docs",
+      itemsJson: JSON.stringify([
+        {
+          kind: "decision",
+          text: "new truth",
+          salience: 7,
+          supersedesMemoryId: oldId,
+          supersedeReason: "reversed",
+        },
+      ]),
+    });
+
+    expect(result.imported).toBe(1);
+    expect(listValidMemories(projectId).map((row) => row.memory.text)).toEqual(["new truth"]);
+    const superseded = (await readEvents(projectId)).filter(
+      (event) => event.type === "memory.superseded",
+    );
+    expect(superseded).toHaveLength(1);
+    expect(superseded[0]!.payload).toMatchObject({ supersedes: oldId, reason: "reversed" });
+  });
+
+  it("ignores a supersedesMemoryId that does not name a currently-valid memory — same discipline as consolidation", async () => {
+    const result = await importMemories({
+      projectId,
+      actor: "test",
+      source: "docs",
+      itemsJson: JSON.stringify([
+        {
+          kind: "decision",
+          text: "hallucinated supersede",
+          salience: 7,
+          supersedesMemoryId: "mem_does_not_exist",
+        },
+      ]),
+    });
+
+    expect(result.imported).toBe(1);
+    expect(listValidMemories(projectId).map((row) => row.memory.text)).toEqual([
+      "hallucinated supersede",
+    ]);
+    const superseded = (await readEvents(projectId)).filter(
+      (event) => event.type === "memory.superseded",
+    );
+    expect(superseded).toHaveLength(0);
+  });
+
+  it("does not supersede a target twice within the same batch", async () => {
+    await importMemories({
+      projectId,
+      actor: "test",
+      source: "docs",
+      itemsJson: JSON.stringify([{ kind: "decision", text: "old truth", salience: 7 }]),
+    });
+    const oldId = listValidMemories(projectId)[0]!.memory.id;
+
+    const result = await importMemories({
+      projectId,
+      actor: "test",
+      source: "docs",
+      itemsJson: JSON.stringify([
+        { kind: "decision", text: "replacement A", salience: 7, supersedesMemoryId: oldId },
+        { kind: "decision", text: "replacement B", salience: 7, supersedesMemoryId: oldId },
+      ]),
+    });
+
+    expect(result.imported).toBe(2);
+    const superseded = (await readEvents(projectId)).filter(
+      (event) => event.type === "memory.superseded",
+    );
+    expect(superseded).toHaveLength(1);
   });
 });

@@ -6,6 +6,7 @@ import type { AssistantMessage, AssistantMessageEvent, ToolCall } from "@earendi
 import { createAssistantMessageEventStream, InMemoryCredentialStore } from "@earendil-works/pi-ai";
 import type { ConsolidatorLlm } from "@mori/kernel";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { consolidateOnSessionEnd } from "../cli/consolidation.js";
 import { runCli } from "../index.js";
 import { createMoriTools } from "../tools/index.js";
 import {
@@ -144,6 +145,57 @@ describe("createAgentEventObserver", () => {
     // ones there is nothing to capture.
     expect(observe(toolEnd("c1", "bash"))).toBeUndefined();
   });
+
+  it("ignores a write call whose arguments carry no path", () => {
+    const observe = createAgentEventObserver();
+
+    observe(toolStart("c1", "edit_file", { oldString: "a", newString: "b" }));
+
+    expect(observe(toolEnd("c1", "edit_file"))).toBeUndefined();
+  });
+
+  it("ignores a shell call whose arguments carry no command", () => {
+    const observe = createAgentEventObserver();
+
+    observe(toolStart("c1", "bash", { timeoutMs: 1000 }));
+
+    expect(observe(toolEnd("c1", "bash"))).toBeUndefined();
+  });
+
+  it("keeps concurrent calls of the same tool apart, keyed by their own tool-call id", () => {
+    const observe = createAgentEventObserver();
+
+    observe(toolStart("c1", "edit_file", { path: "a.ts" }));
+    observe(toolStart("c2", "edit_file", { path: "b.ts" }));
+
+    // c2 ends first: if pending were keyed by toolName instead of toolCallId,
+    // c1 would resolve to "b.ts" too.
+    expect(observe(toolEnd("c2", "edit_file"))).toEqual({
+      toolName: "edit_file",
+      toolInputText: "b.ts",
+    });
+    expect(observe(toolEnd("c1", "edit_file"))).toEqual({
+      toolName: "edit_file",
+      toolInputText: "a.ts",
+    });
+  });
+
+  it("keeps concurrent calls of different tools apart without cross-family interference", () => {
+    const observe = createAgentEventObserver();
+
+    observe(toolStart("c1", "edit_file", { path: "a.ts" }));
+    observe(toolStart("c2", "bash", { command: "pnpm test" }));
+
+    // c2 ends first: c1's remembered path must not have been touched or dropped.
+    expect(observe(toolEnd("c2", "bash"))).toEqual({
+      toolName: "bash",
+      toolInputText: "pnpm test",
+    });
+    expect(observe(toolEnd("c1", "edit_file"))).toEqual({
+      toolName: "edit_file",
+      toolInputText: "a.ts",
+    });
+  });
 });
 
 describe("mori turn -> sqlite store", () => {
@@ -165,10 +217,10 @@ describe("mori turn -> sqlite store", () => {
   });
 
   /** One real `mori "…"` invocation: nothing about the kernel is substituted. */
-  async function run(turns: FakeTurn[]): Promise<number> {
+  async function run(turns: FakeTurn[], env: NodeJS.ProcessEnv = {}): Promise<number> {
     return runCli(
       ["한 턴만"],
-      { ANTHROPIC_API_KEY: "sk-ant-test" },
+      { ANTHROPIC_API_KEY: "sk-ant-test", ...env },
       {
         stdout: () => {},
         stderr: () => {},
@@ -214,11 +266,90 @@ describe("mori turn -> sqlite store", () => {
     expect(prompts[0]).toContain("notes.md");
   });
 
+  it("lands one turn's bash call in the store as a consolidatable observation", async () => {
+    const exitCode = await run([
+      // Not itself a capture signal (evaluateCapture's mutating-bash pattern doesn't match
+      // plain redirection) — it only sets up the file the next call renames.
+      { toolCall: { name: "bash", arguments: { command: "echo 기억은 커널이 남긴다 > src.txt" } } },
+      // `mv` matches MUTATING_BASH_PATTERN (capture-service.ts), so this is the call the
+      // observer and the capture filter both have to let through end to end.
+      { toolCall: { name: "bash", arguments: { command: "mv src.txt shell-notes.txt" } } },
+      { text: "실행했습니다" },
+    ]);
+
+    expect(exitCode).toBe(0);
+    // The commands really ran, so this was a real turn and not a scripted no-op.
+    expect(readFileSync(join(root, "shell-notes.txt"), "utf8")).toContain("기억은 커널이 남긴다");
+    // `runCli` settled its kernel before returning — same non-blocking drain guarantee
+    // edit_file's turn above relies on, exercised here through the `bash` capture family.
+    expect(readdirSync(store)).toContain("projects");
+
+    const prompts: string[] = [];
+    const llm: ConsolidatorLlm = {
+      async complete(prompt: string): Promise<string> {
+        prompts.push(prompt);
+        return "[]";
+      },
+    };
+    const result = await createMoriKernel({ root, env: {} }).consolidateWithResult(llm);
+
+    // Exactly one observation: the `echo` redirect never passed the capture filter, so
+    // only the `mv` call reached the store.
+    expect(result.observationsProcessed).toBe(1);
+    expect(prompts[0]).toContain("mv src.txt shell-notes.txt");
+  });
+
+  it("the session-end trigger (#107) lands a real boundary's memories in the event log", async () => {
+    const exitCode = await run([
+      {
+        toolCall: {
+          name: "edit_file",
+          arguments: { path: "notes.md", oldString: "", newString: "세션 종료가 증류를 부른다\n" },
+        },
+      },
+      { text: "만들었습니다" },
+    ]);
+    expect(exitCode).toBe(0);
+
+    const prompts: string[] = [];
+    const llm: ConsolidatorLlm = {
+      async complete(prompt: string): Promise<string> {
+        prompts.push(prompt);
+        return "[]";
+      },
+    };
+    const errors: string[] = [];
+    const kernel = createMoriKernel({ root, env: {} });
+
+    await consolidateOnSessionEnd(kernel, llm, (message) => errors.push(message));
+
+    expect(errors).toEqual([]);
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0]).toContain("notes.md");
+
+    // Read the boundary's own outcome back through a second call: the watermark this trigger
+    // advanced means a second real boundary over the same window finds nothing left to do.
+    const second = await kernel.consolidateWithResult(llm);
+    expect(second.outcome).toBe("noop");
+  });
+
   it("writes nothing at all for a turn that only reads", async () => {
     const exitCode = await run([
       { toolCall: { name: "list_dir", arguments: { path: "." } } },
       { text: "빈 디렉터리입니다" },
     ]);
+
+    expect(exitCode).toBe(0);
+    expect(readdirSync(store)).toEqual([]);
+  });
+
+  it("writes nothing at all for a read-only turn even with consolidation configured (#107 review)", async () => {
+    // Sibling of the case above, with MORI_CONSOLIDATE_MODEL set: the session-end trigger
+    // must not be the thing that creates the store for a session that captured nothing.
+    const exitCode = await run(
+      [{ toolCall: { name: "list_dir", arguments: { path: "." } } }, { text: "빈 디렉터리입니다" }],
+      { MORI_CONSOLIDATE_MODEL: "anthropic/claude-x" },
+    );
 
     expect(exitCode).toBe(0);
     expect(readdirSync(store)).toEqual([]);

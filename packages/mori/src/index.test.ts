@@ -10,8 +10,10 @@ import type {
   Provider,
 } from "@earendil-works/pi-ai";
 import { createAssistantMessageEventStream, InMemoryCredentialStore } from "@earendil-works/pi-ai";
-import type { StreamFn } from "@earendil-works/pi-agent-core";
+import type { AgentMessage, StreamFn } from "@earendil-works/pi-agent-core";
+import type { ConsolidatorLlm } from "@mori/kernel";
 import { afterEach, describe, expect, it } from "vitest";
+import type { MoriKernel } from "./agent/index.js";
 import { EXPERIMENTAL_OPENAI_OAUTH_ENV, OPENAI_OAUTH_PROVIDER_ID } from "./auth/experimental.js";
 import type { ReplInputSource, ReplLine } from "./cli/repl-input.js";
 import { runCli, unauthenticatedMessage } from "./index.js";
@@ -79,6 +81,26 @@ function fakeStreamFn(text: string): StreamFn {
     stream.push({ type: "done", reason: "stop", message: final } satisfies AssistantMessageEvent);
 
     return stream;
+  };
+}
+
+/**
+ * A `MoriKernel` whose `consolidate` is a spy — for asserting the session-end trigger
+ * (#107) calls it, without a real store or a real consolidator LLM in the loop.
+ */
+function spyKernel(consolidate: MoriKernel["consolidate"] = async () => {}): MoriKernel & {
+  consolidateCalls: ConsolidatorLlm[];
+} {
+  const consolidateCalls: ConsolidatorLlm[] = [];
+  return {
+    transformContext: async (messages: AgentMessage[]) => messages,
+    observe: () => {},
+    drain: async () => {},
+    consolidate: async (llm) => {
+      consolidateCalls.push(llm);
+      await consolidate(llm);
+    },
+    consolidateCalls,
   };
 }
 
@@ -202,6 +224,73 @@ describe("runCli", () => {
     expect(exitCode).toBe(0);
     expect(io.out()).toBe("hello from mori\n");
     expect(io.err()).toBe("");
+  });
+
+  describe("session-end consolidation (#107)", () => {
+    it("calls kernel.consolidate exactly once when MORI_CONSOLIDATE_MODEL is set", async () => {
+      const io = captureOutput();
+      const kernel = spyKernel();
+
+      const exitCode = await runCli(
+        ["hi"],
+        { ANTHROPIC_API_KEY: "sk-ant-test", MORI_CONSOLIDATE_MODEL: "anthropic/claude-x" },
+        {
+          stdout: io.stdout,
+          stderr: io.stderr,
+          streamFn: fakeStreamFn("hello from mori"),
+          credentialStore: new InMemoryCredentialStore(),
+          kernel,
+        },
+      );
+
+      expect(exitCode).toBe(0);
+      expect(kernel.consolidateCalls).toHaveLength(1);
+    });
+
+    it("never calls kernel.consolidate when MORI_CONSOLIDATE_MODEL is unset, and warns nothing", async () => {
+      const io = captureOutput();
+      const kernel = spyKernel();
+
+      const exitCode = await runCli(
+        ["hi"],
+        { ANTHROPIC_API_KEY: "sk-ant-test" },
+        {
+          stdout: io.stdout,
+          stderr: io.stderr,
+          streamFn: fakeStreamFn("hello from mori"),
+          credentialStore: new InMemoryCredentialStore(),
+          kernel,
+        },
+      );
+
+      expect(exitCode).toBe(0);
+      expect(kernel.consolidateCalls).toHaveLength(0);
+      expect(io.err()).toBe("");
+    });
+
+    it("stays exit code 0 and prints a message, not a stack trace, when consolidate() throws", async () => {
+      const io = captureOutput();
+      const kernel = spyKernel(async () => {
+        throw new Error("consolidator misconfigured");
+      });
+
+      const exitCode = await runCli(
+        ["hi"],
+        { ANTHROPIC_API_KEY: "sk-ant-test", MORI_CONSOLIDATE_MODEL: "anthropic/claude-x" },
+        {
+          stdout: io.stdout,
+          stderr: io.stderr,
+          streamFn: fakeStreamFn("hello from mori"),
+          credentialStore: new InMemoryCredentialStore(),
+          kernel,
+        },
+      );
+
+      expect(exitCode).toBe(0);
+      expect(io.out()).toBe("hello from mori\n");
+      expect(io.err()).toContain("consolidator misconfigured");
+      expect(io.err()).not.toMatch(/at .+\(.+:\d+:\d+\)/);
+    });
   });
 
   it("does not authenticate from a stored OAuth token alone (#16: subscription OAuth never reaches a real request)", async () => {
@@ -429,6 +518,28 @@ describe("runCli", () => {
 
       expect(input.state.reads).toBe(0);
       expect(input.state.closed).toBe(true);
+    });
+
+    it("calls kernel.consolidate exactly once on exit when MORI_CONSOLIDATE_MODEL is set (#107)", async () => {
+      const io = captureOutput();
+      const kernel = spyKernel();
+      const input = scriptedInput(["question one"]);
+
+      const exitCode = await runCli(
+        [],
+        { ANTHROPIC_API_KEY: "sk-ant-test", MORI_CONSOLIDATE_MODEL: "anthropic/claude-x" },
+        {
+          stdout: io.stdout,
+          stderr: io.stderr,
+          credentialStore: new InMemoryCredentialStore(),
+          streamFn: fakeStreamFn("ok"),
+          openReplInput: () => input.source,
+          kernel,
+        },
+      );
+
+      expect(exitCode).toBe(0);
+      expect(kernel.consolidateCalls).toHaveLength(1);
     });
   });
 

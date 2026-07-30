@@ -12,8 +12,10 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import type { AgentEvent, AgentMessage } from "@earendil-works/pi-agent-core";
 import {
+  createId,
   observedShell,
   observedWrite,
+  projectStoreExists,
   SqliteMemoryKernel,
   type Embedder,
   type ObservedToolCall,
@@ -123,6 +125,18 @@ export function moriProjectId(root: string): string {
   return `proj_${digest.slice(0, 16)}`;
 }
 
+/**
+ * Whether a working root's store already exists on disk. A session-end boundary uses this
+ * to tell "nothing to consolidate" apart from "consolidation unconfigured" (#107 review):
+ * if this session captured anything, `observe`'s own `ensureGenesis` would already have
+ * created the store, so "no store" here means no observation has ever passed the capture
+ * filter for this root — there is nothing to distill, and running one anyway would be the
+ * first write of a session that only read files.
+ */
+export function moriStoreExists(root: string): boolean {
+  return projectStoreExists(moriProjectId(root));
+}
+
 export interface CreateMoriKernelOptions {
   /** Working root; identifies the store and titles its genesis. Defaults to cwd. */
   root?: string;
@@ -133,6 +147,15 @@ export interface CreateMoriKernelOptions {
    * unconfigured ⇒ the kernel degrades to FTS-only, which is not an error.
    */
   embedder?: Embedder;
+  /**
+   * Session this kernel's observations and consolidation boundary belong to.
+   * Defaults to a freshly minted id — one kernel is built per CLI process
+   * invocation (`prepareAgent`, once for `runPrompt`, once for the whole
+   * `runRepl` lifetime), so "one kernel" and "one session" are the same
+   * lifetime and a single id minted at construction covers every turn the
+   * kernel sees. Overridable so tests can assert on a known id.
+   */
+  sessionId?: string;
   /**
    * Sink for a capture that failed after the turn moved on. Called at most once
    * per kernel: a store that is broken is broken for every later event, and the
@@ -166,6 +189,7 @@ export function createMoriKernel(
     projectId: moriProjectId(root),
     actor: MORI_ACTOR,
     project: { title: path.basename(root) || root, rootPath: root },
+    sessionId: options.sessionId ?? createId("session"),
     observeEvent: createAgentEventObserver(),
     ...(embedder ? { embedder } : {}),
     onCaptureError: (error: unknown) => {

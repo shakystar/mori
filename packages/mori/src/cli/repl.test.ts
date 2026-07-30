@@ -6,11 +6,11 @@ import type {
   Model,
 } from "@earendil-works/pi-ai";
 import { createAssistantMessageEventStream, InMemoryCredentialStore } from "@earendil-works/pi-ai";
-import { BufferKernel } from "@mori/kernel";
+import { BufferKernel, type ConsolidatorLlm } from "@mori/kernel";
 import { describe, expect, it } from "vitest";
-import { createMoriAgent } from "../agent/index.js";
+import { createMoriAgent, type MoriKernel } from "../agent/index.js";
 import type { ReplInputSource, ReplLine } from "./repl-input.js";
-import { runRepl } from "./repl.js";
+import { runRepl, type ReplConsolidation } from "./repl.js";
 
 const ENV = { ANTHROPIC_API_KEY: "sk-ant-test" } as const;
 
@@ -18,10 +18,27 @@ const ENV = { ANTHROPIC_API_KEY: "sk-ant-test" } as const;
  * A real agent on the production wiring (kernel, model resolution, event plumbing), with
  * only the provider stream faked. Tools are dropped — this file is about the input/output
  * loop, and `createMoriTools` would otherwise pin a working root onto every test.
+ *
+ * The kernel is handed back alongside the agent — `runRepl` now also takes it directly, for
+ * `/consolidate` (#107) — but stays a plain `BufferKernel`: tests below that don't care about
+ * consolidation pass `noConsolidation` (no `MORI_CONSOLIDATE_MODEL`, so `/consolidate` is a
+ * no-op skip and `BufferKernel.consolidate()` is never reached anyway).
  */
-function testAgent(streamFn: StreamFn): Agent {
+function testAgent(streamFn: StreamFn): { agent: Agent; kernel: MoriKernel } {
   const kernel = new BufferKernel<AgentMessage, AgentEvent>();
-  return createMoriAgent(kernel, new InMemoryCredentialStore(), ENV, streamFn, { tools: [] });
+  return {
+    agent: createMoriAgent(kernel, new InMemoryCredentialStore(), ENV, streamFn, { tools: [] }),
+    kernel,
+  };
+}
+
+/** `/consolidate`-less REPL wiring — most tests here are about the input/output loop, not it. */
+function noConsolidation(kernel: MoriKernel): ReplConsolidation {
+  return { kernel, llm: undefined };
+}
+
+function stubLlm(): ConsolidatorLlm {
+  return { complete: async () => "[]" };
 }
 
 /** A completed assistant response consisting of `text`, streamed one delta at a time. */
@@ -146,8 +163,9 @@ describe("runRepl", () => {
       { type: "line", value: "question two" },
       { type: "eof" },
     ]);
+    const { agent, kernel } = testAgent(provider.streamFn);
 
-    const exitCode = await runRepl(testAgent(provider.streamFn), input.source, captureOutput());
+    const exitCode = await runRepl(agent, input.source, captureOutput(), noConsolidation(kernel));
 
     expect(exitCode).toBe(0);
     expect(provider.contexts).toHaveLength(2);
@@ -160,14 +178,14 @@ describe("runRepl", () => {
 
   it("runs every turn on the agent it was handed, accumulating one transcript", async () => {
     const provider = recordingProvider(["answer one", "answer two"]);
-    const agent = testAgent(provider.streamFn);
+    const { agent, kernel } = testAgent(provider.streamFn);
     const input = scriptedInput([
       { type: "line", value: "question one" },
       { type: "line", value: "question two" },
       { type: "eof" },
     ]);
 
-    await runRepl(agent, input.source, captureOutput());
+    await runRepl(agent, input.source, captureOutput(), noConsolidation(kernel));
 
     // The caller's own reference holds both turns: user, assistant, user, assistant. A
     // per-turn agent would leave this one at two messages, or empty.
@@ -182,8 +200,9 @@ describe("runRepl", () => {
   it("exits 0 on EOF", async () => {
     const provider = recordingProvider([]);
     const input = scriptedInput([{ type: "eof" }]);
+    const { agent, kernel } = testAgent(provider.streamFn);
 
-    const exitCode = await runRepl(testAgent(provider.streamFn), input.source, captureOutput());
+    const exitCode = await runRepl(agent, input.source, captureOutput(), noConsolidation(kernel));
 
     expect(exitCode).toBe(0);
     expect(input.state.closed).toBe(true);
@@ -192,8 +211,9 @@ describe("runRepl", () => {
   it("exits 0 on /exit without sending it to the provider", async () => {
     const provider = recordingProvider([]);
     const input = scriptedInput([{ type: "line", value: "/exit" }]);
+    const { agent, kernel } = testAgent(provider.streamFn);
 
-    const exitCode = await runRepl(testAgent(provider.streamFn), input.source, captureOutput());
+    const exitCode = await runRepl(agent, input.source, captureOutput(), noConsolidation(kernel));
 
     expect(exitCode).toBe(0);
     expect(provider.contexts).toHaveLength(0);
@@ -201,7 +221,7 @@ describe("runRepl", () => {
 
   it("drops the conversation on /clear and keeps prompting", async () => {
     const provider = recordingProvider(["answer one", "answer two"]);
-    const agent = testAgent(provider.streamFn);
+    const { agent, kernel } = testAgent(provider.streamFn);
     const io = captureOutput();
     const input = scriptedInput([
       { type: "line", value: "question one" },
@@ -210,7 +230,7 @@ describe("runRepl", () => {
       { type: "eof" },
     ]);
 
-    const exitCode = await runRepl(agent, input.source, io);
+    const exitCode = await runRepl(agent, input.source, io, noConsolidation(kernel));
 
     expect(exitCode).toBe(0);
     expect(io.out()).toContain("초기화");
@@ -226,8 +246,9 @@ describe("runRepl", () => {
       { type: "line", value: "   " },
       { type: "eof" },
     ]);
+    const { agent, kernel } = testAgent(provider.streamFn);
 
-    const exitCode = await runRepl(testAgent(provider.streamFn), input.source, captureOutput());
+    const exitCode = await runRepl(agent, input.source, captureOutput(), noConsolidation(kernel));
 
     expect(exitCode).toBe(0);
     expect(provider.contexts).toHaveLength(0);
@@ -235,7 +256,7 @@ describe("runRepl", () => {
 
   it("cancels only the running turn on Ctrl-C and stays in the loop", async () => {
     const provider = hangingThenAnswering("answer two");
-    const agent = testAgent(provider.streamFn);
+    const { agent, kernel } = testAgent(provider.streamFn);
     const io = captureOutput();
     const input = scriptedInput([
       { type: "line", value: "question one", interruptDuringTurn: true },
@@ -243,7 +264,7 @@ describe("runRepl", () => {
       { type: "eof" },
     ]);
 
-    const exitCode = await runRepl(agent, input.source, io);
+    const exitCode = await runRepl(agent, input.source, io, noConsolidation(kernel));
 
     expect(exitCode).toBe(0);
     expect(io.err()).toContain("취소");
@@ -260,10 +281,74 @@ describe("runRepl", () => {
   it("exits 0 on Ctrl-C while idle", async () => {
     const provider = recordingProvider([]);
     const input = scriptedInput([{ type: "interrupt" }]);
+    const { agent, kernel } = testAgent(provider.streamFn);
 
-    const exitCode = await runRepl(testAgent(provider.streamFn), input.source, captureOutput());
+    const exitCode = await runRepl(agent, input.source, captureOutput(), noConsolidation(kernel));
 
     expect(exitCode).toBe(0);
     expect(input.state.closed).toBe(true);
+  });
+
+  describe("/consolidate", () => {
+    it("skips silently and reports nothing to consolidate when no llm is configured", async () => {
+      const provider = recordingProvider([]);
+      const { agent, kernel } = testAgent(provider.streamFn);
+      const io = captureOutput();
+      const input = scriptedInput([{ type: "line", value: "/consolidate" }, { type: "eof" }]);
+
+      const exitCode = await runRepl(agent, input.source, io, noConsolidation(kernel));
+
+      expect(exitCode).toBe(0);
+      expect(provider.contexts).toHaveLength(0);
+      expect(io.out()).toContain("설정되지 않아");
+    });
+
+    it("runs the configured llm's consolidation and confirms it, then keeps prompting", async () => {
+      const provider = recordingProvider(["answer one"]);
+      const { agent, kernel } = testAgent(provider.streamFn);
+      const io = captureOutput();
+      const input = scriptedInput([
+        { type: "line", value: "/consolidate" },
+        { type: "line", value: "question one" },
+        { type: "eof" },
+      ]);
+
+      const exitCode = await runRepl(agent, input.source, io, { kernel, llm: stubLlm() });
+
+      expect(exitCode).toBe(0);
+      expect(io.out()).toContain("완료");
+      // /consolidate did not reach the provider, but the turn right after it did.
+      expect(provider.contexts).toHaveLength(1);
+    });
+
+    it("reports a failed consolidation without ending the session", async () => {
+      const provider = recordingProvider([]);
+      const { agent, kernel } = testAgent(provider.streamFn);
+      const io = captureOutput();
+      const input = scriptedInput([{ type: "line", value: "/consolidate" }, { type: "eof" }]);
+      const failingLlm: ConsolidatorLlm = {
+        complete: async () => {
+          throw new Error("boom");
+        },
+      };
+      // BufferKernel.consolidate() ignores its `llm` argument and never throws, so exercising
+      // a failure needs a kernel that actually calls it — a thin wrapper around the real one.
+      const throwingKernel: MoriKernel = {
+        transformContext: (messages) => kernel.transformContext(messages),
+        observe: (event) => kernel.observe(event),
+        drain: () => kernel.drain(),
+        consolidate: async (llm) => {
+          await llm.complete("");
+        },
+      };
+
+      const exitCode = await runRepl(agent, input.source, io, {
+        kernel: throwingKernel,
+        llm: failingLlm,
+      });
+
+      expect(exitCode).toBe(0);
+      expect(io.err()).toContain("boom");
+    });
   });
 });

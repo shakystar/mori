@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import path from "node:path";
 
 import type Database from "better-sqlite3";
@@ -7,7 +8,7 @@ import type { DomainEvent, DomainEventPayload, DomainEventType } from "../domain
 import { MemorizeError } from "../shared/errors.js";
 import { getDb } from "./db.js";
 import { ensureDir } from "./fs-utils.js";
-import { getProjectRoot } from "./path-resolver.js";
+import { getProjectDbFile, getProjectRoot } from "./path-resolver.js";
 
 export interface AppendEventInput<TPayload extends DomainEventPayload> {
   type: DomainEventType;
@@ -37,6 +38,17 @@ export async function ensureProjectDirectories(projectId: string): Promise<void>
       ensureDir(dirPath),
     ),
   );
+}
+
+/**
+ * True when this project's store has already been created on disk (the db file exists).
+ * A plain `fs.existsSync` check — deliberately not `getDb`/`hasGenesisEvent`, both of which
+ * open (and on a missing file, create) the database as a side effect. A caller that wants to
+ * know "has anything ever happened here" without risking being the first thing that happens
+ * needs a check with zero side effects (#107 review: a read-only session must leave no trace).
+ */
+export function projectStoreExists(projectId: string): boolean {
+  return fs.existsSync(getProjectDbFile(projectId));
 }
 
 /**
