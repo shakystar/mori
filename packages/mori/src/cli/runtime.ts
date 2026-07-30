@@ -1,6 +1,6 @@
 import type { Agent, AgentEvent, AgentMessage } from "@earendil-works/pi-agent-core";
 import { BufferKernel } from "@mori/kernel";
-import { createMoriAgent, createMoriModels } from "../agent.js";
+import { createMoriAgent, createMoriModels } from "../agent/index.js";
 import { defaultCredentialsPath, FileCredentialStore } from "../auth/credential-store.js";
 import { unauthenticatedMessage } from "./messages.js";
 import type { RunCliDeps } from "./types.js";

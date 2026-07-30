@@ -9,8 +9,8 @@ import {
 import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
 import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
 import { openaiCodexProvider } from "@earendil-works/pi-ai/providers/openai-codex";
-import { experimentalOpenAiOAuthEnabled } from "./auth/experimental.js";
-import { hidingOAuth } from "./auth/resolve-credentials.js";
+import { experimentalOpenAiOAuthEnabled } from "../auth/experimental.js";
+import { hidingOAuth } from "../auth/resolve-credentials.js";
 
 /**
  * pi-ai's `anthropicProvider()` bundles Claude Pro/Max subscription OAuth — a flow that

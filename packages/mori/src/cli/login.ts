@@ -3,7 +3,7 @@ import type { AuthType, MutableModels } from "@earendil-works/pi-ai";
 import { createCliAuthInteraction } from "../auth/cli-interaction.js";
 import { defaultCredentialsPath, FileCredentialStore } from "../auth/credential-store.js";
 import { OPENAI_OAUTH_PROVIDER_ID } from "../auth/experimental.js";
-import { createMoriModels } from "../model-wiring.js";
+import { createMoriModels } from "../agent/model-wiring.js";
 import {
   experimentalOpenAiOAuthNotice,
   loginFailedMessage,
