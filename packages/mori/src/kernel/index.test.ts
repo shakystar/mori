@@ -166,10 +166,10 @@ describe("mori turn -> sqlite store", () => {
   });
 
   /** One real `mori "…"` invocation: nothing about the kernel is substituted. */
-  async function run(turns: FakeTurn[]): Promise<number> {
+  async function run(turns: FakeTurn[], env: NodeJS.ProcessEnv = {}): Promise<number> {
     return runCli(
       ["한 턴만"],
-      { ANTHROPIC_API_KEY: "sk-ant-test" },
+      { ANTHROPIC_API_KEY: "sk-ant-test", ...env },
       {
         stdout: () => {},
         stderr: () => {},
@@ -254,6 +254,18 @@ describe("mori turn -> sqlite store", () => {
       { toolCall: { name: "list_dir", arguments: { path: "." } } },
       { text: "빈 디렉터리입니다" },
     ]);
+
+    expect(exitCode).toBe(0);
+    expect(readdirSync(store)).toEqual([]);
+  });
+
+  it("writes nothing at all for a read-only turn even with consolidation configured (#107 review)", async () => {
+    // Sibling of the case above, with MORI_CONSOLIDATE_MODEL set: the session-end trigger
+    // must not be the thing that creates the store for a session that captured nothing.
+    const exitCode = await run(
+      [{ toolCall: { name: "list_dir", arguments: { path: "." } } }, { text: "빈 디렉터리입니다" }],
+      { MORI_CONSOLIDATE_MODEL: "anthropic/claude-x" },
+    );
 
     expect(exitCode).toBe(0);
     expect(readdirSync(store)).toEqual([]);

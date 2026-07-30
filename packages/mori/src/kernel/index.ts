@@ -14,6 +14,7 @@ import type { AgentEvent, AgentMessage } from "@earendil-works/pi-agent-core";
 import {
   observedShell,
   observedWrite,
+  projectStoreExists,
   SqliteMemoryKernel,
   type Embedder,
   type ObservedToolCall,
@@ -121,6 +122,18 @@ export function createAgentEventObserver(): ToolCallObserver<AgentEvent> {
 export function moriProjectId(root: string): string {
   const digest = createHash("sha256").update(path.resolve(root)).digest("hex");
   return `proj_${digest.slice(0, 16)}`;
+}
+
+/**
+ * Whether a working root's store already exists on disk. A session-end boundary uses this
+ * to tell "nothing to consolidate" apart from "consolidation unconfigured" (#107 review):
+ * if this session captured anything, `observe`'s own `ensureGenesis` would already have
+ * created the store, so "no store" here means no observation has ever passed the capture
+ * filter for this root — there is nothing to distill, and running one anyway would be the
+ * first write of a session that only read files.
+ */
+export function moriStoreExists(root: string): boolean {
+  return projectStoreExists(moriProjectId(root));
 }
 
 export interface CreateMoriKernelOptions {

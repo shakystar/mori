@@ -3,7 +3,7 @@ import type { ConsolidatorLlm } from "@mori/kernel";
 import { createMoriAgent, createMoriModels, type MoriKernel } from "../agent/index.js";
 import { defaultCredentialsPath, FileCredentialStore } from "../auth/credential-store.js";
 import { getConsolidatorLlm, resolveConsolidatorConfig } from "../external/consolidator/index.js";
-import { createMoriKernel } from "../kernel/index.js";
+import { createMoriKernel, moriStoreExists } from "../kernel/index.js";
 import { consolidateOnSessionEnd } from "./consolidation.js";
 import { unauthenticatedMessage } from "./messages.js";
 import type { RunCliDeps } from "./types.js";
@@ -84,6 +84,24 @@ export async function prepareAgent(
 }
 
 /**
+ * The `llm` a session-end trigger should actually see: `undefined` (quiet no-op,
+ * `consolidation.ts`'s existing contract) when the real on-disk store this session ran
+ * against was never created. `observe`'s own `ensureGenesis` creates that store the moment
+ * anything passes the capture filter, so "no store" here means nothing did — running a
+ * boundary anyway would be the first write of a session that only read files (README's
+ * "no trace on disk" guarantee, #107 review). Only second-guesses the trigger for the real
+ * kernel (`deps.kernel` unset, per its own doc in `cli/types.ts`) — an injected kernel
+ * (tests) has no on-disk store this check could observe.
+ */
+export function sessionEndLlm(
+  llm: ConsolidatorLlm | undefined,
+  deps: RunCliDeps,
+): ConsolidatorLlm | undefined {
+  if (deps.kernel) return llm;
+  return moriStoreExists(deps.root ?? process.cwd()) ? llm : undefined;
+}
+
+/**
  * Wires a single prompt end to end and returns its exit code. This is the runtime-wiring
  * concern of `runCli` (index.ts), split out from user-facing messages and argv parsing.
  */
@@ -110,7 +128,7 @@ export async function runPrompt(
     // Session-end consolidation trigger (#107). After drain so the turn's own
     // observations are in the window being consolidated. Never throws — see
     // consolidation.ts — so a bad extractor cannot change this turn's exit code.
-    await consolidateOnSessionEnd(kernel, llm, io.stderr);
+    await consolidateOnSessionEnd(kernel, sessionEndLlm(llm, deps), io.stderr);
   }
   io.stdout("\n");
 
