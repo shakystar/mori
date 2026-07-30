@@ -132,8 +132,18 @@ function isSelfKey(key: string): boolean {
  * a foreign member's legacy block rides in under ITS projectId and must not
  * land in the self lane (it tripped doctor's one-SELF-identity check and
  * misattributed foreign memories as self during the 3.0.0 dogfood).
+ *
+ * Exported (#113) so a reader OUTSIDE the projection layer — the
+ * event-log-side `consolidate()` boundary — can apply this exact same
+ * self/foreign test to raw events, instead of re-deriving its own notion of
+ * "self lane" and risking divergence from {@link laneWhere}'s projection-table
+ * criterion.
  */
-function laneOf(event: DomainEvent, selfProjectId: string | undefined, isUnion: boolean): string {
+export function laneOf(
+  event: DomainEvent,
+  selfProjectId: string | undefined,
+  isUnion: boolean,
+): string {
   const source = event.sourceProjectId;
   if (source != null) {
     return source === selfProjectId ? SELF_LANE : source;

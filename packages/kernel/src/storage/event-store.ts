@@ -241,6 +241,21 @@ export async function readEventsSince(
   return rows.map(rowToEvent);
 }
 
+/**
+ * Every `project.created` (genesis) event in the log, in `seq` order. Cheap
+ * even on a large store — a workspace union has at most one per member, so
+ * this is a handful of rows regardless of total event count. Used (#113) to
+ * resolve `laneOf`'s `isUnion` flag without a full `readEvents` replay, e.g.
+ * when a boundary needs the self/foreign classification for a `readEventsSince`
+ * window without paying for the whole log.
+ */
+export async function readGenesisEvents(projectId: string): Promise<DomainEvent[]> {
+  const rows = getDb(projectId)
+    .prepare("SELECT * FROM events WHERE type = 'project.created' ORDER BY seq")
+    .all() as EventRow[];
+  return rows.map(rowToEvent);
+}
+
 /** The id of the newest event (max `seq`), or undefined for an empty log.
  *  Cheap local head probe — a watcher's push gate can compare this against a
  *  persisted push watermark so an idle tick never builds the full event array
