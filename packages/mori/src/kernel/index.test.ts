@@ -144,6 +144,39 @@ describe("createAgentEventObserver", () => {
     // ones there is nothing to capture.
     expect(observe(toolEnd("c1", "bash"))).toBeUndefined();
   });
+
+  it("ignores a write call whose arguments carry no path", () => {
+    const observe = createAgentEventObserver();
+
+    observe(toolStart("c1", "edit_file", { oldString: "a", newString: "b" }));
+
+    expect(observe(toolEnd("c1", "edit_file"))).toBeUndefined();
+  });
+
+  it("ignores a shell call whose arguments carry no command", () => {
+    const observe = createAgentEventObserver();
+
+    observe(toolStart("c1", "bash", { timeoutMs: 1000 }));
+
+    expect(observe(toolEnd("c1", "bash"))).toBeUndefined();
+  });
+
+  it("keeps concurrent calls' arguments apart, keyed by their own tool-call id", () => {
+    const observe = createAgentEventObserver();
+
+    observe(toolStart("c1", "edit_file", { path: "a.ts" }));
+    observe(toolStart("c2", "bash", { command: "pnpm test" }));
+
+    // c2 ends first: c1's remembered path must not have been touched or dropped.
+    expect(observe(toolEnd("c2", "bash"))).toEqual({
+      toolName: "bash",
+      toolInputText: "pnpm test",
+    });
+    expect(observe(toolEnd("c1", "edit_file"))).toEqual({
+      toolName: "edit_file",
+      toolInputText: "a.ts",
+    });
+  });
 });
 
 describe("mori turn -> sqlite store", () => {
