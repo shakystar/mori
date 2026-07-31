@@ -44,11 +44,14 @@ export async function resolveConflict(params: ResolveConflictParams): Promise<Co
   // unchanged projection, both pass the transition check, and then append
   // conflicting outcomes (e.g. `resolved` and `escalated`) that replay
   // (projector.ts) would apply as a last-write-wins overwrite, landing on a
-  // status the state machine forbids. This is safe ONLY under the kernel's
-  // documented single-writer premise (consolidate-service.ts:43 — "there is
-  // no second process to serialize against"); the moment a concurrent caller
-  // of `resolveConflict` exists, this read-check-append span must be wrapped
-  // in a transaction (#118 item 5 — deliberately no lock/CAS added here).
+  // status the state machine forbids. It is unguarded only because this
+  // function has no production caller yet — it is reachable from tests alone.
+  // The premise it used to cite (consolidate-service's "there is no second
+  // process to serialize against") is gone: #132 established that two mori
+  // processes DO open the same store, and gave the kernel a project-scoped
+  // lock (`storage/project-lock.ts`) for exactly these spans. Whoever wires the
+  // first real caller must take that lock here — or wrap the span in a
+  // transaction (#118 item 5 — deliberately no CAS added here).
   const existing = getConflict(params.projectId, params.conflictId);
   if (!existing) {
     throw new MemorizeError(`Conflict not found: ${params.conflictId}`);
