@@ -311,3 +311,48 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: bash .github/scripts/recheck-report.sh
 
+  # discover가 죽으면 위 report 잡의 if가 막아 보고가 한 건도 나가지 않는다. CONTRIBUTING.md
+  # `:124` 기준으로 **코멘트 없음은 통과**이므로 그 침묵이 곧 false-green이다 — 실행이 레드로
+  # 남아도 owner의 머지 판단 근거는 PR 코멘트다 (#125 항목 3).
+  # 이 잡은 판정을 하지 않는다. 열린 PR에 "판정 불가"만 남겨 침묵을 없앤다.
+  report-discovery-failure:
+    name: Report that PR selection failed
+    needs: discover
+    if: ${{ !cancelled() && needs.discover.result == 'failure' }}
+    runs-on: ubuntu-latest
+    # report 잡과 같은 이유로 쓰기 토큰을 쥔다. PR 코드는 체크아웃하지도 실행하지도 않는다.
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Checkout scripts from the default branch
+        uses: actions/checkout@v4
+        with:
+          # discover가 죽어 base_sha가 없다. discover와 같은 신뢰 ref에서 가져온다.
+          ref: ${{ github.event.repository.default_branch }}
+          sparse-checkout: .github/scripts
+
+      - name: List the PRs to warn
+        id: fallback
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_DRAFT: ${{ github.event.pull_request.draft }}
+        run: bash .github/scripts/recheck-fallback-prs.sh
+
+      - name: Comment that the verdict is unavailable
+        if: steps.fallback.outputs.count != '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PRS: ${{ steps.fallback.outputs.prs }}
+          # 판정 아티팩트가 있을 수 없는 경로다. 빈 디렉터리를 주면 recheck-report.sh가
+          # 전건을 "판정 불가"로 보고한다 — 부재를 그린으로 단정하지 않는 기존 규율 그대로다.
+          RESULTS_DIR: ${{ runner.temp }}/no-results
+          NO_RESULT_DETAIL: >-
+            재검증 대상 선정(discover) 잡이 실패해 이 PR을 현재 `main` 기준으로 검증하지
+            못했습니다. 아래 실행 로그에서 원인을 확인하세요.
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: bash .github/scripts/recheck-report.sh
