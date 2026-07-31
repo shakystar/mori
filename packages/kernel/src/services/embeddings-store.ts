@@ -90,16 +90,21 @@ export function deleteEmbedding(projectId: string, entityId: string): void {
  * cosine comparison against a new-model query vector — the filter lives in the
  * SQL `WHERE`, not a JS post-filter, so a large corpus doesn't pay to read rows
  * it will immediately discard.
+ *
+ * `kind`/`model` gate on `!== undefined`, not truthiness: omit the argument to
+ * skip the filter, pass `""` to mean "match rows stored with that literal
+ * value". A truthy check would silently drop the SQL predicate for `""` and
+ * return the whole table — see mori#121.
  */
 export function listEmbeddings(projectId: string, kind?: string, model?: string): EmbeddingRow[] {
   const db = getDb(projectId);
   const clauses: string[] = [];
   const params: string[] = [];
-  if (kind) {
+  if (kind !== undefined) {
     clauses.push("kind = ?");
     params.push(kind);
   }
-  if (model) {
+  if (model !== undefined) {
     clauses.push("model = ?");
     params.push(model);
   }

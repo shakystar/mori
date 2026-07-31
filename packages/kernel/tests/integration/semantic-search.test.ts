@@ -12,7 +12,11 @@ import {
   ensureEmbeddings,
   reciprocalRankFusion,
 } from "../../src/services/embeddings-service.js";
-import { getEmbedding, listEmbeddings } from "../../src/services/embeddings-store.js";
+import {
+  getEmbedding,
+  listEmbeddings,
+  upsertEmbedding,
+} from "../../src/services/embeddings-store.js";
 import { rebuildProjectProjection } from "../../src/services/projection-store.js";
 import {
   hybridSearch,
@@ -248,6 +252,65 @@ describe("semantic search (P3-c)", () => {
       mismatchedEmbedder,
     );
     expect(scores.size).toBe(0);
+  });
+
+  it('mori#121: listEmbeddings("") matches only empty-model rows, not the whole table', async () => {
+    const projectId = await seedProject();
+    await rebuildProjectProjection(projectId); // creates the embeddings table (user_version >= 8)
+
+    // Two rows stored under distinct, non-empty models, via the store directly
+    // — ensureEmbeddings always converges the whole corpus to its embedder's
+    // model (mori#73), so it can't produce two models coexisting; the model
+    // filter itself is what's under test here, not the embedding pipeline.
+    upsertEmbedding(projectId, {
+      entityId: "e-a",
+      kind: "memory",
+      model: "A",
+      dim: 3,
+      vector: [1, 0, 0],
+      textHash: "h-a",
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+    upsertEmbedding(projectId, {
+      entityId: "e-b",
+      kind: "memory",
+      model: "B",
+      dim: 3,
+      vector: [0, 1, 0],
+      textHash: "h-b",
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+    expect(listEmbeddings(projectId, "memory")).toHaveLength(2);
+
+    // A truthy guard on `model` would treat "" the same as omitted and return
+    // both rows; the fix keeps the SQL predicate for "" so it matches nothing.
+    expect(listEmbeddings(projectId, "memory", "")).toHaveLength(0);
+    expect(listEmbeddings(projectId, "memory", "A")).toHaveLength(1);
+  });
+
+  it('mori#121: an embedder with model "" does not pull in a corpus embedded under a real model', async () => {
+    const projectId = await seedProject();
+    const idA = await seedMemory(projectId, MEM_A); // "PostgreSQL" — also an FTS hit
+    await seedMemory(projectId, MEM_B);
+    await rebuildProjectProjection(projectId);
+
+    // Corpus embedded under a real model (e.g. text-embedding-3-small).
+    const realEmbedder = fakeEmbedder(VECTORS, "text-embedding-3-small");
+    await ensureEmbeddings(projectId, realEmbedder);
+    // Corpus is actually populated — guards against a false-green from an
+    // empty corpus masking the filter never running at all (mori#96 review).
+    expect(listEmbeddings(projectId, "memory")).toHaveLength(2);
+
+    // MEMORIZE_EMBEDDINGS_MODEL resolved to "" (e.g. an unset env var passed
+    // through `??` pre-#121) — same vector dimensionality, so this must be the
+    // model filter dropping the rows, not the dimension guard downstream.
+    const emptyModelEmbedder = fakeEmbedder(VECTORS, "");
+    expect(await semanticSearch(projectId, "postgresql", 10, emptyModelEmbedder)).toEqual([]);
+
+    const lexical = searchProject(projectId, "postgresql");
+    const hybrid = await hybridSearch(projectId, "postgresql", 10, emptyModelEmbedder);
+    expect(hybrid.map((h) => h.entityId)).toEqual(lexical.map((h) => h.entityId));
+    expect(hybrid.map((h) => h.entityId)).toEqual([idA]);
   });
 
   it("ensureEmbeddings never throws when the embedder fails", async () => {

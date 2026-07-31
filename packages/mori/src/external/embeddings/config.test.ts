@@ -1,7 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { getEmbedder } from "./index.js";
-import { resolveEmbeddingsConfig } from "./config.js";
+import {
+  DEFAULT_EMBEDDINGS_ENDPOINT,
+  DEFAULT_EMBEDDINGS_MODEL,
+  resolveEmbeddingsConfig,
+} from "./config.js";
 
 // Moved from packages/kernel/tests/integration/semantic-search.test.ts in #82:
 // MEMORIZE_EMBEDDINGS_* resolution is a harness concern now. Every case passes
@@ -18,6 +22,20 @@ describe("resolveEmbeddingsConfig", () => {
     });
     expect(local?.endpoint).toBe("http://localhost:11434/v1");
     expect(local?.apiKey).toBeUndefined();
+  });
+
+  it('mori#121: an explicitly-empty MEMORIZE_EMBEDDINGS_MODEL/ENDPOINT falls back to the default, not ""', () => {
+    // `MEMORIZE_EMBEDDINGS_MODEL=` (empty assignment), a docker-compose YAML
+    // null, or an unset CI secret injection all produce "" here, not undefined
+    // — `??` would let it through and silently disable the model filter in
+    // listEmbeddings (mori#121).
+    const resolved = resolveEmbeddingsConfig({
+      MEMORIZE_EMBEDDINGS_API_KEY: "k",
+      MEMORIZE_EMBEDDINGS_ENDPOINT: "",
+      MEMORIZE_EMBEDDINGS_MODEL: "",
+    });
+    expect(resolved?.model).toBe(DEFAULT_EMBEDDINGS_MODEL);
+    expect(resolved?.endpoint).toBe(DEFAULT_EMBEDDINGS_ENDPOINT);
   });
 });
 
