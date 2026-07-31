@@ -5,25 +5,36 @@
 # 위함이다. 이 스크립트는 `pull-requests: write` 토큰을 쥐는 유일한 지점이므로 PR에서 온
 # 코드를 돌리는 잡과 **분리된 잡**에서만 실행된다 (#112 항목 5).
 #
-# 코멘트를 쓰기 전에 대상 PR의 현재 head를 조회한다 — 낡은 판정이 최신 판정을 덮지 않게 하기
-# 위함이다(current_head 참조). 그래서 이 스크립트에는 PR 읽기 권한도 필요하다.
+# 코멘트를 쓰기 전에 대상 PR의 현재 head와 현재 main을 조회한다 — 낡은 판정이 최신 판정을
+# 덮지 않게 하기 위함이다(current_head · current_main 참조). 그래서 이 스크립트에는 PR·커밋
+# 읽기 권한도 필요하다.
 #
 # 입력(환경변수):
-#   REPO         owner/repo
-#   PRS          코멘트를 남길 PR 번호 JSON 배열
-#   UNVERIFIED   그중 대상 선정 단계에서 분류에 실패한 PR 번호 JSON 배열 (기본 [])
-#   RESULTS_DIR  recheck-result-<PR>/result.json 들이 풀려 있는 디렉터리 (기본 results)
-#   BASE_SHA     검증 기준 main 커밋
-#   RUN_URL      워크플로 실행 URL
-#   BOT_LOGIN    게이트 코멘트의 작성자로 인정할 로그인 (기본 github-actions[bot])
+#   REPO           owner/repo
+#   PRS            코멘트를 남길 PR 번호 JSON 배열
+#   UNVERIFIED     그중 대상 선정 단계에서 분류에 실패한 PR 번호 JSON 배열 (기본 [])
+#   RESULTS_DIR    recheck-result-<PR><RESULT_SUFFIX>/result.json 들이 풀려 있는 디렉터리
+#                  (기본 results)
+#   RESULT_SUFFIX  판정 아티팩트 이름의 PR 번호 뒤에 붙는 접미사 (기본 없음).
+#                  워크플로는 시도별로 갈린 이름(-attempt-<run_attempt>)을 쓴다.
+#   BASE_SHA       검증 기준 main 커밋
+#   BASE_REF       BASE_SHA의 신선도를 대조할 브랜치 (기본 main)
+#   NO_RESULT_DETAIL
+#                  판정 파일이 없을 때 본문에 적을 원인 (기본: 재검증 잡이 결과를 남기지 못함).
+#                  discover 실패 폴백 경로가 자기 원인으로 덮어쓴다.
+#   RUN_URL        워크플로 실행 URL
+#   BOT_LOGIN      게이트 코멘트의 작성자로 인정할 로그인 (기본 github-actions[bot])
 set -euo pipefail
 
 : "${REPO:?REPO is required}"
 : "${PRS:?PRS is required}"
 : "${RUN_URL:?RUN_URL is required}"
 RESULTS_DIR="${RESULTS_DIR:-results}"
+RESULT_SUFFIX="${RESULT_SUFFIX:-}"
 UNVERIFIED="${UNVERIFIED:-[]}"
 BASE_SHA="${BASE_SHA:-}"
+BASE_REF="${BASE_REF:-main}"
+NO_RESULT_DETAIL="${NO_RESULT_DETAIL:-재검증 잡이 결과를 남기지 못했습니다 (잡 실패·취소 또는 아티팩트 누락).}"
 # 게이트로 인정할 코멘트의 작성자. 마커는 워크플로 파일에 평문으로 있고 이 리포에는
 # 에이전트가 CI 코멘트를 인용하는 관례가 있다 — 작성자를 확인하지 않으면 인용 코멘트가
 # 게이트를 영구히 가로챈다 (#112 항목 2).
@@ -60,6 +71,29 @@ current_head() {
     return 0
   fi
   # 개행·공백이 섞여 오면 비교가 어긋난다. SHA 모양이 아니면 확인 불가로 다룬다.
+  sha="$(tr -d '[:space:]' <<<"$sha")"
+  if [[ "$sha" =~ ^[0-9a-f]{7,40}$ ]]; then
+    echo "$sha"
+  fi
+}
+
+# 이 판정이 **지금의** main 기준인지 확인한다. head 가드(current_head)와 짝이고, 막는 것은
+# 다음 전개다 (#119 Codex 1번 — head만 보면 통과한다):
+#   T1 PR N의 synchronize 실행이 base A로 검증을 시작한다 → 그린
+#   T2 main에 push → 스윕이 base B로 같은 PR을 검증한다 → 레드 (새 main이 이 PR을 깨뜨린다)
+#   T3 스윕이 먼저 끝나 마커 코멘트를 🔴로 PATCH             (base B — 최신)
+#   T4 더 느린 synchronize 실행이 같은 코멘트를 🟢로 PATCH   (base A — 낡음)
+# head는 T1~T4 내내 그대로이므로 head 가드는 통과한다. concurrency 그룹이 갈려
+# (recheck-open-prs-${github.ref}) 두 실행은 서로를 취소하지도 못한다.
+#
+# 실패하면 빈 문자열을 돌려준다 = "확인 불가"이고, 확인 불가는 그린이 아니다.
+# 호출부는 이 값을 실행 시작 시점에 한 번만 구한다(CURRENT_MAIN) — PR마다 다시 물으면 보고
+# 도중 main이 움직였을 때 같은 스윕 안에서 PR별로 다른 기준이 적용된다.
+current_main() {
+  local sha
+  if ! sha=$(gh api "repos/${REPO}/commits/${BASE_REF}" --jq '.sha'); then
+    return 0
+  fi
   sha="$(tr -d '[:space:]' <<<"$sha")"
   if [[ "$sha" =~ ^[0-9a-f]{7,40}$ ]]; then
     echo "$sha"
@@ -113,11 +147,12 @@ build_body() {
       echo "(rebase·force push 금지)."
       ;;
     stale)
-      # 낡은/확인 불가 head의 판정. 그린도 레드도 아니고, 무엇보다 **그린이 아니다**.
-      echo "⛔ **판정 불가 — 이 재검증 결과가 현재 PR head 기준인지 확인되지 않습니다.**"
+      # 낡은/확인 불가 head 또는 base의 판정. 그린도 레드도 아니고, 무엇보다 **그린이 아니다**.
+      # 어느 쪽이 어긋났는지는 아래 detail이 밝힌다.
+      echo "⛔ **판정 불가 — 이 재검증 결과가 현재 PR head·현재 \`main\` 기준인지 확인되지 않습니다.**"
       echo
-      echo "**이 코멘트는 그린도 레드도 아닙니다.** 재검증에 쓰인 head가 현재 head와 다르거나"
-      echo "확인되지 않아, 이 결과를 현재 head의 근거로 삼을 수 없습니다."
+      echo "**이 코멘트는 그린도 레드도 아닙니다.** 재검증에 쓰인 PR head 또는 base가 현재의 것과"
+      echo "다르거나 확인되지 않아, 이 결과를 현재 상태의 근거로 삼을 수 없습니다."
       if [ -n "$detail" ]; then
         echo
         echo "원인: ${detail}"
@@ -153,7 +188,7 @@ build_body() {
 # 꺼진다(recheck-select.sh의 classify와 같은 이유). 모든 실패를 명시적으로 검사한다.
 report_one() {
   local pr="$1"
-  local dir="${RESULTS_DIR}/recheck-result-${pr}"
+  local dir="${RESULTS_DIR}/recheck-result-${pr}${RESULT_SUFFIX}"
   local result="${dir}/result.json"
   local logfile="${dir}/checks.log"
   local verdict detail failed merge_sha head_sha force_new=0
@@ -179,7 +214,7 @@ report_one() {
     if jq -e --argjson n "$pr" 'index($n) != null' <<<"$UNVERIFIED" >/dev/null; then
       detail="대상 선정 단계가 이 PR을 분류하지 못했습니다 (GitHub API 조회 실패 등)."
     else
-      detail="재검증 잡이 결과를 남기지 못했습니다 (잡 실패·취소 또는 아티팩트 누락)."
+      detail="$NO_RESULT_DETAIL"
     fi
   fi
 
@@ -216,6 +251,34 @@ report_one() {
     fi
   fi
 
+  # 같은 질문을 base에 대해서도 한다: 이 판정이 **지금의** main 기준인가 (current_main의
+  # T1–T4 참조). head 가드와 갈라지는 점이 하나 있다 — **그린에만** 적용한다.
+  #
+  #   왜 그린에만인가. 이 가드가 막는 고장은 "낡은 base의 그린이 최신 base의 레드를 덮는다"
+  #   하나뿐이다. 낡은 base의 레드·충돌은 그 고장이 아니고, 그것을 강등하면 게이트가 근거를
+  #   잃기만 한다 (레드 과잉 강등 금지 — PR #119 라운드 2에서 확정한 규율).
+  #
+  #   왜 게이트가 상시 침묵하지 않는가. base가 낡는 원인은 오직 main push이고, 그 push가 곧
+  #   열린 PR 전체를 도는 새 스윕을 띄운다. 그 스윕의 base는 자기 push의 sha이고
+  #   cancel-in-progress가 앞선 스윕을 취소하므로 신선하다. 즉 이 가드가 발동할 때는 신선한
+  #   판정이 이미 쓰였거나 곧 쓰인다 — 가드는 그 신선한 판정을 낡은 그린이 덮는 것만 막는다.
+  #   신선한 base의 실행은 이 분기에 들어오지 않으므로 정상 운영에서 판정이 강등되지 않는다.
+  if [ "$verdict" = "green" ]; then
+    if [ -n "$CURRENT_MAIN" ] && [ -n "$BASE_SHA" ] && [ "$CURRENT_MAIN" != "$BASE_SHA" ]; then
+      if [ -n "$existing" ]; then
+        # 기존 코멘트에 최신 base의 판정이 이미 있을 수 있다. 낡은 그린으로 덮지 않는다.
+        log "- #${pr}: 검증 base(\`${BASE_SHA}\`)가 현재 ${BASE_REF}(\`${CURRENT_MAIN}\`)와 달라 기존 코멘트 ${existing}를 덮지 않았습니다 (green)"
+        return 0
+      fi
+      # 기존 코멘트가 없으면 침묵이 곧 통과다 (CONTRIBUTING.md). 판정 불가로 남긴다.
+      verdict="stale"
+      detail="이 재검증은 base \`${BASE_SHA}\` 기준인데 현재 \`${BASE_REF}\`는 \`${CURRENT_MAIN}\`입니다 — 판정이 낡았습니다."
+    elif [ -z "$CURRENT_MAIN" ] || [ -z "$BASE_SHA" ]; then
+      verdict="stale"
+      detail="현재 \`${BASE_REF}\` 커밋을 확인하지 못해(조회 실패 또는 base 없음) 이 그린이 최신 base 기준인지 알 수 없습니다."
+    fi
+  fi
+
   local body="${TMPDIR:-/tmp}/recheck-body-${pr}.md"
   if ! build_body "$verdict" "$detail" "$failed" "$merge_sha" "$head_sha" "$logfile" >"$body"; then
     log "- #${pr}: 코멘트 본문 생성 실패"
@@ -249,6 +312,9 @@ if ! prs_list=$(jq -r '.[] | select(type == "number") | tostring' <<<"$PRS"); th
   echo "PRS를 PR 번호 배열로 읽지 못했습니다: ${PRS}" >&2
   exit 1
 fi
+
+# 현재 main은 실행당 한 번만 조회한다 (current_main 참조).
+CURRENT_MAIN="$(current_main)"
 
 overall=0
 for pr in $prs_list; do

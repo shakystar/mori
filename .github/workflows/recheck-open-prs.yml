@@ -245,11 +245,21 @@ jobs:
           LOG: ${{ runner.temp }}/checks.log
         run: bash "${RUNNER_TEMP}/base-scripts/recheck-verdict.sh"
 
+      # 아티팩트 이름은 **시도별로** 갈린다. upload-artifact@v4는 같은 run 안에 같은 이름이
+      # 있으면 업로드를 거부하고(409) 이전 시도의 아티팩트는 그 run에 그대로 남는다. 그러면
+      # 재실행에서 판정이 새로 계산돼도 업로드가 실패하고, report 잡은 `!cancelled()`라 계속
+      # 진행해 **이전 시도의** 아티팩트를 받아 낡은 그린을 보고한다. head도 base도 그대로라
+      # 두 신선도 가드 모두 통과한다 — 하필 recheck-report.sh가 사람에게 권하는 복구 경로가
+      # 곧 false-green 경로다 (#125 항목 2).
+      #
+      # `overwrite: true`로는 부족하다: 업로드가 **다른 이유로** 실패해도 이전 시도의
+      # 아티팩트가 남아 같은 일이 난다. 이름을 가르고 다운로드 pattern도 현재 시도만
+      # 매칭시켜야 "없으면 판정 불가"로 수렴한다.
       - name: Upload the verdict
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
-          name: recheck-result-${{ matrix.pr }}
+          name: recheck-result-${{ matrix.pr }}-attempt-${{ github.run_attempt }}
           path: ${{ runner.temp }}/result
           retention-days: 7
           if-no-files-found: error
@@ -280,7 +290,14 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: results
-          pattern: recheck-result-*
+          # **현재 시도의** 아티팩트만 받는다. `recheck-result-*`는 이전 시도의 것까지
+          # 받아 갔다 (#125 항목 2 — 업로드 스텝 주석 참조).
+          #
+          # 대가: "실패한 잡만 재실행"에서는 앞선 시도에 성공한 recheck 잡이 다시 돌지
+          # 않으므로 그 PR의 판정이 이번 시도에 없다. 그 PR은 그린이 아니라 **판정 불가**로
+          # 보고된다 — 낡은 판정을 그린으로 보고하는 것보다 이쪽이 안전하고, 전체 재실행이면
+          # 모두 다시 계산된다.
+          pattern: recheck-result-*-attempt-${{ github.run_attempt }}
 
       - name: Comment on each PR
         env:
@@ -289,6 +306,53 @@ jobs:
           PRS: ${{ needs.discover.outputs.report }}
           UNVERIFIED: ${{ needs.discover.outputs.unverified }}
           RESULTS_DIR: results
+          RESULT_SUFFIX: -attempt-${{ github.run_attempt }}
           BASE_SHA: ${{ needs.discover.outputs.base_sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: bash .github/scripts/recheck-report.sh
+
+  # discover가 죽으면 위 report 잡의 if가 막아 보고가 한 건도 나가지 않는다. CONTRIBUTING.md
+  # `:124` 기준으로 **코멘트 없음은 통과**이므로 그 침묵이 곧 false-green이다 — 실행이 레드로
+  # 남아도 owner의 머지 판단 근거는 PR 코멘트다 (#125 항목 3).
+  # 이 잡은 판정을 하지 않는다. 열린 PR에 "판정 불가"만 남겨 침묵을 없앤다.
+  report-discovery-failure:
+    name: Report that PR selection failed
+    needs: discover
+    if: ${{ !cancelled() && needs.discover.result == 'failure' }}
+    runs-on: ubuntu-latest
+    # report 잡과 같은 이유로 쓰기 토큰을 쥔다. PR 코드는 체크아웃하지도 실행하지도 않는다.
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Checkout scripts from the default branch
+        uses: actions/checkout@v4
+        with:
+          # discover가 죽어 base_sha가 없다. discover와 같은 신뢰 ref에서 가져온다.
+          ref: ${{ github.event.repository.default_branch }}
+          sparse-checkout: .github/scripts
+
+      - name: List the PRs to warn
+        id: fallback
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_DRAFT: ${{ github.event.pull_request.draft }}
+        run: bash .github/scripts/recheck-fallback-prs.sh
+
+      - name: Comment that the verdict is unavailable
+        if: steps.fallback.outputs.count != '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PRS: ${{ steps.fallback.outputs.prs }}
+          # 판정 아티팩트가 있을 수 없는 경로다. 빈 디렉터리를 주면 recheck-report.sh가
+          # 전건을 "판정 불가"로 보고한다 — 부재를 그린으로 단정하지 않는 기존 규율 그대로다.
+          RESULTS_DIR: ${{ runner.temp }}/no-results
+          NO_RESULT_DETAIL: >-
+            재검증 대상 선정(discover) 잡이 실패해 이 PR을 현재 `main` 기준으로 검증하지
+            못했습니다. 아래 실행 로그에서 원인을 확인하세요.
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: bash .github/scripts/recheck-report.sh
