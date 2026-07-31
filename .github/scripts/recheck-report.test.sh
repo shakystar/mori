@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # recheck-report.sh 테스트 — 판정 부재가 그린으로 보고되지 않고(#112 항목 1), 게이트 코멘트가
-# 봇 작성자로 고정되며 PATCH 실패가 보고를 사라지게 하지 않는지(#112 항목 2), 그리고 낡은
-# head의 판정이 최신 판정을 덮지 않는지(#112 리뷰 1번) 확인한다.
+# 봇 작성자로 고정되며 PATCH 실패가 보고를 사라지게 하지 않는지(#112 항목 2), 낡은
+# head의 판정이 최신 판정을 덮지 않는지(#112 리뷰 1번), 그리고 낡은 **base**의 그린이 최신
+# base의 레드를 덮지 않는지(#125 항목 1 = PR #119 Codex 1번) 확인한다.
 set -uo pipefail
 
 SUITE_NAME="recheck-report"
@@ -10,6 +11,9 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "${DIR}/_test-lib.sh"
 
 BASE="1111111111111111111111111111111111111111"
+# 검증에 쓴 base(BASE)가 곧 현재 main인 것이 정상이다. MAIN_B는 그 뒤 main에 push가 들어와
+# base가 낡은 상태 — T1~T4 전개의 base B다.
+MAIN_B="2222222222222222222222222222222222222222"
 # HEAD_A는 "판정이 본 head"이자 기본 시나리오의 현재 head다. HEAD_B는 그 뒤에 developer가
 # push한 새 head — 이 둘이 갈리는 것이 낡은 판정 시나리오다.
 HEAD_A="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -20,7 +24,7 @@ BOT="github-actions[bot]"
 MARKER="<!-- recheck-open-prs -->"
 
 reset_scenario() {
-  unset GH_ROUTES GH_FAIL
+  unset GH_ROUTES GH_FAIL RESULT_SUFFIX NO_RESULT_DETAIL BASE_SHA_OVERRIDE
   ROUTE_SEQ=0
   rm -rf "${SANDBOX}/results"
   mkdir -p "${SANDBOX}/results"
@@ -29,9 +33,9 @@ reset_scenario() {
   : >"$GITHUB_STEP_SUMMARY"
 }
 
-# make_result <pr> <verdict> <detail> <failed> <merge_sha> <head_sha>
+# make_result <pr> <verdict> <detail> <failed> <merge_sha> <head_sha> [artifact_suffix]
 make_result() {
-  local d="${SANDBOX}/results/recheck-result-$1"
+  local d="${SANDBOX}/results/recheck-result-$1${7:-}"
   mkdir -p "$d"
   jq -n --argjson pr "$1" --arg v "$2" --arg dt "$3" --arg f "$4" --arg m "$5" --arg h "$6" \
     '{pr: $pr, verdict: $v, detail: $dt, failed: $f, merge_sha: $m, head_sha: $h}' \
@@ -57,10 +61,26 @@ default_head_route() {
   esac
 }
 
+# main_route <sha> — 현재 main 커밋 조회 응답
+main_route() {
+  route "commits/main" "{\"sha\":\"$1\"}"
+}
+
+# 검증에 쓴 base가 곧 현재 main인 것이 기본값이다(정상 운영). 낡은 base 시나리오는 각 케이스가
+# main_route로 따로 등록한다 — default_head_route와 같은 이유로 마지막에 붙는다.
+default_main_route() {
+  case "${GH_ROUTES:-}" in
+    *"commits/main"*) ;;
+    *) main_route "$BASE" ;;
+  esac
+}
+
 run_report() {
   default_head_route
+  default_main_route
   env REPO=o/r PRS="${PRS:-[7]}" UNVERIFIED="${UNVERIFIED:-[]}" \
-    RESULTS_DIR="${SANDBOX}/results" BASE_SHA="$BASE" \
+    RESULTS_DIR="${SANDBOX}/results" BASE_SHA="${BASE_SHA_OVERRIDE-$BASE}" \
+    RESULT_SUFFIX="${RESULT_SUFFIX:-}" NO_RESULT_DETAIL="${NO_RESULT_DETAIL:-}" \
     RUN_URL="https://example.test/run/1" BOT_LOGIN="$BOT" TMPDIR="$SANDBOX" \
     GH_LOG="$GH_LOG" GH_BODY_LOG="$GH_BODY_LOG" \
     GH_ROUTES="${GH_ROUTES:-}" GH_FAIL="${GH_FAIL:-}" \
@@ -246,6 +266,184 @@ fail_calls_matching "pulls/7"
 route "issues/7/comments" '[]'
 run_report
 assert_contains "$(cat "$GH_BODY_LOG")" "현재 main 기준으로 레드입니다"
+
+# --- 낡은 base의 그린이 최신 base의 레드를 덮지 않는다 (#125 항목 1) --------------------
+# T1 PR의 synchronize 실행이 base A로 검증 시작 → 그린
+# T2 main에 push → 스윕이 base B로 같은 PR을 검증 → 레드
+# T3 스윕이 먼저 끝나 코멘트를 🔴로 PATCH        (base B — 최신)
+# T4 더 느린 synchronize 실행이 🟢로 PATCH       (base A — 낡음)  ← 막아야 하는 것
+# head는 T1~T4 내내 그대로라 head 가드로는 걸리지 않는다.
+
+it "낡은 base의 그린 판정은 기존 레드 코멘트를 그린으로 덮지 않는다"
+reset_scenario
+make_result 7 green "" "" "$MERGE" "$HEAD_A"
+head_route 7 "$HEAD_A" # head는 일치한다 — 이 가드로는 못 막는다는 것이 이 케이스의 요지
+main_route "$MAIN_B"   # 그 사이 main이 움직였다 = 이 판정의 base는 낡았다
+route "issues/7/comments" "[$(comment 100 "$BOT" "🤖 [ci] ${MARKER} 🔴 레드입니다")]"
+run_report
+assert_eq "no-patch|no-post|0" \
+  "$(grep -q 'method PATCH' "$GH_LOG" && echo patched || echo no-patch)|$(grep -q 'method POST' "$GH_LOG" && echo posted || echo no-post)|${REPORT_RC}"
+
+it "낡은 base의 그린은 기존 봇 코멘트가 없으면 침묵하지 않고 판정 불가로 남긴다"
+reset_scenario
+# 코멘트가 아예 없으면 CONTRIBUTING.md 기준으로 통과다. 낡았다고 침묵하면 곧 false-green이다.
+make_result 7 green "" "" "$MERGE" "$HEAD_A"
+head_route 7 "$HEAD_A"
+main_route "$MAIN_B"
+route "issues/7/comments" '[]'
+run_report
+assert_contains "$(cat "$GH_BODY_LOG")" "판정 불가"
+
+it "낡은 base 판정 본문은 어느 base가 어긋났는지 밝힌다"
+reset_scenario
+make_result 7 green "" "" "$MERGE" "$HEAD_A"
+head_route 7 "$HEAD_A"
+main_route "$MAIN_B"
+route "issues/7/comments" '[]'
+run_report
+assert_contains "$(cat "$GH_BODY_LOG")" "현재 \`main\`는 \`${MAIN_B}\`"
+
+it "낡은 base라도 레드 판정은 강등하지 않고 그대로 보고한다"
+reset_scenario
+# 이 가드가 막는 고장은 "낡은 그린이 최신 레드를 덮는다" 하나다. 레드를 강등하면 근거만 잃는다.
+make_result 7 red "" "pnpm lint" "$MERGE" "$HEAD_A"
+head_route 7 "$HEAD_A"
+main_route "$MAIN_B"
+route "issues/7/comments" "[$(comment 100 "$BOT" "🤖 [ci] ${MARKER} 이전 판정")]"
+run_report
+assert_eq "patched|현재 main 기준으로 레드입니다" \
+  "$(grep -q 'method PATCH' "$GH_LOG" && echo patched || echo no-patch)|$(grep -o '현재 main 기준으로 레드입니다' "$GH_BODY_LOG" | head -1)"
+
+it "낡은 base라도 충돌 판정은 강등하지 않고 그대로 보고한다"
+reset_scenario
+make_result 7 conflict "" "" "" "$HEAD_A"
+head_route 7 "$HEAD_A"
+main_route "$MAIN_B"
+route "issues/7/comments" '[]'
+run_report
+assert_contains "$(cat "$GH_BODY_LOG")" "현재 main과 충돌합니다"
+
+it "현재 main을 조회하지 못하면 그린으로 보고하지 않는다"
+reset_scenario
+make_result 7 green "" "" "$MERGE" "$HEAD_A"
+head_route 7 "$HEAD_A"
+fail_calls_matching "commits/main"
+route "issues/7/comments" "[$(comment 100 "$BOT" "🤖 [ci] ${MARKER} 🔴 레드입니다")]"
+run_report
+assert_eq "판정 불가|no-green" \
+  "$(grep -o '판정 불가' "$GH_BODY_LOG" | head -1)|$(grep -q '🟢' "$GH_BODY_LOG" && echo green || echo no-green)"
+
+it "현재 main을 조회하지 못해도 레드 판정은 그대로 보고한다"
+reset_scenario
+make_result 7 red "" "pnpm lint" "$MERGE" "$HEAD_A"
+head_route 7 "$HEAD_A"
+fail_calls_matching "commits/main"
+route "issues/7/comments" '[]'
+run_report
+assert_contains "$(cat "$GH_BODY_LOG")" "현재 main 기준으로 레드입니다"
+
+it "현재 main을 조회하지 못해도 충돌 판정은 그대로 보고한다"
+reset_scenario
+make_result 7 conflict "" "" "" "$HEAD_A"
+head_route 7 "$HEAD_A"
+fail_calls_matching "commits/main"
+route "issues/7/comments" '[]'
+run_report
+assert_contains "$(cat "$GH_BODY_LOG")" "현재 main과 충돌합니다"
+
+it "BASE_SHA가 비어 있으면 그린으로 보고하지 않는다"
+reset_scenario
+make_result 7 green "" "" "$MERGE" "$HEAD_A"
+head_route 7 "$HEAD_A"
+BASE_SHA_OVERRIDE=""
+route "issues/7/comments" "[$(comment 100 "$BOT" "🤖 [ci] ${MARKER} 🔴 레드입니다")]"
+run_report
+assert_contains "$(cat "$GH_BODY_LOG")" "판정 불가"
+
+# --- 정상 운영에서 게이트가 침묵하지 않는다 (#125 항목 1의 두 번째 완료 조건) ------------
+# push 스윕의 base는 자기 push의 sha이고 cancel-in-progress가 앞선 스윕을 취소하므로 보통
+# 신선하다. 신선하면 아래처럼 판정이 그대로 나간다 — 가드가 게이트를 "판정 불가"로 상시
+# 강등하지 않는다는 근거다.
+
+it "base가 신선하면 그린 판정이 기존 코멘트를 그대로 갱신한다"
+reset_scenario
+make_result 7 green "" "" "$MERGE" "$HEAD_A"
+head_route 7 "$HEAD_A"
+main_route "$BASE"
+route "issues/7/comments" "[$(comment 100 "$BOT" "🤖 [ci] ${MARKER} 🔴 레드입니다")]"
+run_report
+assert_eq "patched|그린입니다" \
+  "$(grep -q 'method PATCH repos/o/r/issues/comments/100' "$GH_LOG" && echo patched || echo no-patch)|$(grep -o '그린입니다' "$GH_BODY_LOG" | head -1)"
+
+it "base가 신선하면 그린 판정이 판정 불가로 강등되지 않는다"
+reset_scenario
+make_result 7 green "" "" "$MERGE" "$HEAD_A"
+head_route 7 "$HEAD_A"
+main_route "$BASE"
+route "issues/7/comments" "[$(comment 100 "$BOT" "🤖 [ci] ${MARKER} 🔴 레드입니다")]"
+run_report
+assert_not_contains "$(cat "$GH_BODY_LOG")" "판정 불가"
+
+it "base가 신선한 스윕에서는 여러 PR의 그린이 모두 그대로 보고된다"
+reset_scenario
+PRS='[7,8]'
+make_result 7 green "" "" "$MERGE" "$HEAD_A"
+make_result 8 green "" "" "$MERGE" "$HEAD_A"
+head_route 7 "$HEAD_A"
+head_route 8 "$HEAD_A"
+main_route "$BASE"
+route "issues/7/comments" "[$(comment 100 "$BOT" "🤖 [ci] ${MARKER} 이전 판정")]"
+route "issues/8/comments" "[$(comment 200 "$BOT" "🤖 [ci] ${MARKER} 이전 판정")]"
+run_report
+assert_eq "2|0" \
+  "$(grep -c 'method PATCH' "$GH_LOG")|$(grep -c '판정 불가' "$GH_BODY_LOG")"
+PRS='[7]'
+
+it "현재 main은 PR 수와 무관하게 실행당 한 번만 조회한다"
+reset_scenario
+# PR마다 다시 물으면 보고 도중 main이 움직였을 때 같은 스윕 안에서 기준이 갈린다.
+PRS='[7,8]'
+make_result 7 green "" "" "$MERGE" "$HEAD_A"
+make_result 8 green "" "" "$MERGE" "$HEAD_A"
+route "issues/7/comments" '[]'
+route "issues/8/comments" '[]'
+run_report
+assert_eq "1" "$(grep -c 'commits/main' "$GH_LOG")"
+PRS='[7]'
+
+# --- 재실행 시 이전 시도의 판정 아티팩트가 보고되지 않는다 (#125 항목 2) ------------------
+# 워크플로는 아티팩트 이름을 recheck-result-<PR>-attempt-<run_attempt>로 시도별로 가르고,
+# download-artifact의 pattern도 현재 시도만 매칭한다. 스크립트 쪽 몫은 그 접미사를 붙인
+# 디렉터리에서만 판정을 읽는 것이다.
+
+it "RESULT_SUFFIX가 붙은 아티팩트 디렉터리에서 판정을 읽는다"
+reset_scenario
+make_result 7 red "" "pnpm lint" "$MERGE" "$HEAD_A" "-attempt-2"
+RESULT_SUFFIX="-attempt-2"
+route "issues/7/comments" '[]'
+run_report
+assert_contains "$(cat "$GH_BODY_LOG")" "현재 main 기준으로 레드입니다"
+
+it "현재 시도의 아티팩트가 없으면 이전 시도의 그린을 보고하지 않는다"
+reset_scenario
+# 재실행에서 업로드가 실패한 경로. 예전 이름(접미사 없음)에는 이전 시도의 그린이 남아 있다.
+make_result 7 green "" "" "$MERGE" "$HEAD_A"
+make_result 7 green "" "" "$MERGE" "$HEAD_A" "-attempt-1"
+RESULT_SUFFIX="-attempt-2"
+route "issues/7/comments" '[]'
+run_report
+assert_eq "판정 불가|no-green" \
+  "$(grep -o '판정 불가' "$GH_BODY_LOG" | head -1)|$(grep -q '🟢' "$GH_BODY_LOG" && echo green || echo no-green)"
+
+# --- discover 실패가 "코멘트 없음"으로 끝나지 않는다 (#125 항목 3) ------------------------
+
+it "NO_RESULT_DETAIL로 판정 부재의 원인을 discover 실패로 밝힐 수 있다"
+reset_scenario
+NO_RESULT_DETAIL="대상 선정(discover) 잡이 실패해 재검증 대상을 정하지 못했습니다."
+route "issues/7/comments" '[]'
+run_report
+assert_eq "posted|대상 선정(discover) 잡이 실패해 재검증 대상을 정하지 못했습니다." \
+  "$(grep -q 'method POST repos/o/r/issues/7/comments' "$GH_LOG" && echo posted || echo no-post)|$(grep -o '대상 선정(discover) 잡이 실패해 재검증 대상을 정하지 못했습니다.' "$GH_BODY_LOG" | head -1)"
 
 it "여러 PR을 보고할 때 각 PR에 코멘트를 남긴다"
 reset_scenario
