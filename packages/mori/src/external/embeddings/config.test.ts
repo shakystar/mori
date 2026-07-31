@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { getEmbedder } from "./index.js";
 import {
@@ -40,16 +40,27 @@ describe("resolveEmbeddingsConfig", () => {
 });
 
 describe("getEmbedder", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
   it("builds an Embedder from config and reports its model", () => {
     const embedder = getEmbedder({ endpoint: "http://x/v1", model: "text-embedding-3-small" });
     expect(embedder?.model).toBe("text-embedding-3-small");
   });
 
-  it("returns undefined when unconfigured, so the kernel gets an explicit off", () => {
-    // Resolve against an EMPTY env, not `undefined` — passing undefined would
-    // fire getEmbedder's `= resolveEmbeddingsConfig()` default and read the
-    // ambient process.env, so the case would flip on any machine that happens
-    // to export MEMORIZE_EMBEDDINGS_* (PR #90 review).
+  it("returns undefined when explicitly resolved off, without falling back to ambient env", () => {
+    // resolveEmbeddingsConfig({}) itself evaluates to `undefined` — passing
+    // that through is indistinguishable from omitting the argument to a
+    // defaulted parameter, which is exactly why getEmbedder takes `config`
+    // as a rest tuple instead: `configArg.length > 0` here is 1, so the
+    // explicit `undefined` is honored rather than re-reading process.env
+    // (see index.ts's doc comment; PR #90 review raised this failure mode).
+    expect(getEmbedder(resolveEmbeddingsConfig({}))).toBeUndefined();
+  });
+
+  it("an explicit off is not flipped back on by ambient env (PR #90 review, #122)", () => {
+    vi.stubEnv("MEMORIZE_EMBEDDINGS_ENDPOINT", "http://ambient/v1");
     expect(getEmbedder(resolveEmbeddingsConfig({}))).toBeUndefined();
   });
 });
