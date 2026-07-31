@@ -12,7 +12,11 @@ import {
   ensureEmbeddings,
   reciprocalRankFusion,
 } from "../../src/services/embeddings-service.js";
-import { getEmbedding, listEmbeddings, upsertEmbedding } from "../../src/services/embeddings-store.js";
+import {
+  getEmbedding,
+  listEmbeddings,
+  upsertEmbedding,
+} from "../../src/services/embeddings-store.js";
 import { rebuildProjectProjection } from "../../src/services/projection-store.js";
 import {
   hybridSearch,
