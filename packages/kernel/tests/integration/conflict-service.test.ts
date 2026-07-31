@@ -122,7 +122,8 @@ describe("conflict-service", () => {
     });
     expect(escalated.status).toBe("escalated");
     expect(escalated.resolvedAt).toBeUndefined();
-    // escalated conflicts are still "open" (status != 'resolved')
+    // escalated is non-terminal (`escalated -> resolved` remains), so it must
+    // still count as open under the terminal-status predicate (#118 item 2)
     expect(listOpenConflicts(projectId).find((c) => c.id === conflictId)).toBeDefined();
   });
 
