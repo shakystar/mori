@@ -6,11 +6,18 @@ import {
   type ConsolidatedMemoryKind,
   type MemorySupersededPayload,
   type Observation,
+  type Project,
 } from "../domain/entities.js";
 import type { DomainEvent } from "../domain/events.js";
 import type { ConsolidatorLlm, ConversationSource, Embedder } from "../index.js";
+import { laneOf, SELF_LANE } from "../projections/projector.js";
 import { getDb } from "../storage/db.js";
-import { appendEvents, readEventsSince, type AppendEventInput } from "../storage/event-store.js";
+import {
+  appendEvents,
+  readEventsSince,
+  readGenesisEventsSync,
+  type AppendEventInput,
+} from "../storage/event-store.js";
 import { detectContradictions, makeLlmJudge } from "./contradiction-service.js";
 import { ensureEmbeddings, ensureSegmentEmbeddings } from "./embeddings-service.js";
 import { listValidMemories, rebuildProjectProjection } from "./projection-store.js";
@@ -57,6 +64,29 @@ export const LAST_ATTEMPT_META_KEY = "cls_consolidate_last_attempt";
 
 /** Upper bound on memories extracted per boundary (noise guard). */
 const MAX_MEMORIES_PER_BOUNDARY = 12;
+
+/**
+ * #113 item③ — upper bound, in characters, on the FULL rendered extraction
+ * prompt body (observations block + existing-memories block + transcript
+ * tail; see `buildExtractionUserContent`). Before this existed, the input was
+ * unbounded on all three axes — pending-observation backlog, a project's
+ * total valid-memory count, and conversation length — and `parseExtractedMemories`
+ * treats a provider's context-limit rejection as an ordinary extractor
+ * failure, which (by the documented #43 contract just above `run()`)
+ * intentionally does NOT advance the watermark. A context-limit failure is
+ * NOT transient the way a timeout is: without a cap, the same oversized (and
+ * only-growing) window would retry forever.
+ *
+ * Sized relative to `MAX_MEMORIES_PER_BOUNDARY` (12), which bounds OUTPUT, not
+ * input: 12 short one-sentence memories is roughly 2,000-2,500 rendered
+ * output chars, so this leaves the extractor ~8-10x that in raw material to
+ * read from — generous room to actually find 12 durable items — while still
+ * being a small fraction of any deployed model's real context window
+ * (including small local models, the fallback-LLM case this file's docs
+ * already worry about). The exact number is a tuning parameter, like the
+ * other constants in this file; what matters is that it is FINITE.
+ */
+export const MAX_EXTRACTION_INPUT_CHARS = 20_000;
 
 export interface ExtractedMemory {
   kind: ConsolidatedMemoryKind;
@@ -109,20 +139,31 @@ export class RuleBasedConsolidator implements Consolidator {
     const out: ExtractedMemory[] = [];
     const edits = input.observations.filter((o) => o.signal === "write-tool");
     if (edits.length > 0) {
-      const files = [
-        ...new Set(
-          edits
-            .map((o) => o.summary ?? "")
-            .map((s) => s.replace(/^(Write|Edit|MultiEdit):\s*/, ""))
-            .filter(Boolean),
-        ),
-      ];
+      // #113: never echo a write-tool observation's `summary`/`filePath` into
+      // the memory body. The kernel-level contract for what `toolInputText`
+      // contains (path, per #109/PR #127 — see capture-service.ts) is
+      // enforced by the harness wiring layer, NOT by this package's own
+      // types (`CaptureObservationParams.toolInputText` is a plain string) —
+      // a caller that violates it must not be able to promote file content
+      // (a `.env` prefix, a secret) into a long-lived, searchable memory via
+      // this "never worse than nothing" fallback. Dedup by the structured
+      // `filePath` field (present only for write signals) WITHOUT ever
+      // reading its value — only its count is used.
+      const uniqueFiles = new Set(
+        edits.map((o) => o.filePath).filter((f): f is string => Boolean(f)),
+      );
+      // A batch may MIX observations that carry the structured path with
+      // legacy/pathless ones. Counting only the paths then claims "Edited 1
+      // file(s)" for a window holding many more edits; counting each pathless
+      // edit as its own file over-claims in the other direction. So an exact
+      // file count is only asserted when every edit carried a path — otherwise
+      // report the one number that is certainly true, the edit count.
+      const pathless = edits.filter((o) => !o.filePath).length;
+      const count = pathless === 0 ? uniqueFiles.size : edits.length;
       out.push({
         kind: "progress",
-        text: `Edited ${files.length} file(s): ${files.slice(0, 10).join(", ")}${
-          files.length > 10 ? ", …" : ""
-        }`,
-        salience: clampSalience(3 + Math.min(2, Math.floor(files.length / 5))),
+        text: pathless === 0 ? `Edited ${count} file(s)` : `Made ${count} file edit(s)`,
+        salience: clampSalience(3 + Math.min(2, Math.floor(count / 5))),
       });
     }
     for (const obs of input.observations) {
@@ -179,7 +220,10 @@ const EXTRACTION_SYSTEM_PROMPT = [
   "Return [] if there is no durable item.",
 ].join(" ");
 
-function buildExtractionUserContent(input: ConsolidationInput): string {
+/** Exported for tests (#113) — lets a test assert the RENDERED prompt for a
+ *  `boundExtractionInput` result stays within `MAX_EXTRACTION_INPUT_CHARS`,
+ *  the same call production code makes inside `LlmConsolidator.extract`. */
+export function buildExtractionUserContent(input: ConsolidationInput): string {
   const observationLines = input.observations.map(
     (o) => `- [${o.signal}${o.toolName ? `/${o.toolName}` : ""}] ${o.summary ?? "(no summary)"}`,
   );
@@ -198,6 +242,281 @@ function buildExtractionUserContent(input: ConsolidationInput): string {
         ]
       : []),
   ].join("\n");
+}
+
+/** Marks a section this function shortened, so the extractor reads the result
+ *  as a fragment rather than as the whole record. */
+const TRIM_MARKER = "…[trimmed to fit the extraction budget]…";
+
+/** Floor for re-admitting a clipped transcript tail (see step 3 of
+ *  {@link boundExtractionInput}). Below this the fragment is too small to
+ *  extract anything from, so the prompt space it would take is better spent
+ *  on the sections above it. Clipping no longer decides whether the slice is
+ *  consumed — `"clipped"` coverage holds the cursor exactly like `"dropped"`
+ *  (see {@link TranscriptTailCoverage}) — so this floor is a usefulness
+ *  threshold only. */
+const MIN_USEFUL_TAIL_CHARS = 200;
+
+/**
+ * How much of `input.transcriptTail` the extractor was actually shown.
+ *
+ * Only `"absent"`/`"whole"` let `run()` consume the conversation slice when
+ * the raw buffer is off: `ConversationSlice.newOffset` is opaque to the kernel
+ * (a slice is consumed whole or not at all), so advancing the cursor over a
+ * tail that was only PARTLY shown loses the unshown prefix as surely as
+ * dropping it did (Codex P1 on PR #136, owner-adjudicated: the test was never
+ * "whole vs. partial", it was "shown or stored, or else not consumed").
+ */
+export type TranscriptTailCoverage = "absent" | "whole" | "clipped" | "dropped";
+
+/** Options for {@link boundExtractionInput}. */
+export interface BoundExtractionOptions {
+  /** Char budget for the rendered prompt. Defaults to `MAX_EXTRACTION_INPUT_CHARS`. */
+  maxChars?: number;
+  /**
+   * True when this boundary durably stores the raw slice elsewhere — i.e.
+   * `MEMORIZE_RAW_SEGMENTS` is on, so `run()` writes `segment` rows and the
+   * transcript tail is NOT its only copy. That is what makes shortening the
+   * tail a REVERSIBLE sacrifice and lets it take the leftover budget.
+   *
+   * Defaults to FALSE, the conservative reading: mistaking an only-copy tail
+   * for a recoverable one is precisely the data loss this option prevents.
+   */
+  tailPersistedElsewhere?: boolean;
+}
+
+/** {@link boundExtractionInput}'s result: a `ConsolidationInput` that renders
+ *  through `buildExtractionUserContent` within `MAX_EXTRACTION_INPUT_CHARS`. */
+export interface BoundedConsolidationInput extends ConsolidationInput {
+  /**
+   * True when `input.observations` had to be trimmed to a shorter PREFIX to
+   * fit the budget. The caller (`run()`) MUST advance the watermark only past
+   * the last INCLUDED observation in that case — see the comment at the
+   * watermark-advance call site — so the trimmed suffix is retried (and
+   * eventually consolidated) by a later boundary instead of being marked
+   * consumed without ever having been shown to the extractor.
+   */
+  observationsTruncated: boolean;
+  /**
+   * How much of a non-empty `input.transcriptTail` reached the returned input.
+   * `run()` may consume the conversation slice only on `"whole"`/`"absent"`,
+   * or when the raw buffer stored the slice regardless.
+   */
+  transcriptTailCoverage: TranscriptTailCoverage;
+}
+
+/**
+ * Trim a `ConsolidationInput` so its rendered prompt (`buildExtractionUserContent`)
+ * fits within `maxChars`. Each section is measured against the REAL render, not
+ * an estimate, so the guarantee cannot drift from the renderer.
+ *
+ * Sections are filled highest-value first, and each one only ever gets what the
+ * ones above it left over:
+ *
+ * 1. Observations — the primary extraction signal and the only section whose
+ *    omission COSTS something (the watermark is advanced past what was shown).
+ *    Kept as a PREFIX in the original oldest-first event order, dropping from
+ *    the end, and never all the way to zero: see `observationsTruncated`. When
+ *    even a single observation renders past the whole budget, its rendered
+ *    fields are CLIPPED (`TRIM_MARKER`) rather than left oversized — the loop
+ *    stopping at one item was still handing back a prompt over `maxChars`
+ *    (Codex P1 on PR #136), which is exactly the shape that ratchets: an
+ *    oversized prompt a provider rejects is an extractor failure, #43 keeps
+ *    the watermark put on failure, and the same window then retries forever,
+ *    only ever growing. Clipping keeps the observation's `id`/provenance
+ *    intact, so the watermark still advances past an observation the extractor
+ *    genuinely saw.
+ * 2/3. Existing memories and the transcript tail, in an order decided by which
+ *    sacrifice is REVERSIBLE at this boundary:
+ *
+ *    - Existing memories live in storage independently of this boundary
+ *      (nothing here "consumes" them), so trimming them only degrades the
+ *      contradiction/dedup check's context — recoverable, and recovered by the
+ *      next boundary. They keep the NEWEST, dropping oldest first.
+ *    - The transcript tail, when `MEMORIZE_RAW_SEGMENTS` is off
+ *      (`tailPersistedElsewhere: false`), is the ONLY copy of that
+ *      conversation: not showing it is the one irreversible sacrifice here.
+ *
+ *    So with the raw buffer OFF the tail is RESERVED, not left over: it is
+ *    allocated before existing memories and takes the whole slice even if that
+ *    means zero memories. Giving memories a greedy first pick instead starved
+ *    the tail permanently (Codex P1 on PR #136, owner-adjudicated): the
+ *    leftover is by construction "less than one memory line", the next
+ *    boundary makes the same allocation, and memory history never shrinks — so
+ *    the conversation cursor, held by `run()` on an unshown tail, would never
+ *    move again. With the raw buffer ON the old order stands: the slice is
+ *    durably stored either way, so the tail is genuinely the cheapest section
+ *    to shorten and it takes what the sections above left.
+ *
+ *    Whatever the order, a tail that cannot be shown WHOLE is reported as
+ *    `"clipped"`/`"dropped"` and `run()` then holds the conversation cursor —
+ *    a partly-shown slice is not a consumed slice.
+ *
+ * Because every section is measured, the returned input ALWAYS renders within
+ * `maxChars` — with no exception, which is the whole value of the guarantee:
+ * a prompt that cannot fail on size is what lets the ratchet argument above be
+ * unconditional. (The residual floor is structural: the section headers plus
+ * one fully-clipped observation line, ~350 chars, so `maxChars` below that
+ * cannot be honoured by any trimming.) Extraction can therefore always succeed
+ * on SOME prefix of the backlog and the boundary always advances, while #43's
+ * "a failed extraction does not advance the watermark" rule keeps applying,
+ * untouched, to the transient failures it was written for.
+ *
+ * Each section's cut is found by binary search over the real render (O(log n)
+ * renders) rather than by dropping one item at a time and re-rendering: an
+ * unbounded valid-memory history made that quadratic in both copied elements
+ * and rendered chars (Codex P2 on PR #136), i.e. a boundary could stall before
+ * ever reaching the extractor. The search is sound because every section is
+ * monotone — keeping more of it never shortens the render.
+ */
+export function boundExtractionInput(
+  input: ConsolidationInput,
+  options: BoundExtractionOptions = {},
+): BoundedConsolidationInput {
+  const maxChars = options.maxChars ?? MAX_EXTRACTION_INPUT_CHARS;
+  const render = (candidate: ConsolidationInput): number =>
+    buildExtractionUserContent(candidate).length;
+
+  /**
+   * Largest `n` in `[0, hi]` whose candidate render fits, or 0 if none does.
+   * Requires `candidate` to be monotone in `n`; callers that append a
+   * `TRIM_MARKER` (which makes the untrimmed top step SHORTER than the step
+   * below it) must test the untrimmed value separately and search `[0, hi-1]`.
+   */
+  const largestFitting = (hi: number, candidate: (n: number) => ConsolidationInput): number => {
+    let lo = 0;
+    let high = hi;
+    let best = 0;
+    while (lo <= high) {
+      const mid = Math.floor((lo + high) / 2);
+      if (render(candidate(mid)) <= maxChars) {
+        best = mid;
+        lo = mid + 1;
+      } else {
+        high = mid - 1;
+      }
+    }
+    return best;
+  };
+
+  // 1. Observations, alone, as a prefix — everything else competes for what
+  //    they leave, so they are sized against an otherwise empty prompt.
+  const keptObservations = largestFitting(input.observations.length, (n) => ({
+    observations: input.observations.slice(0, n),
+    existingMemories: [],
+  }));
+  let observations = input.observations.slice(0, Math.max(keptObservations, 1));
+  const observationsTruncated = observations.length < input.observations.length;
+
+  // The one observation the floor above forced in may not fit on its own.
+  // Clip EVERY field the renderer puts on its line, in ascending order of
+  // value, until the line fits: `summary` first, then `toolName`. Clipping
+  // only `summary` left the postcondition conditional — `toolName` is rendered
+  // separately (`[${signal}/${toolName}]`) and is never clipped upstream
+  // either (`capture-service`'s 240-char `clip()` applies to the summary
+  // alone), so one long `toolName` from a custom harness or a synced row broke
+  // the bound with the summary already at zero chars (Codex P2 on PR #136).
+  // `signal` needs no clip: `ObservationSignal` is a closed four-value union.
+  if (observations.length > 0 && render({ observations, existingMemories: [] }) > maxChars) {
+    const last = observations[observations.length - 1]!;
+    const withLast = (o: Observation): Observation[] => [...observations.slice(0, -1), o];
+    const summary = last.summary ?? "";
+    // The untrimmed summary is already known not to fit (this branch), so the
+    // marker-free top step is out and `[0, length - 1]` is monotone.
+    const keptChars = largestFitting(Math.max(summary.length - 1, 0), (n) => ({
+      observations: withLast({ ...last, summary: clippedTo(summary, n) }),
+      existingMemories: [],
+    }));
+    let clipped: Observation = { ...last, summary: clippedTo(summary, keptChars) };
+
+    // Still over with the summary clipped ⇒ the overflow is in `toolName`.
+    const toolName = clipped.toolName;
+    if (
+      toolName !== undefined &&
+      render({ observations: withLast(clipped), existingMemories: [] }) > maxChars
+    ) {
+      const keptName = largestFitting(Math.max(toolName.length - 1, 0), (n) => ({
+        observations: withLast({ ...clipped, toolName: clippedTo(toolName, n) }),
+        existingMemories: [],
+      }));
+      clipped = { ...clipped, toolName: clippedTo(toolName, keptName) };
+    }
+    observations = withLast(clipped);
+  }
+
+  // 2/3. Existing memories and the tail — order per the doc above.
+  /** Newest-first fill of the memory section around a fixed tail. */
+  const fitMemories = (tail: string | undefined): ConsolidatedMemory[] => {
+    const kept = largestFitting(input.existingMemories.length, (n) => ({
+      observations,
+      existingMemories: input.existingMemories.slice(input.existingMemories.length - n),
+      ...(tail !== undefined ? { transcriptTail: tail } : {}),
+    }));
+    return input.existingMemories.slice(input.existingMemories.length - kept);
+  };
+
+  const full = input.transcriptTail ?? "";
+  let existingMemories: ConsolidatedMemory[];
+  let transcriptTail: string | undefined;
+  let transcriptTailCoverage: TranscriptTailCoverage = full.length > 0 ? "dropped" : "absent";
+
+  if (
+    full.length > 0 &&
+    options.tailPersistedElsewhere !== true &&
+    render({ observations, existingMemories: [], transcriptTail: full }) <= maxChars
+  ) {
+    // RESERVED: the tail is this conversation's only copy and it fits once the
+    // (recoverable) memory section is sacrificed. Take it whole, then give the
+    // memories whatever is left — so the slice is consumable and the cursor
+    // moves, which is what stops the conversation axis from stalling forever.
+    transcriptTail = full;
+    transcriptTailCoverage = "whole";
+    existingMemories = fitMemories(full);
+  } else {
+    // Either the tail is recoverable (raw buffer on), or it cannot fit even
+    // with zero memories. In the latter case the cursor is held regardless of
+    // what we show, so keeping the dedup/contradiction context is strictly
+    // better: without it every boundary would re-extract the same held slice
+    // with no way to notice it is re-emitting the same memories.
+    existingMemories = fitMemories(undefined);
+    if (full.length > 0) {
+      if (render({ observations, existingMemories, transcriptTail: full }) <= maxChars) {
+        transcriptTail = full;
+        transcriptTailCoverage = "whole";
+      } else {
+        // Untrimmed is out, so `[0, length - 1]` — every step of which carries
+        // the marker — is monotone.
+        const keptTail = largestFitting(full.length - 1, (n) => ({
+          observations,
+          existingMemories,
+          transcriptTail: tailClippedTo(full, n),
+        }));
+        if (keptTail >= MIN_USEFUL_TAIL_CHARS) {
+          transcriptTail = tailClippedTo(full, keptTail);
+          transcriptTailCoverage = "clipped";
+        }
+      }
+    }
+  }
+
+  return {
+    observations,
+    existingMemories,
+    ...(transcriptTail !== undefined ? { transcriptTail } : {}),
+    observationsTruncated,
+    transcriptTailCoverage,
+  };
+}
+
+/** First `n` chars of an observation summary, marked when anything was cut. */
+function clippedTo(summary: string, n: number): string {
+  return n >= summary.length ? summary : `${summary.slice(0, n)}${TRIM_MARKER}`;
+}
+
+/** LAST `n` chars of the transcript tail — the turns nearest the boundary are
+ *  the ones the extractor can still act on — marked when anything was cut. */
+function tailClippedTo(tail: string, n: number): string {
+  return n >= tail.length ? tail : `${TRIM_MARKER}\n${tail.slice(tail.length - n)}`;
 }
 
 /**
@@ -421,6 +740,10 @@ export interface ConsolidateAttempt {
   durationMs: number;
   /** memory.consolidated events appended (success only). */
   consolidated?: number;
+  /** #113: set only when this boundary held its conversation cursor — see
+   *  `ConsolidateResult.conversationSliceHeld`. Absent means "did not happen",
+   *  so an old row without the field reads correctly. */
+  conversationSliceHeld?: boolean;
   /** Truncated failure message (failures only). */
   error?: string;
 }
@@ -461,11 +784,27 @@ function writeLastConsolidateAttempt(projectId: string, attempt: ConsolidateAtte
 }
 
 export interface ConsolidationStatus {
-  /** observation.captured events past the current watermark. */
+  /** SELF-LANE observation.captured events past the current watermark — the
+   *  same backlog `consolidate()` would actually distill. A workspace union's
+   *  synced siblings share this db; their observations are not this store's
+   *  work and are excluded (#113 item②). */
   pendingObservations: number;
-  /** created_at of the oldest pending observation, when any. */
+  /** created_at of the oldest pending self-lane observation, when any. */
   oldestPendingAt?: string;
   lastAttempt?: ConsolidateAttempt;
+}
+
+/**
+ * `laneOf`'s `isUnion` flag for this log — more than one genesis identity means
+ * synced members share the db. Cheap (at most one row per member) and the one
+ * place that decides it, so the boundary and the backlog count below can never
+ * classify the same event differently.
+ */
+function isUnionLog(projectId: string): boolean {
+  const genesisIds = new Set(
+    readGenesisEventsSync(projectId).map((event) => (event.payload as Project).id),
+  );
+  return genesisIds.size > 1;
 }
 
 /** Consolidation health snapshot (#51) — the "why are there no memories?" answer. */
@@ -478,16 +817,47 @@ export function getConsolidationStatus(projectId: string): ConsolidationStatus {
       { seq: number } | undefined;
     if (row) sinceSeq = row.seq;
   }
-  const pending = db
-    .prepare(
-      "SELECT COUNT(*) AS n, MIN(created_at) AS oldest FROM events " +
-        "WHERE type = 'observation.captured' AND seq > ?",
-    )
-    .get(sinceSeq) as { n: number; oldest: string | null };
+  // #113 item②: the backlog this reports is the one a boundary would consume,
+  // so it applies the SAME `laneOf` self/foreign test `run()` does — a COUNT(*)
+  // over the type alone let a foreign-only backlog cross the local threshold in
+  // `shouldTriggerThresholdConsolidate` and fire a boundary that then found
+  // nothing of its own to do (Codex P2 on PR #136). Classifying needs the
+  // provenance columns rather than a count, but reads only those two plus
+  // `created_at`, and only for events past the watermark.
+  const isUnion = isUnionLog(projectId);
+  const pending = (
+    db
+      .prepare(
+        "SELECT project_id, source_project_id, created_at FROM events " +
+          "WHERE type = 'observation.captured' AND seq > ? ORDER BY seq",
+      )
+      .all(sinceSeq) as {
+      project_id: string;
+      source_project_id: string | null;
+      created_at: string;
+    }[]
+  ).filter(
+    (row) =>
+      laneOf(
+        {
+          projectId: row.project_id,
+          ...(row.source_project_id !== null ? { sourceProjectId: row.source_project_id } : {}),
+        },
+        projectId,
+        isUnion,
+      ) === SELF_LANE,
+  );
+  // Oldest by `created_at`, not by `seq`: the two agree for locally appended
+  // events but a synced block arrives at whatever seq it lands on, so keep the
+  // MIN semantics the previous SQL had.
+  const oldestPendingAt = pending.reduce<string | undefined>(
+    (oldest, row) => (oldest === undefined || row.created_at < oldest ? row.created_at : oldest),
+    undefined,
+  );
   const lastAttempt = readLastConsolidateAttempt(projectId);
   return {
-    pendingObservations: pending.n,
-    ...(pending.oldest ? { oldestPendingAt: pending.oldest } : {}),
+    pendingObservations: pending.length,
+    ...(oldestPendingAt !== undefined ? { oldestPendingAt } : {}),
     ...(lastAttempt ? { lastAttempt } : {}),
   };
 }
@@ -715,6 +1085,16 @@ export interface ConsolidateResult {
   outcome: "ok" | "noop";
   /** Raw-detail segments written from this boundary's conversation slice. */
   segmentsWritten: number;
+  /**
+   * #113: true when this boundary did NOT consume its conversation slice —
+   * the budget could not show the tail WHOLE and the raw buffer did not store
+   * it either, so the cursor was held rather than advanced over content that
+   * was neither shown nor stored. A slice that keeps failing to fit (one
+   * larger than the budget on its own) pins the conversation axis until the
+   * `ConversationSource` contract gains a resumable offset, so this must be
+   * observable rather than silent.
+   */
+  conversationSliceHeld: boolean;
 }
 
 export interface ConsolidateParams {
@@ -795,12 +1175,28 @@ export async function consolidate(params: ConsolidateParams): Promise<Consolidat
     const rawObservationEvents = eventsSince.filter(
       (event) => event.type === "observation.captured",
     ) as DomainEvent<Observation>[];
-    pendingObservations = rawObservationEvents.length;
+
+    // #113 item②: consolidation must see only THIS store's own observations.
+    // `readEventsSince` has no lane concept — it scans the whole per-project
+    // db, which in a workspace union also holds synced siblings' events — so
+    // without this filter a foreign member's `observation.captured` gets
+    // distilled into a memory THIS store then asserts as self-lane truth
+    // (and inflates the threshold-trigger math below). Apply the exact same
+    // provenance test `listRecentObservations` uses on the projection side
+    // (`laneWhere` / `source_project_id IS NULL`) via the shared `laneOf`
+    // helper, so the two can never drift apart. `isUnion` comes from the same
+    // `isUnionLog` the backlog count uses, so the boundary and the threshold
+    // that fires it classify identically.
+    const isUnion = isUnionLog(params.projectId);
+    const selfObservationEvents = rawObservationEvents.filter(
+      (event) => laneOf(event, params.projectId, isUnion) === SELF_LANE,
+    );
+    pendingObservations = selfObservationEvents.length;
 
     // Dedup guard for watermark loss (see consumedObservationIds): drop
     // observations a previous consolidation already distilled.
     const consumed = consumedObservationIds(params.projectId);
-    const observationEvents = rawObservationEvents.filter(
+    const observationEvents = selfObservationEvents.filter(
       (event) => !consumed.has(event.payload.id),
     );
     const observations = observationEvents.map((event) => event.payload);
@@ -834,22 +1230,52 @@ export async function consolidate(params: ConsolidateParams): Promise<Consolidat
         backend: backendLabel,
         outcome: "noop",
         segmentsWritten: 0,
+        conversationSliceHeld: false,
       };
     }
 
     const existing = listValidMemories(params.projectId).map((row) => row.memory);
 
+    // #113 item③: bound what gets rendered into the extraction prompt so a
+    // single call can never fail purely from input size — see
+    // `boundExtractionInput` for the trimming policy. `bounded.observations`
+    // may be a shorter PREFIX of `observations`; the watermark-advance call
+    // below uses it (not the full window) so a budget-truncated suffix is
+    // retried by the next boundary instead of silently dropped.
+    const bounded = boundExtractionInput(
+      {
+        observations,
+        ...(transcriptTail ? { transcriptTail } : {}),
+        existingMemories: existing,
+      },
+      // Whether the raw slice gets a second copy decides the section order:
+      // with the buffer off the tail is reserved ahead of existing memories,
+      // because not showing it is then the only irreversible loss. Read the
+      // same env var the segment write below is gated on — the write itself
+      // happens after extraction, so this is the boundary's INTENT; a write
+      // that then fails is caught by the `segmentsWritten > 0` check at the
+      // cursor-advance site, which uses the actual outcome.
+      { tailPersistedElsewhere: process.env.MEMORIZE_RAW_SEGMENTS !== "0" },
+    );
+
     // Extractor failure (LLM timeout, transport error, unparseable reply)
     // intentionally propagates WITHOUT advancing the watermark — the next
     // boundary retries the same window. Callers at boundaries catch and degrade.
     const extracted = await consolidator.extract({
-      observations,
-      ...(transcriptTail ? { transcriptTail } : {}),
-      existingMemories: existing,
+      observations: bounded.observations,
+      ...(bounded.transcriptTail ? { transcriptTail: bounded.transcriptTail } : {}),
+      existingMemories: bounded.existingMemories,
     });
 
-    const validIds = new Set(existing.map((m) => m.id));
-    const sourceObservationIds = observations.map((o) => o.id);
+    // Supersede only what the extractor was actually SHOWN — `bounded`, not the
+    // full `existing` list. Budget-trimmed memories are valid but invisible to
+    // this call, so an id naming one can only be a hallucination or an
+    // injection from the untrusted window, and honouring it would invalidate a
+    // memory the model was never allowed to evaluate (Codex P2 on PR #136).
+    // Matches the system prompt's own rule: "an id explicitly listed in
+    // existing valid memories".
+    const validIds = new Set(bounded.existingMemories.map((m) => m.id));
+    const sourceObservationIds = bounded.observations.map((o) => o.id);
     const inputs: AppendEventInput<ConsolidatedMemory | MemorySupersededPayload>[] = [];
     let supersededCount = 0;
 
@@ -994,9 +1420,26 @@ export async function consolidate(params: ConsolidateParams): Promise<Consolidat
       await ensureSegmentEmbeddings(params.projectId, params.embedder);
     }
 
-    // Advance the event watermark past the observation window. Guarded: a
-    // conversation-only boundary has no observation events to mark.
-    if (rawObservationEvents.length > 0) {
+    // Advance the event watermark only past what THIS boundary actually
+    // consolidated (#113 item③). `bounded.observations` may be a
+    // budget-truncated PREFIX of `observations` — same order as
+    // `observationEvents`, since `boundExtractionInput` only ever drops from
+    // the end — so its last element's EVENT id is the correct stopping
+    // point: anything after it (the truncated suffix, any self-lane
+    // observation this window's dedup guard skipped, and any foreign-lane
+    // event interleaved by seq — item②) stays unconsumed and is naturally
+    // re-read (and re-filtered) by the NEXT boundary, since
+    // `readEventsSince` resumes strictly after the watermark's `seq`.
+    if (bounded.observations.length > 0) {
+      setConsolidateWatermark(
+        params.projectId,
+        observationEvents[bounded.observations.length - 1]!.id,
+      );
+    } else if (rawObservationEvents.length > 0) {
+      // No self-lane observation was included this boundary (e.g. a
+      // conversation-only window, or every self-lane observation in range was
+      // already consumed) — still skip past the whole scanned range so a
+      // foreign-only or fully-deduped window is not rescanned every boundary.
       setConsolidateWatermark(
         params.projectId,
         rawObservationEvents[rawObservationEvents.length - 1]!.id,
@@ -1004,15 +1447,39 @@ export async function consolidate(params: ConsolidateParams): Promise<Consolidat
     }
 
     // Advance the per-conversation offset in lockstep — the extractor has now
-    // seen this slice, so the next boundary reads only what is new.
+    // seen this slice, so the next boundary reads only what is new. The
+    // invariant is "shown WHOLE or stored WHOLE, or not consumed":
+    // `newOffset` is opaque to the kernel (`ConversationSlice`), so a slice can
+    // only be consumed whole or not at all, and a tail that was merely CLIPPED
+    // leaves its oldest part neither shown to the extractor nor — with the raw
+    // buffer off — stored anywhere, which is the same loss as dropping it
+    // (owner adjudication on PR #136). So anything short of `"whole"` holds
+    // the cursor, and the next boundary — with this boundary's observations
+    // already consumed, hence more budget, and with the tail reserved ahead of
+    // existing memories — gets the slice. An EMPTY slice has nothing to lose
+    // and always advances, so an idle conversation never pins the cursor.
+    let conversationSliceHeld = false;
     if (source && slice) {
-      writeConversationOffset(params.projectId, source.id, slice.newOffset);
+      const shownWhole =
+        bounded.transcriptTailCoverage === "whole" || bounded.transcriptTailCoverage === "absent";
+      if (shownWhole || segmentsWritten > 0 || slice.text.length === 0) {
+        writeConversationOffset(params.projectId, source.id, slice.newOffset);
+      } else {
+        // The remaining stuck case is a single slice too large for the budget
+        // even with zero memories — a `ConversationSource` contract limit
+        // (no resumable offset), tracked separately. Holding is correct, but
+        // it must not be SILENT: surface it on the result and the attempt
+        // telemetry so a pinned conversation axis is observable from outside.
+        conversationSliceHeld = true;
+      }
     }
 
     return {
       consolidated: extracted.length,
       superseded: supersededCount,
-      observationsProcessed: observations.length,
+      // #113 item③: what was actually shown to the extractor (and recorded
+      // in sourceObservationIds), not the full pre-bounding window.
+      observationsProcessed: bounded.observations.length,
       extractor: extractorKind,
       backend: backendLabel,
       // #103: matches the ConsolidateResult.outcome doc comment above — "ok"
@@ -1023,6 +1490,7 @@ export async function consolidate(params: ConsolidateParams): Promise<Consolidat
       // early return is ever restructured.
       outcome: observations.length > 0 || transcriptTail !== undefined ? "ok" : "noop",
       segmentsWritten,
+      conversationSliceHeld,
     };
   };
 
@@ -1040,9 +1508,11 @@ export async function consolidate(params: ConsolidateParams): Promise<Consolidat
   // #103: mirror result.outcome exactly rather than re-deriving it from
   // observationsProcessed — a conversation-only boundary (0 observations,
   // outcome "ok") must still get its `consolidated` count recorded.
-  recordAttempt(
-    result.outcome,
-    result.outcome === "ok" ? { consolidated: result.consolidated } : {},
-  );
+  recordAttempt(result.outcome, {
+    ...(result.outcome === "ok" ? { consolidated: result.consolidated } : {}),
+    // #113: recorded on any outcome — a held slice is exactly the state an
+    // operator needs to see, and it can coexist with a memory-0 boundary.
+    ...(result.conversationSliceHeld ? { conversationSliceHeld: true } : {}),
+  });
   return result;
 }
