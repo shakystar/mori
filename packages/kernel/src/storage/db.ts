@@ -12,7 +12,7 @@ import { resolveNativeBinding } from "./native-addon.js";
  * (which versions payload shape, not table structure). Append future
  * migrations to this array — never reorder or mutate existing entries.
  */
-const MIGRATIONS: ReadonlyArray<(db: Database.Database) => void> = [
+const MIGRATIONS: ReadonlyArray<(db: Database.Database, projectId?: string) => void> = [
   // v1 — events table + indexes (Phase 0: created but not yet written to).
   (db) => {
     db.exec(`
@@ -319,15 +319,123 @@ const MIGRATIONS: ReadonlyArray<(db: Database.Database) => void> = [
   // v14 — #74 union-lane hardening: `observations` was left out of the v12
   // provenance ALTER (only tasks/handoffs/sessions/memories/segments got the
   // column), so every foreign (union-lane) observation.captured event
-  // projected with a NULL lane — indistinguishable from self. Additive column,
-  // same grade as v12: existing rows read back NULL = self, byte-identical for
-  // single-writer stores.
+  // projected with a NULL lane — indistinguishable from self. Additive column.
+  //
+  // CAUTION (#120): this migration ADDS the column but does NOT populate it,
+  // and "existing rows read back NULL" is NOT a safe default here — do not
+  // copy this shape. v12's tables had never held a foreign row when their
+  // column landed, so NULL = self was a true statement about them. This table
+  // is the opposite: foreign observations were ALREADY projected into it (that
+  // is the very defect #74 fixed for NEW events), so leaving them NULL writes
+  // a WRONG lane, not an unknown one — a foreign observation reads back as
+  // self in the short-term tail (SoT-040). The true lane was always available
+  // in `events.source_project_id` (v11); v15 below moves it across. The fix
+  // had to be a NEW migration entry rather than a body edit here, because
+  // `runMigrations` replays only from a store's current user_version, so an
+  // edit to this body would never reach the exact stores that are damaged
+  // (the ones that already ran v14). Same trap the v13 comment records.
   (db) => {
     db.exec("ALTER TABLE observations ADD COLUMN source_project_id TEXT;");
   },
+  // v15 — #120: backfill the lane v14 left NULL. Replays the SAME self/foreign
+  // decision `laneOf` (projections/projector.ts) makes at projection time, but
+  // synchronously and against this store's own event log — the async
+  // `rebuildProjectProjection` lives in `services/`, above this layer, so
+  // calling it from here would be a layer inversion + circular import. SQL
+  // backfill (option A of #120) instead: `events` has carried
+  // `source_project_id` since v11, so no value is inferred or guessed — every
+  // lane written below is read off the `observation.captured` event that
+  // produced the row.
+  //
+  // Why this cannot wait for the existing self-heal: `rebuildProjectProjection`
+  // runs on WRITE paths, so a read-only session (session-start context
+  // injection is the canonical one) reads the wrong lane forever, no matter
+  // how many times it runs.
+  //
+  // Scope: `observations` only. The equivalent question for v12's five tables
+  // (tasks/handoffs/sessions/memories/segments) and `search_fts` is tracked
+  // separately in #150, which reuses this mechanism.
+  //
+  // Single-writer stores are untouched: every row resolves to the self lane,
+  // and self rows are skipped without an UPDATE, so both the column and the
+  // `data` JSON stay byte-identical.
+  (db, projectId) => {
+    const observationRows = db.prepare("SELECT id, data FROM observations").all() as Array<{
+      id: string;
+      data: string;
+    }>;
+    if (observationRows.length === 0) return;
+
+    // Same genesis prescan `reduceProjectState` does. `projectId` is the
+    // authoritative self identity when the caller knows it (`getDb`), matching
+    // what every real projection path passes; the first `project.created`
+    // is the same fallback the reducer uses when it does not, and is correct
+    // for a single-genesis (non-union) log. `isUnion` = more than one distinct
+    // member genesis, which is what makes a NULL-provenance legacy event
+    // ambiguous.
+    const genesisRows = db
+      .prepare("SELECT payload FROM events WHERE type = 'project.created' ORDER BY seq")
+      .all() as Array<{ payload: string }>;
+    const genesisIds = new Set<string>();
+    let firstGenesisId: string | undefined;
+    for (const row of genesisRows) {
+      const id = (JSON.parse(row.payload) as { id?: string }).id;
+      if (id === undefined) continue;
+      if (firstGenesisId === undefined) firstGenesisId = id;
+      genesisIds.add(id);
+    }
+    const isUnion = genesisIds.size > 1;
+    const selfId = projectId ?? firstGenesisId;
+
+    // observation id -> origin lane (null = self), taken from the event that
+    // captured it. Mirrors `laneOf`: a non-NULL `source_project_id` on the
+    // event is authoritative; a NULL one (legacy, pre-v11) is self unless this
+    // is a union log, where a foreign member's un-stamped history rides in
+    // under its own `project_id`. First event per observation id wins — the
+    // capture — so a later re-projection of the same id cannot flip the lane.
+    const eventRows = db
+      .prepare(
+        "SELECT source_project_id, project_id, payload FROM events " +
+          "WHERE type = 'observation.captured' ORDER BY seq",
+      )
+      .all() as Array<{ source_project_id: string | null; project_id: string; payload: string }>;
+    const laneByObservationId = new Map<string, string | null>();
+    for (const row of eventRows) {
+      const observationId = (JSON.parse(row.payload) as { id?: string }).id;
+      if (observationId === undefined || laneByObservationId.has(observationId)) continue;
+      const source = row.source_project_id;
+      let lane: string | null;
+      if (source != null) {
+        lane = source === selfId ? null : source;
+      } else if (!isUnion || row.project_id === selfId) {
+        lane = null;
+      } else {
+        lane = row.project_id;
+      }
+      laneByObservationId.set(observationId, lane);
+    }
+
+    // Both sinks the projection writer keeps in step: the column (what
+    // `laneWhere` filters on) and `data.sourceProjectId` (what a union read
+    // renders the origin label from). See the `insertObservation` in
+    // services/projection-store.ts, which derives the column FROM the record.
+    const updateLane = db.prepare(
+      "UPDATE observations SET source_project_id = ?, data = ? WHERE id = ?",
+    );
+    for (const row of observationRows) {
+      // A row with no matching capture event (should not occur — the log is
+      // the only writer of this table) keeps NULL: self is the pre-existing
+      // default and there is no evidence on which to move it.
+      const lane = laneByObservationId.get(row.id);
+      if (lane == null) continue;
+      const data = JSON.parse(row.data) as Record<string, unknown>;
+      data.sourceProjectId = lane;
+      updateLane.run(lane, JSON.stringify(data), row.id);
+    }
+  },
 ];
 
-function runMigrations(db: Database.Database): void {
+function runMigrations(db: Database.Database, projectId?: string): void {
   // Acquire a write lock up front (BEGIN IMMEDIATE) and re-read user_version
   // INSIDE it. When two fresh processes open the same new DB at once, the
   // first runs the migrations and bumps user_version; the second blocks on
@@ -339,7 +447,7 @@ function runMigrations(db: Database.Database): void {
     const current = db.pragma("user_version", { simple: true }) as number;
     for (let version = current; version < MIGRATIONS.length; version++) {
       const migrate = MIGRATIONS[version]!;
-      migrate(db);
+      migrate(db, projectId);
       // user_version is the count of applied migrations.
       db.pragma(`user_version = ${version + 1}`);
     }
@@ -405,7 +513,7 @@ export function unwritableDataDirError(dbFile: string, cause: Error): Error {
   );
 }
 
-function open(dbFile: string): Database.Database {
+function open(dbFile: string, projectId?: string): Database.Database {
   try {
     fs.mkdirSync(path.dirname(dbFile), { recursive: true });
     const nativeBinding = resolveNativeBinding();
@@ -414,7 +522,7 @@ function open(dbFile: string): Database.Database {
     // lock wait rather than error; the WAL switch needs its own retry (above).
     db.pragma("busy_timeout = 5000");
     enableWalWithRetry(db);
-    runMigrations(db);
+    runMigrations(db, projectId);
     return db;
   } catch (error) {
     if (isDataDirUnwritable(error)) {
@@ -430,7 +538,7 @@ const connections = new Map<string, Database.Database>();
 export function getDb(projectId: string): Database.Database {
   const cached = connections.get(projectId);
   if (cached) return cached;
-  const db = open(getProjectDbFile(projectId));
+  const db = open(getProjectDbFile(projectId), projectId);
   connections.set(projectId, db);
   return db;
 }
@@ -446,9 +554,15 @@ export function closeAll(): void {
 /**
  * Open an arbitrary db path (uncached) with the same pragmas + migrations.
  * Intended for tests; the per-project `getDb` API is the main surface.
+ *
+ * `projectId` is this store's own identity, threaded into the migrations that
+ * need to tell self from foreign (the v15 observation-lane backfill, #120) —
+ * the same authoritative value `rebuildProjectProjection` passes the reducer.
+ * Omit it for fixtures where that identity does not matter; the backfill then
+ * falls back to the first `project.created` genesis, as the reducer does.
  */
-export function openDbAt(dbFile: string): Database.Database {
-  return open(dbFile);
+export function openDbAt(dbFile: string, projectId?: string): Database.Database {
+  return open(dbFile, projectId);
 }
 
 process.once("exit", closeAll);
