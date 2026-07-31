@@ -1,10 +1,17 @@
 import { lstatSync, realpathSync } from "node:fs";
 import { dirname, resolve, sep } from "node:path";
 
-/** Successful path resolution: `resolved` is absolute, symlink-resolved, and inside root. */
+/**
+ * Successful path resolution: `resolved` is absolute, symlink-resolved, and inside root.
+ * `realRoot` is `root` itself, already symlink-resolved by this call — callers that need
+ * to relativize a path against the root (e.g. `grep`) should reuse this instead of calling
+ * `realpathSync(root)` again, since a second, independent resolution can throw or diverge
+ * from `resolved` if something replaces `root` between the two calls (mori#124).
+ */
 export interface PathGuardOk {
   ok: true;
   resolved: string;
+  realRoot: string;
 }
 
 /** Failed path resolution. Never thrown — callers must check `ok`. */
@@ -65,7 +72,7 @@ export function resolveWithinRoot(root: string, requestedPath: string): PathGuar
     return { ok: false, reason: `path escapes working root: ${requestedPath}` };
   }
 
-  return { ok: true, resolved: realCandidate };
+  return { ok: true, resolved: realCandidate, realRoot };
 }
 
 /** `target` must equal `root` or be nested under it — a bare prefix match would let `<root>-evil` through. */

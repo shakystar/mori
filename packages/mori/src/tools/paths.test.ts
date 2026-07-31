@@ -24,7 +24,25 @@ describe("resolveWithinRoot", () => {
     const result = resolveWithinRoot(root, "file.txt");
 
     expect(result.ok).toBe(true);
-    if (result.ok) expect(result.resolved).toBe(join(realpathSync(root), "file.txt"));
+    if (result.ok) {
+      expect(result.resolved).toBe(join(realpathSync(root), "file.txt"));
+      expect(result.realRoot).toBe(realpathSync(root));
+    }
+  });
+
+  it("returns root's own realpath as realRoot when root is reached through a symlink", () => {
+    // mori#124: callers that relativize a path against root (grep) must reuse this
+    // value instead of independently re-resolving `root`, so it always matches the
+    // basis `resolved` was computed against — even if `root` is mutated afterward.
+    const realRootDir = join(base, "real-root");
+    mkdirSync(realRootDir);
+    const linkedRoot = join(base, "linked-root");
+    symlinkSync(realRootDir, linkedRoot);
+
+    const result = resolveWithinRoot(linkedRoot, ".");
+
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.realRoot).toBe(realpathSync(realRootDir));
   });
 
   it("resolves nested subdirectories", () => {
