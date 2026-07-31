@@ -23,6 +23,7 @@ import {
 } from "@mori/kernel";
 import { getEmbedder, resolveEmbeddingsConfig } from "../external/embeddings/index.js";
 import { BASH_TOOL_NAME } from "../tools/bash.js";
+import { maskSecrets } from "./mask-secrets.js";
 
 /** Provenance recorded on every event this harness appends. */
 export const MORI_ACTOR = "mori";
@@ -155,7 +156,12 @@ export function createAgentEventObserver(): ToolCallObserver<AgentEvent> {
       }
       case "shell": {
         const command = stringArg(args, "command");
-        return command ? observedShell({ toolName: event.toolName, command }) : undefined;
+        // Masked here, before the command ever reaches the kernel's append-only
+        // event log — see mask-secrets.ts for why that has to happen on this
+        // side of the seam.
+        return command
+          ? observedShell({ toolName: event.toolName, command: maskSecrets(command) })
+          : undefined;
       }
       default:
         return undefined;

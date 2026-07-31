@@ -206,6 +206,18 @@ describe("createAgentEventObserver", () => {
     ).toBeUndefined();
   });
 
+  it("masks credential-shaped values in a captured bash command (#129)", () => {
+    const observe = createAgentEventObserver();
+    const command = "pip install https://user:token@private.example/pkg";
+
+    observe(toolStart("c1", "bash", { command }));
+
+    expect(observe(toolEnd("c1", "bash"))).toEqual({
+      toolName: "bash",
+      toolInputText: "pip install https://***@private.example/pkg",
+    });
+  });
+
   it("ignores read-only tools", () => {
     const observe = createAgentEventObserver();
 
