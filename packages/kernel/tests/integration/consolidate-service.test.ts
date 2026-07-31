@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
+  createConsolidatedMemory,
   createObservation,
   createProject,
   type ObservationSignal,
@@ -17,15 +18,24 @@ import type {
 } from "../../src/index.js";
 import {
   ExtractionParseError,
+  MAX_EXTRACTION_INPUT_CHARS,
+  boundExtractionInput,
+  buildExtractionUserContent,
   chunkConversation,
   consolidate,
   getConsolidateWatermark,
+  getConsolidationStatus,
   parseExtractedMemories,
   readLastConsolidateAttempt,
   setConsolidateWatermark,
+  shouldTriggerThresholdConsolidate,
   type Consolidator,
 } from "../../src/services/consolidate-service.js";
-import { listOpenConflicts, listValidMemories } from "../../src/services/projection-store.js";
+import {
+  listOpenConflicts,
+  listValidMemories,
+  rebuildProjectProjection,
+} from "../../src/services/projection-store.js";
 import { listSegments } from "../../src/services/segment-store.js";
 import { closeAll } from "../../src/storage/db.js";
 import { appendEvent, readEvents } from "../../src/storage/event-store.js";
@@ -67,6 +77,26 @@ async function seedObservation(
     scopeType: "session",
     scopeId: projectId,
     actor: "test",
+    payload: observation,
+  });
+  return observation.id;
+}
+
+/** A `observation.captured` carried in by a workspace union sibling (#113
+ *  item②) — same db, foreign lane, via the same `sourceProjectId` provenance
+ *  override `projection-lane.test.ts` uses for tasks/memories. */
+async function seedForeignObservation(
+  summary: string,
+  signal: ObservationSignal = "decision-keyword",
+): Promise<string> {
+  const observation = createObservation({ projectId, signal, summary, toolName: "Bash" });
+  await appendEvent({
+    type: "observation.captured",
+    projectId,
+    scopeType: "session",
+    scopeId: projectId,
+    actor: "test",
+    sourceProjectId: "proj_lane_foreign_sibling",
     payload: observation,
   });
   return observation.id;
@@ -200,7 +230,9 @@ describe("consolidate — extractor selection", () => {
     expect(result).toMatchObject({ extractor: "rule-based", backend: "rule-based", outcome: "ok" });
     const texts = listValidMemories(projectId).map((r) => r.memory.text);
     expect(texts).toContain("decided to drop the cache");
-    expect(texts.some((t) => t.startsWith("Edited 1 file(s)"))).toBe(true);
+    // No structured `filePath` on this observation, so the fallback reports the
+    // count it can stand behind — edits, not files.
+    expect(texts.some((t) => t.startsWith("Made 1 file edit(s)"))).toBe(true);
   });
 
   it("prefers an explicitly injected consolidator over the LLM", async () => {
@@ -444,5 +476,696 @@ describe("consolidate — semantic wiring", () => {
     const result = await consolidate({ projectId, actor: "test" });
     expect(result.consolidated).toBeGreaterThan(0);
     expect(listOpenConflicts(projectId)).toHaveLength(0);
+  });
+});
+
+// #113 ① — the rule-based fallback must never promote a write-tool
+// observation's raw content into a searchable memory. `evaluateCapture`'s own
+// type is an unenforced plain string, so this simulates a caller that hands
+// it file content anyway (the #109/PR #127 path contract lives at the harness
+// wiring layer, not here) and asserts the leak is structurally impossible.
+describe("consolidate — rule-based fallback never echoes write-tool content (#113)", () => {
+  it("never puts a write-tool observation's summary/filePath value into memory text", async () => {
+    const secret = "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
+    const observation = createObservation({
+      projectId,
+      signal: "write-tool",
+      toolName: "Write",
+      summary: `Write: ${secret}`,
+      filePath: secret,
+    });
+    await appendEvent({
+      type: "observation.captured",
+      projectId,
+      scopeType: "session",
+      scopeId: projectId,
+      actor: "test",
+      payload: observation,
+    });
+
+    const result = await consolidate({ projectId, actor: "test" });
+
+    expect(result).toMatchObject({ extractor: "rule-based", outcome: "ok" });
+    const texts = listValidMemories(projectId).map((r) => r.memory.text);
+    expect(texts.some((t) => t.startsWith("Edited 1 file(s)"))).toBe(true);
+    for (const text of texts) {
+      expect(text).not.toContain(secret);
+      expect(text).not.toContain("AWS_SECRET_ACCESS_KEY");
+    }
+  });
+
+  it("dedups the edit count by the structured filePath without ever emitting a path", async () => {
+    const pathA = "/repo/src/a.ts";
+    const pathB = "/repo/src/b.ts";
+    for (const filePath of [pathA, pathA, pathB]) {
+      const observation = createObservation({
+        projectId,
+        signal: "write-tool",
+        toolName: "Edit",
+        summary: `Edit: ${filePath}`,
+        filePath,
+      });
+      await appendEvent({
+        type: "observation.captured",
+        projectId,
+        scopeType: "session",
+        scopeId: projectId,
+        actor: "test",
+        payload: observation,
+      });
+    }
+
+    await consolidate({ projectId, actor: "test" });
+
+    const texts = listValidMemories(projectId).map((r) => r.memory.text);
+    expect(texts).toContain("Edited 2 file(s)");
+    expect(texts.some((t) => t.includes(pathA) || t.includes(pathB))).toBe(false);
+  });
+});
+
+// #113 ② — readEventsSince has no lane concept, so a synced sibling's
+// observation.captured events (same db, foreign `source_project_id`) must be
+// filtered out before they reach the extractor or the backlog count, the same
+// way listRecentObservations already scopes to self by default.
+describe("consolidate — excludes foreign-lane observations (#113)", () => {
+  it("does not fold a foreign-lane observation into a consolidated memory", async () => {
+    await seedObservation("decided to keep this self decision");
+    await seedForeignObservation("decided to leak this foreign decision");
+
+    const result = await consolidate({ projectId, actor: "test" });
+
+    expect(result.observationsProcessed).toBe(1);
+    const texts = listValidMemories(projectId).map((r) => r.memory.text);
+    expect(texts).toContain("decided to keep this self decision");
+    expect(texts).not.toContain("decided to leak this foreign decision");
+  });
+
+  it("excludes foreign-lane observations from the pendingObservations attempt telemetry", async () => {
+    await seedObservation("self decision");
+    await seedForeignObservation("foreign decision one");
+    await seedForeignObservation("foreign mutation two", "mutating-bash");
+
+    await consolidate({ projectId, actor: "test" });
+
+    expect(readLastConsolidateAttempt(projectId)).toMatchObject({ pendingObservations: 1 });
+  });
+
+  it("excludes foreign-lane observations from the threshold backlog that fires a boundary", async () => {
+    await seedObservation("self decision");
+    for (let i = 0; i < 25; i++) {
+      await seedForeignObservation(`foreign decision ${i}`);
+    }
+
+    // The backlog a boundary would actually distill is 1, not 26 — otherwise a
+    // foreign-only backlog crosses the local threshold and fires a boundary
+    // that immediately finds nothing of its own to do.
+    expect(getConsolidationStatus(projectId).pendingObservations).toBe(1);
+    expect(shouldTriggerThresholdConsolidate(projectId)).toBe(false);
+  });
+
+  it("still advances past a foreign-only window instead of rescanning it forever", async () => {
+    await seedForeignObservation("foreign only, no self observations");
+
+    const result = await consolidate({ projectId, actor: "test" });
+
+    expect(result).toMatchObject({ observationsProcessed: 0, outcome: "noop" });
+    expect(getConsolidateWatermark(projectId)).toBeDefined();
+
+    const second = await consolidate({ projectId, actor: "test" });
+    expect(second).toMatchObject({ observationsProcessed: 0, outcome: "noop" });
+  });
+});
+
+// #113 ③ — the extraction prompt has no cap on observations / existing
+// memories / conversation tail, and a context-limit rejection is treated as
+// an ordinary (non-advancing) extractor failure, so an oversized window would
+// retry forever, only ever growing. boundExtractionInput fixes the size; the
+// watermark logic in consolidate() uses its result so the excess is retried
+// (never lost) by later boundaries instead.
+describe("boundExtractionInput / buildExtractionUserContent — input budget (#113)", () => {
+  it("keeps the rendered prompt within MAX_EXTRACTION_INPUT_CHARS for an oversized window", () => {
+    const observations = Array.from({ length: 500 }, (_, i) =>
+      createObservation({
+        projectId,
+        signal: "decision-keyword",
+        summary: `decision number ${i} `.repeat(20),
+        toolName: "Bash",
+      }),
+    );
+    const existingMemories = Array.from({ length: 500 }, (_, i) =>
+      createConsolidatedMemory({
+        projectId,
+        kind: "progress",
+        text: `memory ${i} `.repeat(20),
+        salience: 5,
+      }),
+    );
+
+    const bounded = boundExtractionInput({
+      observations,
+      existingMemories,
+      transcriptTail: "x".repeat(50_000),
+    });
+
+    expect(buildExtractionUserContent(bounded).length).toBeLessThanOrEqual(
+      MAX_EXTRACTION_INPUT_CHARS,
+    );
+    expect(bounded.observations.length).toBeGreaterThan(0);
+  });
+
+  it("always keeps at least one observation even when it alone exceeds the budget", () => {
+    const bounded = boundExtractionInput({
+      observations: [
+        createObservation({
+          projectId,
+          signal: "decision-keyword",
+          summary: "z".repeat(MAX_EXTRACTION_INPUT_CHARS * 2),
+          toolName: "Bash",
+        }),
+      ],
+      existingMemories: [],
+    });
+
+    expect(bounded.observations).toHaveLength(1);
+  });
+
+  it("marks observationsTruncated and keeps a PREFIX (oldest-first) when trimming", () => {
+    const observations = Array.from({ length: 500 }, (_, i) =>
+      createObservation({
+        projectId,
+        signal: "decision-keyword",
+        summary: `obs ${i} `.repeat(30),
+        toolName: "Bash",
+      }),
+    );
+
+    const bounded = boundExtractionInput({ observations, existingMemories: [] });
+
+    expect(bounded.observationsTruncated).toBe(true);
+    expect(bounded.observations.length).toBeLessThan(observations.length);
+    expect(bounded.observations[0]).toBe(observations[0]);
+    expect(bounded.observations.at(-1)).toBe(observations[bounded.observations.length - 1]);
+  });
+
+  it("sacrifices the transcript tail before observations or existing memories", () => {
+    const bounded = boundExtractionInput({
+      observations: [
+        createObservation({
+          projectId,
+          signal: "decision-keyword",
+          summary: "one decision",
+          toolName: "Bash",
+        }),
+      ],
+      existingMemories: [],
+      transcriptTail: "y".repeat(MAX_EXTRACTION_INPUT_CHARS * 2),
+    });
+
+    // The observation is kept whole; the tail takes the cut.
+    expect(bounded.observations).toHaveLength(1);
+    expect(bounded.observationsTruncated).toBe(false);
+    expect(bounded.transcriptTail!.length).toBeLessThan(MAX_EXTRACTION_INPUT_CHARS * 2);
+    expect(buildExtractionUserContent(bounded).length).toBeLessThanOrEqual(
+      MAX_EXTRACTION_INPUT_CHARS,
+    );
+  });
+
+  // Codex P1 on PR #136: stopping the observation trim at one item without
+  // also shortening THAT item left the returned input over the advertised
+  // bound, so a provider could still reject the prompt — and since #43 holds
+  // the watermark on a failed extraction, that one observation would be
+  // retried forever.
+  it("clips the last surviving observation's summary so the bound holds even for it alone", () => {
+    const observation = createObservation({
+      projectId,
+      signal: "decision-keyword",
+      summary: "z".repeat(MAX_EXTRACTION_INPUT_CHARS * 2),
+      toolName: "Bash",
+    });
+
+    const bounded = boundExtractionInput({ observations: [observation], existingMemories: [] });
+
+    expect(bounded.observations).toHaveLength(1);
+    expect(buildExtractionUserContent(bounded).length).toBeLessThanOrEqual(
+      MAX_EXTRACTION_INPUT_CHARS,
+    );
+    // Clipped, not dropped — and still the SAME observation, so the watermark
+    // may legitimately advance past it.
+    expect(bounded.observations[0]!.id).toBe(observation.id);
+    expect(bounded.observations[0]!.summary!.length).toBeLessThan(observation.summary!.length);
+  });
+
+  it("gives the tail the leftover budget instead of dropping it whole", () => {
+    const tail = Array.from({ length: 4000 }, (_, i) => `USER: line ${i}`).join("\n\n");
+
+    const bounded = boundExtractionInput({
+      observations: [
+        createObservation({
+          projectId,
+          signal: "decision-keyword",
+          summary: "one decision",
+          toolName: "Bash",
+        }),
+      ],
+      existingMemories: [],
+      transcriptTail: tail,
+    });
+
+    expect(bounded.transcriptTailCoverage).toBe("clipped");
+    expect(bounded.transcriptTail).toBeDefined();
+    // Keeps the turns NEAREST the boundary.
+    expect(bounded.transcriptTail!.endsWith(tail.slice(-200))).toBe(true);
+    expect(buildExtractionUserContent(bounded).length).toBeLessThanOrEqual(
+      MAX_EXTRACTION_INPUT_CHARS,
+    );
+  });
+
+  it("flags a tail dropped outright when the observations left no room for it", () => {
+    const bounded = boundExtractionInput({
+      observations: [
+        createObservation({
+          projectId,
+          signal: "decision-keyword",
+          summary: "z".repeat(MAX_EXTRACTION_INPUT_CHARS * 2),
+          toolName: "Bash",
+        }),
+      ],
+      existingMemories: [],
+      transcriptTail: "conversation that will not fit",
+    });
+
+    expect(bounded.transcriptTail).toBeUndefined();
+    expect(bounded.transcriptTailCoverage).toBe("dropped");
+  });
+
+  // Owner adjudication on PR #136 (Codex P2 `:377`): the postcondition is
+  // "the returned input ALWAYS renders within maxChars", with no exception —
+  // and clipping only `summary` left one: the renderer puts `toolName` on the
+  // same line as a separate field, and nothing upstream clips it.
+  it("clips a toolName that overruns the budget on its own", () => {
+    const observation = createObservation({
+      projectId,
+      signal: "decision-keyword",
+      summary: "short",
+      toolName: "T".repeat(MAX_EXTRACTION_INPUT_CHARS * 2),
+    });
+
+    const bounded = boundExtractionInput({ observations: [observation], existingMemories: [] });
+
+    expect(bounded.observations).toHaveLength(1);
+    expect(buildExtractionUserContent(bounded).length).toBeLessThanOrEqual(
+      MAX_EXTRACTION_INPUT_CHARS,
+    );
+    // Clipped, not dropped: id/provenance survive, so the watermark may still
+    // advance past an observation the extractor genuinely saw.
+    expect(bounded.observations[0]!.id).toBe(observation.id);
+    expect(bounded.observations[0]!.toolName!.length).toBeLessThan(observation.toolName!.length);
+  });
+
+  // Owner adjudication on PR #136 (Codex P1 `:393`): with the raw buffer off
+  // the tail is the conversation's only copy, so it must be RESERVED ahead of
+  // the (recoverable) existing-memory section rather than fed the leftovers.
+  it("reserves the whole tail ahead of existing memories when the raw buffer is off", () => {
+    const existingMemories = Array.from({ length: 500 }, (_, i) =>
+      createConsolidatedMemory({
+        projectId,
+        kind: "progress",
+        text: `memory ${i} `.repeat(20),
+        salience: 5,
+      }),
+    );
+    const tail = Array.from({ length: 300 }, (_, i) => `USER: turn ${i}`).join("\n\n");
+
+    const reserved = boundExtractionInput(
+      {
+        observations: [
+          createObservation({
+            projectId,
+            signal: "decision-keyword",
+            summary: "one decision",
+            toolName: "Bash",
+          }),
+        ],
+        existingMemories,
+        transcriptTail: tail,
+      },
+      { tailPersistedElsewhere: false },
+    );
+
+    expect(reserved.transcriptTailCoverage).toBe("whole");
+    expect(reserved.transcriptTail).toBe(tail);
+    expect(buildExtractionUserContent(reserved).length).toBeLessThanOrEqual(
+      MAX_EXTRACTION_INPUT_CHARS,
+    );
+
+    // With the raw buffer ON the same slice is stored as segments either way,
+    // so shortening it is the cheap sacrifice again and memories fill first.
+    const leftover = boundExtractionInput(
+      {
+        observations: [
+          createObservation({
+            projectId,
+            signal: "decision-keyword",
+            summary: "one decision",
+            toolName: "Bash",
+          }),
+        ],
+        existingMemories,
+        transcriptTail: tail,
+      },
+      { tailPersistedElsewhere: true },
+    );
+
+    expect(leftover.existingMemories.length).toBeGreaterThan(reserved.existingMemories.length);
+    expect(leftover.transcriptTailCoverage).not.toBe("whole");
+  });
+
+  it("stays fast on a large valid-memory history (binary search, not drop-one-at-a-time)", () => {
+    const existingMemories = Array.from({ length: 20_000 }, (_, i) =>
+      createConsolidatedMemory({
+        projectId,
+        kind: "progress",
+        text: `memory ${i} `.repeat(20),
+        salience: 5,
+      }),
+    );
+
+    const startedAt = Date.now();
+    const bounded = boundExtractionInput({
+      observations: [
+        createObservation({
+          projectId,
+          signal: "decision-keyword",
+          summary: "one decision",
+          toolName: "Bash",
+        }),
+      ],
+      existingMemories,
+    });
+
+    // The quadratic version rendered all 20k memories once per dropped memory.
+    expect(Date.now() - startedAt).toBeLessThan(5_000);
+    expect(buildExtractionUserContent(bounded).length).toBeLessThanOrEqual(
+      MAX_EXTRACTION_INPUT_CHARS,
+    );
+    // Keeps the NEWEST memories.
+    expect(bounded.existingMemories.at(-1)).toBe(existingMemories.at(-1));
+  });
+});
+
+describe("consolidate — bounded input keeps the watermark self-healing (#113)", () => {
+  it("advances on an oversized backlog and drains it over successive boundaries instead of retrying forever", async () => {
+    const bigSummary = "y".repeat(2000);
+    const total = 30;
+    for (let i = 0; i < total; i++) {
+      await seedObservation(`${bigSummary} #${i}`, "decision-keyword");
+    }
+
+    const noopConsolidator: Consolidator = {
+      async extract() {
+        return [];
+      },
+    };
+
+    const first = await consolidate({ projectId, actor: "test", consolidator: noopConsolidator });
+    // The window was too big to show in full — only a bounded PREFIX was
+    // processed, proving a single call can no longer fail purely from size.
+    expect(first.observationsProcessed).toBeGreaterThan(0);
+    expect(first.observationsProcessed).toBeLessThan(total);
+    expect(getConsolidateWatermark(projectId)).toBeDefined();
+
+    // The untouched remainder is retried — not lost — by later boundaries,
+    // draining to zero rather than looping on the same ever-growing window.
+    let remaining = total - first.observationsProcessed;
+    let guard = 0;
+    while (remaining > 0 && guard < total) {
+      const next = await consolidate({ projectId, actor: "test", consolidator: noopConsolidator });
+      expect(next.observationsProcessed).toBeGreaterThan(0);
+      remaining -= next.observationsProcessed;
+      guard += 1;
+    }
+    expect(remaining).toBe(0);
+
+    const drained = await consolidate({ projectId, actor: "test", consolidator: noopConsolidator });
+    expect(drained).toMatchObject({ observationsProcessed: 0, outcome: "noop" });
+  });
+});
+
+// Codex P1 on PR #136: the tail was dropped on the argument that the raw
+// slice is durably stored as segments anyway — but those writes are gated on
+// MEMORIZE_RAW_SEGMENTS, so with the buffer off a dropped slice was neither
+// extracted nor stored while its cursor advanced regardless.
+describe("consolidate — never consumes a conversation slice it neither showed nor stored (#113)", () => {
+  /** An observation whose summary alone eats the whole extraction budget. */
+  async function seedBudgetFillingObservation(): Promise<void> {
+    await seedObservation("q".repeat(MAX_EXTRACTION_INPUT_CHARS * 2), "decision-keyword");
+  }
+
+  it("holds the conversation cursor when the tail was dropped and the raw buffer is off", async () => {
+    process.env.MEMORIZE_RAW_SEGMENTS = "0";
+    await seedBudgetFillingObservation();
+    const conversation = fakeConversation([
+      { text: "USER: this must not vanish", newOffset: 512 },
+      { text: "USER: this must not vanish\n\nUSER: more", newOffset: 900 },
+    ]);
+    const seen: Array<string | undefined> = [];
+    const consolidator: Consolidator = {
+      async extract(input) {
+        seen.push(input.transcriptTail);
+        return [];
+      },
+    };
+
+    await consolidate({ projectId, actor: "test", conversation, consolidator });
+    expect(seen[0]).toBeUndefined();
+    expect(listSegments(projectId)).toHaveLength(0);
+
+    await consolidate({ projectId, actor: "test", conversation, consolidator });
+    // Re-read from 0: the slice was never shown, never stored, so it was not
+    // consumed either.
+    expect(conversation.offsets).toEqual([0, 0]);
+  });
+
+  it("advances the cursor for a dropped tail when the raw buffer captured it", async () => {
+    await seedBudgetFillingObservation();
+    const conversation = fakeConversation([
+      { text: "USER: stored verbatim instead", newOffset: 512 },
+      { text: "USER: next", newOffset: 900 },
+    ]);
+    const consolidator: Consolidator = {
+      async extract() {
+        return [];
+      },
+    };
+
+    const first = await consolidate({ projectId, actor: "test", conversation, consolidator });
+    expect(first.segmentsWritten).toBeGreaterThan(0);
+
+    await consolidate({ projectId, actor: "test", conversation, consolidator });
+    expect(conversation.offsets).toEqual([0, 512]);
+  });
+
+  /** A valid-memory history that alone overruns the extraction budget — the
+   *  premise of item ③ (`listValidMemories` is unbounded). Projections are
+   *  rebuilt at the end: `appendEvent` only writes the log, and `consolidate`
+   *  reads the memory section through `listValidMemories`, so without this the
+   *  history would be invisible and the budget pressure fictional. */
+  async function seedOversizedMemoryHistory(): Promise<void> {
+    for (let i = 0; i < 300; i++) {
+      await appendEvent({
+        type: "memory.consolidated",
+        projectId,
+        scopeType: "session",
+        scopeId: projectId,
+        actor: "test",
+        payload: createConsolidatedMemory({
+          projectId,
+          kind: "progress",
+          text: `filler memory ${i} `.repeat(20),
+          salience: 5,
+        }),
+      });
+    }
+    await rebuildProjectProjection(projectId, { reindexSearch: false });
+  }
+
+  // Owner adjudication on PR #136 (Codex P1 `:393`): letting existing memories
+  // take the budget greedily and the tail have the leftovers starved the tail
+  // FOREVER once the memory history outgrew the budget — the leftover is by
+  // construction under one memory line, the next boundary allocates the same
+  // way, and memory history never shrinks. Two consecutive boundaries are the
+  // minimum that can catch it: a single-boundary test sees a held cursor and
+  // cannot tell "held once" from "held for good".
+  it("advances the conversation cursor over successive boundaries when the memory history alone exceeds the budget", async () => {
+    process.env.MEMORIZE_RAW_SEGMENTS = "0";
+    await seedOversizedMemoryHistory();
+    // Slices comfortably inside the budget on their own, but larger than the
+    // crumb a greedy memory fill leaves behind (under one memory line) — which
+    // is exactly the size a leftover-allocated tail can never grow past.
+    const sliceText = (label: string): string =>
+      Array.from({ length: 40 }, (_, i) => `USER: ${label} turn ${i} `.repeat(2)).join("\n\n");
+    const conversation = fakeConversation([
+      { text: sliceText("first"), newOffset: 512 },
+      { text: sliceText("second"), newOffset: 900 },
+    ]);
+    const seen: Array<string | undefined> = [];
+    const consolidator: Consolidator = {
+      async extract(input) {
+        seen.push(input.transcriptTail);
+        return [];
+      },
+    };
+
+    const first = await consolidate({ projectId, actor: "test", conversation, consolidator });
+    expect(seen[0]).toBe(sliceText("first"));
+    expect(first.conversationSliceHeld).toBe(false);
+    expect(listSegments(projectId)).toHaveLength(0);
+
+    const second = await consolidate({ projectId, actor: "test", conversation, consolidator });
+    expect(seen[1]).toBe(sliceText("second"));
+    expect(second.conversationSliceHeld).toBe(false);
+    // Second read starts where the first slice ended: the cursor moved, and
+    // kept moving, instead of pinning the conversation axis.
+    expect(conversation.offsets).toEqual([0, 512]);
+  });
+
+  // Owner adjudication on PR #136 (Codex P1 `:1350`): a CLIPPED tail was
+  // treated as "shown", so the cursor advanced over a prefix the extractor
+  // never saw — the same loss as dropping it, moved to a different branch.
+  it("holds the cursor for a merely CLIPPED tail, and says so on the result and the attempt", async () => {
+    process.env.MEMORIZE_RAW_SEGMENTS = "0";
+    // One slice larger than the whole budget: not even zero memories make room
+    // for it, so no allocation policy can show it whole.
+    const huge = Array.from({ length: 4000 }, (_, i) => `USER: line ${i}`).join("\n\n");
+    const conversation = fakeConversation([
+      { text: huge, newOffset: 512 },
+      { text: `${huge}\n\nUSER: later`, newOffset: 900 },
+    ]);
+    const seen: Array<string | undefined> = [];
+    const consolidator: Consolidator = {
+      async extract(input) {
+        seen.push(input.transcriptTail);
+        return [];
+      },
+    };
+
+    const first = await consolidate({ projectId, actor: "test", conversation, consolidator });
+    // Partly shown — and therefore NOT consumed.
+    expect(seen[0]!.length).toBeLessThan(huge.length);
+    expect(first.conversationSliceHeld).toBe(true);
+    expect(readLastConsolidateAttempt(projectId)?.conversationSliceHeld).toBe(true);
+
+    await consolidate({ projectId, actor: "test", conversation, consolidator });
+    expect(conversation.offsets).toEqual([0, 0]);
+  });
+
+  it("advances the cursor for an empty slice, which has nothing to lose", async () => {
+    process.env.MEMORIZE_RAW_SEGMENTS = "0";
+    await seedObservation("decided x");
+    const conversation = fakeConversation([
+      { text: "", newOffset: 77 },
+      { text: "", newOffset: 88 },
+    ]);
+
+    await consolidate({ projectId, actor: "test", conversation });
+    await consolidate({ projectId, actor: "test", conversation });
+
+    expect(conversation.offsets).toEqual([0, 77]);
+  });
+});
+
+// Codex P2 on PR #136: the extractor sees `bounded.existingMemories`, so a
+// supersedes id naming a memory the budget trimmed away cannot have been
+// judged by the model that emitted it.
+describe("consolidate — supersedes only what the extractor was shown (#113)", () => {
+  it("ignores a supersedes id for a memory the input budget trimmed away", async () => {
+    const trimmed = createConsolidatedMemory({
+      projectId,
+      kind: "decision",
+      text: "the oldest memory, trimmed out of the prompt",
+      salience: 5,
+    });
+    await appendEvent({
+      type: "memory.consolidated",
+      projectId,
+      scopeType: "session",
+      scopeId: projectId,
+      actor: "test",
+      payload: trimmed,
+    });
+    // Push it out of the budget with a large, newer valid-memory history.
+    for (let i = 0; i < 300; i++) {
+      await appendEvent({
+        type: "memory.consolidated",
+        projectId,
+        scopeType: "session",
+        scopeId: projectId,
+        actor: "test",
+        payload: createConsolidatedMemory({
+          projectId,
+          kind: "progress",
+          text: `filler memory ${i} `.repeat(20),
+          salience: 5,
+        }),
+      });
+    }
+    await seedObservation("decided something new");
+    // `appendEvent` writes the log only; without this the memory section
+    // `consolidate` reads would be empty and the trim under test fictional.
+    await rebuildProjectProjection(projectId, { reindexSearch: false });
+
+    const consolidator: Consolidator = {
+      async extract(input) {
+        expect(input.existingMemories.length).toBeGreaterThan(0);
+        expect(input.existingMemories.some((m) => m.id === trimmed.id)).toBe(false);
+        return [
+          {
+            kind: "decision",
+            text: "a new decision",
+            salience: 6,
+            supersedesMemoryId: trimmed.id,
+            supersedeReason: "injected",
+          },
+        ];
+      },
+    };
+
+    const result = await consolidate({ projectId, actor: "test", consolidator });
+
+    expect(result.superseded).toBe(0);
+    const events = await readEvents(projectId);
+    expect(events.filter((e) => e.type === "memory.superseded")).toHaveLength(0);
+    expect(listValidMemories(projectId).map((r) => r.memory.id)).toContain(trimmed.id);
+  });
+});
+
+// Codex P2 on PR #136: a batch mixing path-carrying and legacy/pathless write
+// observations reported only the paths, so "Edited 1 file(s)" could stand for
+// a window of many more edits.
+describe("consolidate — fallback edit count never under-claims a mixed batch (#113)", () => {
+  it("reports the edit count when some write observations carry no path", async () => {
+    for (const filePath of ["/repo/src/a.ts", undefined, undefined, undefined]) {
+      const observation = createObservation({
+        projectId,
+        signal: "write-tool",
+        toolName: "Edit",
+        summary: "Edit: something",
+        ...(filePath ? { filePath } : {}),
+      });
+      await appendEvent({
+        type: "observation.captured",
+        projectId,
+        scopeType: "session",
+        scopeId: projectId,
+        actor: "test",
+        payload: observation,
+      });
+    }
+
+    await consolidate({ projectId, actor: "test" });
+
+    const texts = listValidMemories(projectId).map((r) => r.memory.text);
+    expect(texts).toContain("Made 4 file edit(s)");
+    expect(texts.some((t) => t.includes("Edited 1 file(s)"))).toBe(false);
   });
 });
