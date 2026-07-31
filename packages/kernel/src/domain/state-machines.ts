@@ -80,6 +80,18 @@ export function assertConflictStatusTransition(from: ConflictStatus, to: Conflic
   assertTransition("conflict status", from, to, conflictTransitions);
 }
 
+/**
+ * Conflict statuses with no outgoing transition — `resolved` and
+ * `auto_resolved` are both terminal (`escalated` still has `-> resolved`, so
+ * it stays open). The state machine is the single source of truth for
+ * "closed"; readers (e.g. `listOpenConflicts`'s SQL predicate) derive from
+ * this instead of hardcoding a status list that could drift from
+ * `conflictTransitions`.
+ */
+export const TERMINAL_CONFLICT_STATUSES: ConflictStatus[] = (
+  Object.keys(conflictTransitions) as ConflictStatus[]
+).filter((status) => conflictTransitions[status].length === 0);
+
 export function assertSyncStatusTransition(from: SyncStatus, to: SyncStatus): void {
   assertTransition("sync status", from, to, syncTransitions);
 }

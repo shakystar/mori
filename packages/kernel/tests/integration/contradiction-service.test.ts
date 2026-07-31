@@ -15,13 +15,14 @@ import {
   type Judge,
 } from "../../src/services/contradiction-service.js";
 import { ensureEmbeddings } from "../../src/services/embeddings-service.js";
+import { listEmbeddings } from "../../src/services/embeddings-store.js";
 import {
   listOpenConflicts,
   listValidMemories,
   rebuildProjectProjection,
 } from "../../src/services/projection-store.js";
 import { closeAll } from "../../src/storage/db.js";
-import { appendEvent } from "../../src/storage/event-store.js";
+import { appendEvent, readEvents } from "../../src/storage/event-store.js";
 
 let sandbox: string;
 let projectId: string;
@@ -198,6 +199,70 @@ describe("contradiction-service", () => {
     );
   });
 
+  it("writes memory.superseded + conflict.detected back-to-back via one appendEvents batch (#118 item 3)", async () => {
+    // appendEvents' own transactional rollback guarantee already has a
+    // dedicated test (append-atomicity.test.ts) — asserting the failure
+    // mode here again would mean mocking storage internals for no extra
+    // coverage. Instead this asserts the observable consequence of routing
+    // both events through ONE appendEvents call: in the seq-ordered log,
+    // conflict.detected lands in the very next slot after memory.superseded,
+    // with nothing else able to interleave (a two-`appendEvent` version
+    // could not guarantee that adjacency).
+    const embedder = fakeEmbedder(VECTORS);
+    await seedMemory(MEM_PG, "2026-01-01T00:00:00.000Z");
+    await seedMemory(MEM_SQLITE, "2026-01-02T00:00:00.000Z");
+    await ensureEmbeddings(projectId, embedder);
+
+    await detectContradictions({
+      projectId,
+      embedder,
+      judge: alwaysContradicts,
+      actor: "test",
+    });
+
+    const events = await readEvents(projectId);
+    const supersededIdx = events.findIndex((e) => e.type === "memory.superseded");
+    expect(supersededIdx).toBeGreaterThanOrEqual(0);
+    expect(events[supersededIdx + 1]?.type).toBe("conflict.detected");
+  });
+
+  it("a surviving winner keeps scanning and both of its contradictions apply in one call (#118 item 4)", async () => {
+    const MEM_WINNER = "Decision Z: use option A (latest call)";
+    const MEM_LOSER_1 = "Decision Z: use option B instead of A";
+    const MEM_LOSER_2 = "Decision Z: use option C instead of A";
+    const vectors: Record<string, number[]> = {
+      [MEM_WINNER]: [1, 0, 0],
+      [MEM_LOSER_1]: [0.95, 0.05, 0],
+      [MEM_LOSER_2]: [0.9, 0.1, 0],
+    };
+    const embedder = fakeEmbedder(vectors, "fake-embed-v3");
+    // Seeded first (so it's `decisions[0]`, the outer-loop `a` for both
+    // pairs below) but with the LATEST createdAt, so pickWinner keeps it as
+    // the winner against both memories seeded after it.
+    const winnerId = await seedMemory(MEM_WINNER, "2026-01-03T00:00:00.000Z");
+    const loser1Id = await seedMemory(MEM_LOSER_1, "2026-01-01T00:00:00.000Z");
+    const loser2Id = await seedMemory(MEM_LOSER_2, "2026-01-02T00:00:00.000Z");
+    await ensureEmbeddings(projectId, embedder);
+
+    const results = await detectContradictions({
+      projectId,
+      embedder,
+      judge: alwaysContradicts,
+      actor: "test",
+    });
+
+    // Pre-fix, the unconditional `break` stopped scanning `a` after the
+    // first confirmed pair even though `a` (the winner) was still valid,
+    // so only one of these two contradictions would have been applied.
+    expect(results).toHaveLength(2);
+    expect(results.every((r) => r.winnerId === winnerId)).toBe(true);
+    expect(results.map((r) => r.loserId).sort()).toEqual([loser1Id, loser2Id].sort());
+
+    const validIds = listValidMemories(projectId).map((row) => row.memory.id);
+    expect(validIds).toEqual([winnerId]);
+    expect(listOpenConflicts(projectId)).toHaveLength(2);
+  });
+
   it("multiple independent contradictions in one pass each persist (no scopeId collision)", async () => {
     const MEM_X1 = "Decision X: use option A";
     const MEM_X2 = "Decision X: use option B instead of A";
@@ -252,6 +317,32 @@ describe("contradiction-service", () => {
       cosineThreshold: 0.999,
     });
     expect(judgeCalls).toBe(0);
+  });
+
+  it("never mixes embeddings from a stale model into the cosine prefilter (#118 item 1)", async () => {
+    const staleEmbedder = fakeEmbedder(VECTORS, "stale-embed-v1");
+    await seedMemory(MEM_PG, "2026-01-01T00:00:00.000Z");
+    await seedMemory(MEM_SQLITE, "2026-01-02T00:00:00.000Z");
+    // Corpus is embedded under a model the active embedder no longer is.
+    await ensureEmbeddings(projectId, staleEmbedder);
+    expect(listEmbeddings(projectId, "memory")).toHaveLength(2);
+
+    const activeEmbedder = fakeEmbedder(VECTORS, "active-embed-v2");
+    let judgeCalls = 0;
+    const countingJudge: Judge = async () => {
+      judgeCalls += 1;
+      return { contradicts: true };
+    };
+
+    const results = await detectContradictions({
+      projectId,
+      embedder: activeEmbedder,
+      judge: countingJudge,
+      actor: "test",
+    });
+
+    expect(judgeCalls).toBe(0);
+    expect(results).toEqual([]);
   });
 
   it("default threshold constant is exported and sane", () => {

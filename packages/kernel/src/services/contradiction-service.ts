@@ -1,11 +1,11 @@
 import type { ConsolidatorLlm } from "../index.js";
 import type { Embedder } from "../index.js";
-import { createConflict, type Conflict } from "../domain/entities.js";
+import { createConflict, type Conflict, type MemorySupersededPayload } from "../domain/entities.js";
 import type { MemoryRecord } from "../projections/projector.js";
 import { cosineSimilarity } from "./embeddings-service.js";
 import { listEmbeddings } from "./embeddings-store.js";
 import { listValidMemories, rebuildProjectProjection } from "./projection-store.js";
-import { appendEvent } from "../storage/event-store.js";
+import { appendEvents } from "../storage/event-store.js";
 
 /**
  * Semantic contradiction detection between `decision`-kind memories — an
@@ -137,12 +137,16 @@ function pickWinner(a: MemoryRecord, b: MemoryRecord): [MemoryRecord, MemoryReco
  * Conflict). Returns the contradictions actually applied, in detection order.
  *
  * Deliberately a single boundary pass over a snapshot of the valid set taken
- * at call time (mirrors ensureEmbeddings' stale-batch model) — a memory that
- * loses one pairwise judgement is not re-excluded from later pairs in the
- * same call, so a memory transitively contradicted by two others can end up
- * `supersededBy` only the first; that's an accepted limitation of a
- * from-scratch pass, not a partial-application bug (a later call re-scans the
- * post-supersede valid set and only compares still-valid memories).
+ * at call time (mirrors ensureEmbeddings' stale-batch model): `decisions` and
+ * `vectorById` are read once up front, so a memory superseded earlier in this
+ * same pass still occupies its snapshot slot — but the `alreadyResolved` set
+ * (populated as each pair resolves) excludes it from every later comparison,
+ * both as a further `a` and as a future `b`, so no already-lost memory is
+ * ever re-judged in the same call. A memory that survives as winner keeps
+ * scanning the rest of the snapshot in the same pass, so if it contradicts
+ * two different memories, both are applied here; only a memory that itself
+ * loses stops being scanned further (a later call re-scans the post-supersede
+ * valid set and only compares still-valid memories).
  */
 export async function detectContradictions(
   params: DetectContradictionsParams,
@@ -155,8 +159,14 @@ export async function detectContradictions(
     .filter((memory) => memory.kind === "decision");
   if (decisions.length < 2) return [];
 
+  // Filtered to the active embedder's model (mirrors semanticScoresForKind /
+  // search-service.ts) so a mid-flight `MEMORIZE_EMBEDDINGS_MODEL` change never
+  // mixes vectors from two coordinate spaces into one cosine comparison.
+  // Unlike search-service.ts (which has queryVec-only callers with no
+  // embedder to name a model), this function returns early above when
+  // `embedder` is absent, so there is no no-model case to fall back on here.
   const vectorById = new Map(
-    listEmbeddings(projectId, "memory").map((row) => [row.entityId, row.vector]),
+    listEmbeddings(projectId, "memory", embedder.model).map((row) => [row.entityId, row.vector]),
   );
   const threshold = params.cosineThreshold ?? DEFAULT_COSINE_THRESHOLD;
 
@@ -187,15 +197,6 @@ export async function detectContradictions(
         verdict.reason ?? "embedding cosine prefilter + LLM judge flagged a semantic contradiction"
       }`;
 
-      await appendEvent({
-        type: "memory.superseded",
-        projectId,
-        scopeType: "project",
-        scopeId: projectId,
-        actor,
-        payload: { supersedes: loser.id, supersededBy: winner.id, reason },
-      });
-
       const conflict = createConflict({
         projectId,
         scopeType: "decision",
@@ -205,22 +206,41 @@ export async function detectContradictions(
         rightVersion: b.id,
         conflictType: "decision",
       });
-      // scopeId = the conflict's OWN id (see conflict-service.ts comment):
-      // `state.conflicts` is keyed by `event.scopeId` in the projector, so a
-      // second conflict in the same boundary pass must not collide with the
-      // first.
-      await appendEvent({
-        type: "conflict.detected",
-        projectId,
-        scopeType: "project",
-        scopeId: conflict.id,
-        actor,
-        payload: conflict,
-      });
+
+      // One confirmed contradiction is logically a single operation — both
+      // events go through appendEvents (one db.transaction) so a failure on
+      // the second insert can never leave the loser durably superseded
+      // without the conflict that explains why (#118 item 3).
+      await appendEvents<MemorySupersededPayload | Conflict>(projectId, [
+        {
+          type: "memory.superseded",
+          projectId,
+          scopeType: "project",
+          scopeId: projectId,
+          actor,
+          payload: { supersedes: loser.id, supersededBy: winner.id, reason },
+        },
+        // scopeId = the conflict's OWN id (see conflict-service.ts comment):
+        // `state.conflicts` is keyed by `event.scopeId` in the projector, so a
+        // second conflict in the same boundary pass must not collide with the
+        // first.
+        {
+          type: "conflict.detected",
+          projectId,
+          scopeType: "project",
+          scopeId: conflict.id,
+          actor,
+          payload: conflict,
+        },
+      ]);
 
       alreadyResolved.add(loser.id);
       results.push({ winnerId: winner.id, loserId: loser.id, reason, conflict });
-      break;
+      // Only stop scanning `a` when `a` itself lost — a surviving winner
+      // must keep comparing against the rest of the snapshot in this same
+      // pass, or a second contradiction in one call would be missed (#118
+      // item 4).
+      if (loser.id === a.id) break;
     }
   }
 
