@@ -29,8 +29,16 @@ export interface SecretMaskPattern {
 }
 
 /** Value characters allowed in a masked capture: no whitespace, no quotes (so a
- *  quoted value's closing quote survives the redaction instead of being eaten). */
-const VALUE = `[^\\s"']+`;
+ *  quoted value's closing quote survives the redaction instead of being eaten),
+ *  and none of `;`/`|`/`&` (shell control operators — without this exclusion the
+ *  value swallows the operator plus the start of the next command). */
+const VALUE = `[^\\s"';|&]+`;
+
+/** Optional matching quote wrapped around a value: capture group N is the quote
+ *  character (or `""` if unquoted), and the caller's own `\N` backreference right
+ *  after `${VALUE}` requires the same character to close it. Used so `--token 'x'`
+ *  and `--password="x"` are recognized instead of only the unquoted form. */
+const QUOTE = `(["']?)`;
 
 export const SECRET_MASK_PATTERNS: readonly SecretMaskPattern[] = [
   {
@@ -43,20 +51,22 @@ export const SECRET_MASK_PATTERNS: readonly SecretMaskPattern[] = [
     id: "long-flag-value",
     description: "--token/--password/--secret/--api-key/--access-key style flag (= or space form)",
     pattern: new RegExp(
-      `(--(?:token|password|passwd|secret|api-key|apikey|access-key|access-token|auth-token))([= ])${VALUE}`,
+      `(--(?:token|password|passwd|secret|api-key|apikey|access-key|access-token|auth-token))([= ])${QUOTE}${VALUE}\\3`,
       "gi",
     ),
-    replacement: "$1$2***",
+    replacement: "$1$2$3***$3",
   },
   {
     id: "short-p-flag",
     description:
       "-p<value> inline password flag (mysql/psql style, no separating space). " +
-      "Known false-positive source: any other short flag shaped like -p<word> " +
-      "(e.g. find's -print family does not collide, but a hypothetical -pFOO would) " +
-      "— accepted because masking a non-secret value is cheap next to leaking one.",
-    pattern: new RegExp(`(\\s-p)(?!\\s|$)${VALUE}`, "g"),
-    replacement: "$1***",
+      "Explicitly excludes find's -print/-print0/-printf/-perm/-path/-prune " +
+      "primaries, which share the -p<word> shape but are not password flags.",
+    pattern: new RegExp(
+      `(\\s-p)(?!\\s|$)(?!(?:rint(?:0|f)?|erm|ath|rune)\\b)${QUOTE}${VALUE}\\2`,
+      "g",
+    ),
+    replacement: "$1$2***$2",
   },
   {
     id: "bearer-token",
@@ -70,10 +80,10 @@ export const SECRET_MASK_PATTERNS: readonly SecretMaskPattern[] = [
       "environment variable assignment whose name looks like a secret " +
       "(…SECRET…, …API_KEY…, …TOKEN…, …PASSWORD…)",
     pattern: new RegExp(
-      `(\\b(?:[A-Z0-9]+_)*(?:SECRET|API_KEY|APIKEY|TOKEN|PASSWORD|PASSWD)(?:_[A-Z0-9]+)*=)${VALUE}`,
+      `(\\b(?:[A-Z0-9]+_)*(?:SECRET|API_KEY|APIKEY|TOKEN|PASSWORD|PASSWD)(?:_[A-Z0-9]+)*=)${QUOTE}${VALUE}\\2`,
       "g",
     ),
-    replacement: "$1***",
+    replacement: "$1$2***$2",
   },
 ];
 

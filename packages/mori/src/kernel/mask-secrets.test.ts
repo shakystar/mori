@@ -102,4 +102,59 @@ describe("maskSecrets", () => {
       expect(maskSecrets(command)).toBe(command);
     }
   });
+
+  it("masks a single-quoted long-flag value, keeping the quotes", () => {
+    const masked = maskSecrets("curl --token 'sk-live-secret' https://api.example.com");
+
+    expect(masked).toBe("curl --token '***' https://api.example.com");
+    expect(masked).not.toContain("sk-live-secret");
+  });
+
+  it("masks a double-quoted long-flag value, keeping the quotes", () => {
+    const masked = maskSecrets('client --password="hunter2" --verbose');
+
+    expect(masked).toBe('client --password="***" --verbose');
+    expect(masked).not.toContain("hunter2");
+  });
+
+  it("masks a quoted secret-shaped env assignment, keeping the quotes", () => {
+    const masked = maskSecrets("GITHUB_TOKEN='ghp_abc123' gh pr create");
+
+    expect(masked).toBe("GITHUB_TOKEN='***' gh pr create");
+    expect(masked).not.toContain("ghp_abc123");
+  });
+
+  it("masks a quoted -p<value> inline password, keeping the quotes", () => {
+    const masked = maskSecrets("mysql -uroot -p'MyS3cret' -e 'select 1'");
+
+    expect(masked).toBe("mysql -uroot -p'***' -e 'select 1'");
+    expect(masked).not.toContain("MyS3cret");
+  });
+
+  it("does not mistake find's -print/-print0/-printf/-perm/-path/-prune for a password flag", () => {
+    const commands = [
+      "find . -print0 | xargs -0 mv -t archive",
+      "find . -type f -printf '%f\\n'",
+      "find . -perm -600",
+      "find . -path './secret/*'",
+      "find . -name '*.tmp' -prune -o -print",
+    ];
+
+    for (const command of commands) {
+      expect(maskSecrets(command)).toBe(command);
+    }
+  });
+
+  it("stops a long-flag value at a shell control operator instead of swallowing the next command", () => {
+    const masked = maskSecrets("echo --token=sk-secret;git commit --allow-empty -m x");
+
+    expect(masked).toBe("echo --token=***;git commit --allow-empty -m x");
+    expect(masked).not.toContain("sk-secret");
+    expect(masked).toContain("git commit --allow-empty -m x");
+  });
+
+  it("stops a secret value at a pipe or ampersand", () => {
+    expect(maskSecrets("curl --token=sk-abc|tee out.log")).toBe("curl --token=***|tee out.log");
+    expect(maskSecrets("curl --token=sk-abc&background")).toBe("curl --token=***&background");
+  });
 });
