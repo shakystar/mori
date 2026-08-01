@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
   getProjectLockDir,
+  ProjectLockCompromisedError,
   ProjectLockTimeoutError,
   withProjectLock,
 } from "../../src/storage/project-lock.js";
@@ -114,19 +115,34 @@ describe("withProjectLock — stale reclamation", () => {
     ).resolves.toBe("reclaimed");
   });
 
-  it("reclaims a lock that stopped heartbeating, even when its pid looks alive", async () => {
-    // Our own pid: the liveness check says "alive", so only the heartbeat
-    // timeout can free this. Covers pid reuse and owners on another host.
+  it("never reclaims a live local owner on age, however long it has been silent", async () => {
+    // Our own pid, so the liveness check answers "alive" — and age must not
+    // override it (PR #156 review, Codex P1 ③). The heartbeat is a
+    // `setInterval`, and what stops it is a blocked event loop: a synchronous
+    // projection rebuild over a large log, or a suspended machine. Both end
+    // with the owner waking up and committing, which is the worst possible
+    // moment for a competitor to be inside the same critical section.
     const lockDir = await plantLock({ pid: process.pid });
-    const old = new Date(Date.now() - 60_000);
+    const old = new Date(Date.now() - 600_000);
     await utimes(lockDir, old, old);
 
     await expect(
-      withProjectLock(projectId, async () => "reclaimed", {
-        acquireTimeoutMs: 2_000,
+      withProjectLock(projectId, async () => "should not run", {
+        acquireTimeoutMs: 150,
         staleMs: 5_000,
       }),
-    ).resolves.toBe("reclaimed");
+    ).rejects.toBeInstanceOf(ProjectLockTimeoutError);
+  });
+
+  it("names the lock directory in the timeout, so a pid-reuse wedge is fixable", async () => {
+    // The price of the rule above: an owner whose pid was inherited by an
+    // unrelated process reads as alive forever. That is a loud, one-step
+    // failure by design — the message has to carry the step.
+    await plantLock({ pid: process.pid });
+
+    await expect(
+      withProjectLock(projectId, async () => "should not run", { acquireTimeoutMs: 100 }),
+    ).rejects.toThrow(getProjectLockDir(projectId));
   });
 
   it("does not reclaim a foreign-host lock on age alone before its stale window", async () => {
@@ -138,6 +154,77 @@ describe("withProjectLock — stale reclamation", () => {
         staleMs: 30_000,
       }),
     ).rejects.toBeInstanceOf(ProjectLockTimeoutError);
+  });
+
+  it("reclaims a foreign-host lock once its stale window has passed", async () => {
+    // Age is the only signal we have about another machine's process, so it
+    // stays the rule there — that is what keeps a shared home directory from
+    // wedging forever.
+    const lockDir = await plantLock({ pid: 1, hostname: "some-other-machine" });
+    const old = new Date(Date.now() - 60_000);
+    await utimes(lockDir, old, old);
+
+    await expect(
+      withProjectLock(projectId, async () => "reclaimed", {
+        acquireTimeoutMs: 2_000,
+        staleMs: 5_000,
+      }),
+    ).resolves.toBe("reclaimed");
+  });
+});
+
+describe("withProjectLock — ownership transfer", () => {
+  it("does not delete a successor's lock that has not written its owner record yet", async () => {
+    // A successor between its `mkdir` and its owner write has a directory and
+    // no `owner.json`. Reading that as "unowned, safe to remove" is how the
+    // release path used to delete a live lock (PR #156 review, Codex P1 ②).
+    const lockDir = getProjectLockDir(projectId);
+
+    await withProjectLock(projectId, async () => {
+      await rm(lockDir, { recursive: true, force: true });
+      await mkdir(lockDir, { recursive: true });
+    });
+
+    expect(existsSync(lockDir)).toBe(true);
+    expect(existsSync(join(lockDir, "owner.json"))).toBe(false);
+  });
+
+  it("fails the call when the lock is taken over while it is held", async () => {
+    // A holder cannot stop an ill-timed detach, so it watches instead: the
+    // heartbeat re-reads the owner record and gives up the moment the lock
+    // stops being ours, rather than finishing a span it no longer guards.
+    const lockDir = getProjectLockDir(projectId);
+
+    await expect(
+      withProjectLock(
+        projectId,
+        async () => {
+          await rm(lockDir, { recursive: true, force: true });
+          await plantLock({ pid: deadPid() });
+          await new Promise((resolve) => setTimeout(resolve, 300));
+          return "must not be trusted";
+        },
+        { heartbeatMs: 10 },
+      ),
+    ).rejects.toBeInstanceOf(ProjectLockCompromisedError);
+  });
+
+  it("keeps holding the lock when the owner record is momentarily unreadable", async () => {
+    // A dispossessor replaces the whole directory; a truncated `owner.json` is
+    // not evidence of one. Treating it as such would abort healthy captures.
+    const lockDir = getProjectLockDir(projectId);
+
+    await expect(
+      withProjectLock(
+        projectId,
+        async () => {
+          await writeFile(join(lockDir, "owner.json"), "{ truncated");
+          await new Promise((resolve) => setTimeout(resolve, 100));
+          return "still ours";
+        },
+        { heartbeatMs: 10 },
+      ),
+    ).resolves.toBe("still ours");
   });
 });
 
