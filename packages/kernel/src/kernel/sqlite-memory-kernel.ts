@@ -23,6 +23,7 @@ import {
   type ConsolidateResult,
 } from "../services/consolidate-service.js";
 import { appendEvent, ensureProjectDirectories, hasGenesisEvent } from "../storage/event-store.js";
+import { withProjectLock } from "../storage/project-lock.js";
 
 /**
  * One tool call, in the shape the capture filter reads.
@@ -187,14 +188,29 @@ export class SqliteMemoryKernel<M, E> implements MemoryKernel<M, E> {
     if (!evaluateCapture(observed.toolName, observed.toolInputText).capture) return;
 
     this.enqueue(async () => {
-      await this.ensureGenesis();
-      await captureObservation({
-        projectId: this.options.projectId,
-        actor: this.options.actor,
-        ...(this.options.sessionId ? { sessionId: this.options.sessionId } : {}),
-        toolName: observed.toolName,
-        toolInputText: observed.toolInputText,
-        ...(observed.toolUseId ? { toolUseId: observed.toolUseId } : {}),
+      // Genesis and the append+rebuild are ONE critical section across
+      // processes (#132). `enqueue` only orders this instance's own captures;
+      // a second mori process on the same working root has its own chain and
+      // its own connection, and `captureObservation`'s replace-all projection
+      // rebuild is a read-modify-write — interleaved, the later commit drops
+      // the earlier process's observation from the projection while leaving it
+      // in the event log. `ensureGenesis` is inside for the same reason: its
+      // `hasGenesisEvent` check and its append are the same shape of race.
+      //
+      // A lock failure (timeout, unusable lock path) surfaces here as a
+      // rejection, which `enqueue` routes to `onCaptureError` — the hot path's
+      // no-throw contract holds, and the cost of a lock we cannot take is one
+      // dropped observation, not a dead turn.
+      await withProjectLock(this.options.projectId, async () => {
+        await this.ensureGenesis();
+        await captureObservation({
+          projectId: this.options.projectId,
+          actor: this.options.actor,
+          ...(this.options.sessionId ? { sessionId: this.options.sessionId } : {}),
+          toolName: observed.toolName,
+          toolInputText: observed.toolInputText,
+          ...(observed.toolUseId ? { toolUseId: observed.toolUseId } : {}),
+        });
       });
     });
   }
@@ -209,7 +225,9 @@ export class SqliteMemoryKernel<M, E> implements MemoryKernel<M, E> {
    * Extractor failure propagates — that is the service's documented contract
    * (the watermark does not advance, so the next boundary retries the same
    * window), and swallowing it here would hide a misconfigured LLM from the
-   * boundary caller (#107).
+   * boundary caller (#107). A lock failure propagates for the same reason: a
+   * boundary that never ran must be visible to whoever asked for it, which is
+   * the opposite of `observe`'s contract above.
    */
   async consolidate(llm: ConsolidatorLlm): Promise<void> {
     await this.consolidateWithResult(llm);
@@ -221,16 +239,29 @@ export class SqliteMemoryKernel<M, E> implements MemoryKernel<M, E> {
    * so this is the surface the harness reaches for when it wants telemetry.
    */
   async consolidateWithResult(llm: ConsolidatorLlm): Promise<ConsolidateResult> {
+    // OUTSIDE the lock, deliberately. `drain()` settles the queued captures,
+    // and each of those takes the project lock itself (see `observe`) — draining
+    // from inside the lock would make this call wait for work that is waiting
+    // for us. The lock therefore starts where the boundary's own
+    // read-modify-write does: the watermark read + consolidated append that two
+    // processes would otherwise both perform over the same window (#132).
+    //
+    // Nothing is lost by draining first: the drained captures are appended
+    // before the watermark is read, so they are inside this boundary's window
+    // exactly as before, and a foreign process that grabs the lock in between
+    // consolidates them instead — which is the point of the lock, not a gap.
     await this.drain();
-    await this.ensureGenesis();
-    return consolidateBoundary({
-      projectId: this.options.projectId,
-      actor: this.options.actor,
-      llm,
-      ...(this.options.sessionId ? { sessionId: this.options.sessionId } : {}),
-      ...(this.options.boundary ? { boundary: this.options.boundary } : {}),
-      ...(this.options.embedder ? { embedder: this.options.embedder } : {}),
-      ...(this.options.conversation ? { conversation: this.options.conversation } : {}),
+    return withProjectLock(this.options.projectId, async () => {
+      await this.ensureGenesis();
+      return consolidateBoundary({
+        projectId: this.options.projectId,
+        actor: this.options.actor,
+        llm,
+        ...(this.options.sessionId ? { sessionId: this.options.sessionId } : {}),
+        ...(this.options.boundary ? { boundary: this.options.boundary } : {}),
+        ...(this.options.embedder ? { embedder: this.options.embedder } : {}),
+        ...(this.options.conversation ? { conversation: this.options.conversation } : {}),
+      });
     });
   }
 

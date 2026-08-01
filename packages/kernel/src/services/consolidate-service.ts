@@ -34,7 +34,7 @@ import { insertSegments, pruneSegments, type NewSegmentRow } from "./segment-sto
  * simply leaves the watermark behind — the next boundary re-collects the same
  * observations and retries.
  *
- * Two things the memorize original did are deliberately absent (#11's
+ * One thing the memorize original did is deliberately absent (#11's
  * "accidental complexity"), see the #94 PR body for the full record:
  *
  * - **No host-CLI extractor.** memorize spawned the user's `claude -p` /
@@ -44,11 +44,23 @@ import { insertSegments, pruneSegments, type NewSegmentRow } from "./segment-sto
  *   gone: extraction talks to the injected {@link ConsolidatorLlm} and nothing
  *   else. The kernel spawns no process and reads no endpoint/apiKey/model
  *   config — same seam discipline as `makeLlmJudge` and `Embedder`.
- * - **No file lock.** memorize serialized concurrent boundaries with a
- *   per-project lock file because its boundaries were detached CLI subprocesses
- *   racing each other. Here `consolidate()` is an in-process call on the kernel
- *   seam, so there is no second process to serialize against; the watermark
- *   remains the correctness mechanism it always was.
+ *
+ * **The file lock, on the other hand, is back — and is not this service's.**
+ * `run()` reads the watermark, distills, and appends — a read-modify-write that
+ * two callers can interleave, each seeing the same watermark and each appending
+ * `memory.consolidated` for the same observations. What keeps that from
+ * happening is the project-scoped lock in `storage/project-lock.ts` (#132),
+ * held by `SqliteMemoryKernel.consolidateWithResult` around this call: one
+ * boundary per project store at a time, across processes. The watermark is the
+ * IDEMPOTENCY device for SEQUENTIAL boundaries it always was — it makes a
+ * re-run of a died-mid-way boundary safe; it does not and cannot order two
+ * concurrent ones.
+ *
+ * (An earlier version of this doc claimed a lock was unnecessary because
+ * `consolidate()` is an in-process call with no second process to serialize
+ * against. That premise died with #107 — every mori session now runs a boundary
+ * at exit, so two terminals open on the same repo are two processes consolidating
+ * the same store.)
  */
 
 const WATERMARK_META_KEY = "cls_consolidate_watermark";
