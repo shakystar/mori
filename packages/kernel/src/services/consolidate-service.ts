@@ -21,7 +21,12 @@ import {
 import { detectContradictions, makeLlmJudge } from "./contradiction-service.js";
 import { ensureEmbeddings, ensureSegmentEmbeddings } from "./embeddings-service.js";
 import { listValidMemories, rebuildProjectProjection } from "./projection-store.js";
-import { insertSegments, pruneSegments, type NewSegmentRow } from "./segment-store.js";
+import {
+  insertSegments,
+  pruneSegments,
+  type NewSegmentRow,
+  type PruneOptions,
+} from "./segment-store.js";
 
 /**
  * CLS Phase 1 — boundary consolidation (the expensive half of D3, run ONCE
@@ -768,6 +773,43 @@ function writeConversationOffset(projectId: string, sourceId: string, offset: nu
   writeMeta(projectId, conversationOffsetKey(sourceId), String(offset));
 }
 
+/**
+ * #139: commit the event watermark and the conversation offset in one SQLite
+ * transaction. `run()`'s commit tail used to call `setConsolidateWatermark`
+ * and `writeConversationOffset` as two independent writes — if the process
+ * died between them, the event watermark alone had advanced, and the next
+ * boundary re-read the same (stale-offset) conversation slice and
+ * re-extracted it into a duplicate memory (PR #102 Codex P2, judged a real
+ * defect on PR #136). Either cursor may legitimately be absent from a given
+ * boundary (observation-only or conversation-only windows are the normal
+ * case, not an error), so this only opens a transaction when there is at
+ * least one write to make, and writes only the cursors that were passed.
+ * `getDb(projectId)` is a cached per-project connection (storage/db.ts), so
+ * the nested writes below run on the same connection `.transaction()` wraps.
+ */
+function commitBoundaryCursors(
+  projectId: string,
+  cursors: {
+    watermarkEventId?: string;
+    conversationOffset?: { sourceId: string; offset: number };
+  },
+): void {
+  if (cursors.watermarkEventId === undefined && cursors.conversationOffset === undefined) return;
+  const commit = getDb(projectId).transaction(() => {
+    if (cursors.watermarkEventId !== undefined) {
+      setConsolidateWatermark(projectId, cursors.watermarkEventId);
+    }
+    if (cursors.conversationOffset !== undefined) {
+      writeConversationOffset(
+        projectId,
+        cursors.conversationOffset.sourceId,
+        cursors.conversationOffset.offset,
+      );
+    }
+  });
+  commit();
+}
+
 // --- attempt telemetry (#51) ---------------------------------------------------
 
 export const CONSOLIDATE_BOUNDARIES = [
@@ -1164,6 +1206,14 @@ export interface ConsolidateParams {
   conversation?: ConversationSource;
   /** Override extractor (tests). Defaults to LLM-if-injected else rules. */
   consolidator?: Consolidator;
+  /**
+   * Override the raw-segment retention policy (tests only — production
+   * always uses `pruneSegments`'s defaults). Exists so a test can force
+   * `pruneSegments` to bite within a single boundary's own writes, to
+   * exercise the "this slice's segments got pruned before the cursor could
+   * treat them as stored" branch of the offset-advance check below (#139).
+   */
+  segmentRetention?: PruneOptions;
 }
 
 /**
@@ -1266,10 +1316,9 @@ export async function consolidate(params: ConsolidateParams): Promise<Consolidat
     // consumed observation window so it is not rescanned every boundary.
     if (observations.length === 0 && !transcriptTail) {
       if (rawObservationEvents.length > 0) {
-        setConsolidateWatermark(
-          params.projectId,
-          rawObservationEvents[rawObservationEvents.length - 1]!.id,
-        );
+        commitBoundaryCursors(params.projectId, {
+          watermarkEventId: rawObservationEvents[rawObservationEvents.length - 1]!.id,
+        });
       }
       return {
         consolidated: 0,
@@ -1302,8 +1351,9 @@ export async function consolidate(params: ConsolidateParams): Promise<Consolidat
       // because not showing it is then the only irreversible loss. Read the
       // same env var the segment write below is gated on — the write itself
       // happens after extraction, so this is the boundary's INTENT; a write
-      // that then fails is caught by the `segmentsWritten > 0` check at the
-      // cursor-advance site, which uses the actual outcome.
+      // that then fails (or is later pruned back out, #139) is caught by the
+      // `sliceFullyStored` check at the cursor-advance site, which uses the
+      // actual outcome.
       //
       // #143 item②: maxChars comes from the injected LLM's declared
       // `contextWindowTokens` when it has one, not unconditionally from
@@ -1395,6 +1445,10 @@ export async function consolidate(params: ConsolidateParams): Promise<Consolidat
     // failure mode — memories durably recorded while a later insertSegments
     // failure silently drops their raw detail — for no correctness gain.
     let segmentsWritten = 0;
+    // #139: ids of the rows THIS boundary just inserted, so the offset-advance
+    // check below can tell "wrote N segments" apart from "this slice's own
+    // segments are still there" — see `storedSegmentIds`/`prunedSegmentIds`.
+    let storedSegmentIds: string[] = [];
     if (process.env.MEMORIZE_RAW_SEGMENTS !== "0" && slice && slice.text.length > 0) {
       try {
         const chunks = chunkConversation(slice.text);
@@ -1410,6 +1464,7 @@ export async function consolidate(params: ConsolidateParams): Promise<Consolidat
           }));
           insertSegments(params.projectId, rows);
           segmentsWritten = rows.length;
+          storedSegmentIds = rows.map((r) => r.id);
         }
       } catch {
         // Derived buffer must never fail the consolidation boundary.
@@ -1432,9 +1487,15 @@ export async function consolidate(params: ConsolidateParams): Promise<Consolidat
     // nothing has nothing to push over the age/count caps that the next writing
     // boundary won't catch. Never-throw: derived-buffer maintenance can't fail the
     // boundary.
+    // #139: ids pruneSegments deleted, so the offset-advance check below can
+    // tell whether THIS slice's own segments survived retention — see
+    // `sliceFullyStored`. A prune failure leaves this empty, same as "nothing
+    // pruned"; `storedSegmentIds` from before are then trusted as-is, which
+    // matches the pre-#139 behavior of treating `segmentsWritten > 0` as proof.
+    let prunedSegmentIds: string[] = [];
     if (segmentsWritten > 0) {
       try {
-        pruneSegments(params.projectId);
+        prunedSegmentIds = pruneSegments(params.projectId, params.segmentRetention);
       } catch {
         // Derived buffer maintenance must never fail the boundary.
       }
@@ -1476,7 +1537,7 @@ export async function consolidate(params: ConsolidateParams): Promise<Consolidat
       await ensureSegmentEmbeddings(params.projectId, params.embedder);
     }
 
-    // Advance the event watermark only past what THIS boundary actually
+    // Event watermark target: advance only past what THIS boundary actually
     // consolidated (#113 item③). `bounded.observations` may be a
     // budget-truncated PREFIX of `observations` — same order as
     // `observationEvents`, since `boundExtractionInput` only ever drops from
@@ -1485,41 +1546,54 @@ export async function consolidate(params: ConsolidateParams): Promise<Consolidat
     // observation this window's dedup guard skipped, and any foreign-lane
     // event interleaved by seq — item②) stays unconsumed and is naturally
     // re-read (and re-filtered) by the NEXT boundary, since
-    // `readEventsSince` resumes strictly after the watermark's `seq`.
+    // `readEventsSince` resumes strictly after the watermark's `seq`. Computed
+    // here but not yet written: committed together with the conversation
+    // offset below, in one transaction (#139).
+    let eventWatermarkId: string | undefined;
     if (bounded.observations.length > 0) {
-      setConsolidateWatermark(
-        params.projectId,
-        observationEvents[bounded.observations.length - 1]!.id,
-      );
+      eventWatermarkId = observationEvents[bounded.observations.length - 1]!.id;
     } else if (rawObservationEvents.length > 0) {
       // No self-lane observation was included this boundary (e.g. a
       // conversation-only window, or every self-lane observation in range was
       // already consumed) — still skip past the whole scanned range so a
       // foreign-only or fully-deduped window is not rescanned every boundary.
-      setConsolidateWatermark(
-        params.projectId,
-        rawObservationEvents[rawObservationEvents.length - 1]!.id,
-      );
+      eventWatermarkId = rawObservationEvents[rawObservationEvents.length - 1]!.id;
     }
 
-    // Advance the per-conversation offset in lockstep — the extractor has now
-    // seen this slice, so the next boundary reads only what is new. The
-    // invariant is "shown WHOLE or stored WHOLE, or not consumed":
-    // `newOffset` is opaque to the kernel (`ConversationSlice`), so a slice can
-    // only be consumed whole or not at all, and a tail that was merely CLIPPED
-    // leaves its oldest part neither shown to the extractor nor — with the raw
-    // buffer off — stored anywhere, which is the same loss as dropping it
-    // (owner adjudication on PR #136). So anything short of `"whole"` holds
-    // the cursor, and the next boundary — with this boundary's observations
+    // #139: "stored WHOLE" is only true if the segments THIS boundary wrote
+    // for this slice are still there — `pruneSegments` runs (above) before
+    // this check and can delete some or all of them in the same boundary a
+    // slice too large for `SEGMENT_RETENTION_MAX` forces its own oldest
+    // chunks out. `segmentsWritten > 0` alone (the pre-#139 check) only proved
+    // an insert happened, not that it survived retention. Disjoint from
+    // `prunedSegmentIds` is required, not just "not entirely pruned" — a
+    // partially-pruned slice is a partially-lost one, same as never storing it.
+    const prunedIds = new Set(prunedSegmentIds);
+    const sliceFullyStored =
+      storedSegmentIds.length > 0 && storedSegmentIds.every((id) => !prunedIds.has(id));
+
+    // Per-conversation offset target: advance in lockstep with the event
+    // watermark — the extractor has now seen this slice, so the next boundary
+    // reads only what is new. The invariant is "shown WHOLE or stored WHOLE,
+    // or not consumed": `newOffset` is opaque to the kernel
+    // (`ConversationSlice`), so a slice can only be consumed whole or not at
+    // all, and a tail that was merely CLIPPED leaves its oldest part neither
+    // shown to the extractor nor — with the raw buffer off, or pruned back
+    // out — stored anywhere, which is the same loss as dropping it (owner
+    // adjudication on PR #136). So anything short of `"whole"` holds the
+    // cursor, and the next boundary — with this boundary's observations
     // already consumed, hence more budget, and with the tail reserved ahead of
     // existing memories — gets the slice. An EMPTY slice has nothing to lose
     // and always advances, so an idle conversation never pins the cursor.
+    // Computed here but not yet written: committed together with the event
+    // watermark below, in one transaction (#139).
     let conversationSliceHeld = false;
+    let conversationOffsetTarget: { sourceId: string; offset: number } | undefined;
     if (source && slice) {
       const shownWhole =
         bounded.transcriptTailCoverage === "whole" || bounded.transcriptTailCoverage === "absent";
-      if (shownWhole || segmentsWritten > 0 || slice.text.length === 0) {
-        writeConversationOffset(params.projectId, source.id, slice.newOffset);
+      if (shownWhole || sliceFullyStored || slice.text.length === 0) {
+        conversationOffsetTarget = { sourceId: source.id, offset: slice.newOffset };
       } else {
         // The remaining stuck case is a single slice too large for the budget
         // even with zero memories — a `ConversationSource` contract limit
@@ -1529,6 +1603,16 @@ export async function consolidate(params: ConsolidateParams): Promise<Consolidat
         conversationSliceHeld = true;
       }
     }
+
+    // #139: commit both cursors atomically — see `commitBoundaryCursors`. A
+    // crash (or thrown error) between the two writes can no longer leave one
+    // cursor advanced while the other stays behind.
+    commitBoundaryCursors(params.projectId, {
+      ...(eventWatermarkId !== undefined ? { watermarkEventId: eventWatermarkId } : {}),
+      ...(conversationOffsetTarget !== undefined
+        ? { conversationOffset: conversationOffsetTarget }
+        : {}),
+    });
 
     return {
       consolidated: extracted.length,

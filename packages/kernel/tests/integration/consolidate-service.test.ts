@@ -39,7 +39,7 @@ import {
   listValidMemories,
   rebuildProjectProjection,
 } from "../../src/services/projection-store.js";
-import { listSegments } from "../../src/services/segment-store.js";
+import { insertSegments, listSegments } from "../../src/services/segment-store.js";
 import { closeAll, getDb } from "../../src/storage/db.js";
 import { appendEvent, readEvents } from "../../src/storage/event-store.js";
 
@@ -1291,6 +1291,232 @@ describe("consolidate — never consumes a conversation slice it neither showed 
     await consolidate({ projectId, actor: "test", conversation });
 
     expect(conversation.offsets).toEqual([0, 77]);
+  });
+});
+
+// #139 (PR #102 Codex P2, judged real on PR #136): the event watermark and
+// the conversation offset used to be two independent `writeMeta` calls in
+// `run()`'s commit tail — a crash between them left the event watermark
+// advanced with the conversation offset still behind, so the next boundary
+// re-read the same slice under a fresh (already-consumed) observation window
+// and re-extracted it into a duplicate memory.
+describe("consolidate — atomic boundary cursor commit (#139)", () => {
+  it("advances both cursors from one boundary that has both an observation and a conversation slice", async () => {
+    await seedObservation("decided x");
+    const conversation = fakeConversation([
+      { text: "USER: hi", newOffset: 50 },
+      { text: "USER: later", newOffset: 90 },
+    ]);
+
+    expect(getConsolidateWatermark(projectId)).toBeUndefined();
+    await consolidate({
+      projectId,
+      actor: "test",
+      conversation,
+      consolidator: {
+        async extract() {
+          return [];
+        },
+      },
+    });
+
+    expect(getConsolidateWatermark(projectId)).toBeDefined();
+    await consolidate({
+      projectId,
+      actor: "test",
+      conversation,
+      consolidator: {
+        async extract() {
+          return [];
+        },
+      },
+    });
+    // The second boundary resumed from the offset the first one committed —
+    // if the conversation offset had not advanced, this would read 0 again.
+    expect(conversation.offsets).toEqual([0, 50]);
+  });
+
+  it("advances only the event watermark when there is no conversation source", async () => {
+    await seedObservation("decided x");
+
+    await consolidate({ projectId, actor: "test" });
+
+    expect(getConsolidateWatermark(projectId)).toBeDefined();
+    const offsetRows = getDb(projectId)
+      .prepare("SELECT key FROM meta WHERE key LIKE 'cls_conversation_offset:%'")
+      .all();
+    expect(offsetRows).toEqual([]);
+  });
+
+  it("does not advance the event watermark on a conversation-only boundary with zero observations", async () => {
+    const conversation = fakeConversation([{ text: "USER: remember the plan", newOffset: 10 }]);
+
+    const result = await consolidate({
+      projectId,
+      actor: "test",
+      conversation,
+      consolidator: {
+        async extract() {
+          return [{ kind: "progress", text: "the plan", salience: 5 }];
+        },
+      },
+    });
+
+    expect(result.observationsProcessed).toBe(0);
+    expect(getConsolidateWatermark(projectId)).toBeUndefined();
+    // The conversation offset DID advance — resuming reads from 10, not 0.
+    const conversation2 = fakeConversation([{ text: "USER: more", newOffset: 20 }], "conv-1");
+    await consolidate({ projectId, actor: "test", conversation: conversation2 });
+    expect(conversation2.offsets).toEqual([10]);
+  });
+
+  // Owner's PR #162 review (2026-08-01 20:45): the existing CLIPPED-tail test
+  // has no observations, so it only pins "conversation-only hold" — the same
+  // shape as (b) above. It cannot tell whether the hold branch would also
+  // wrongly suppress an otherwise-eligible watermark advance. This boundary
+  // has both: an observation ready to advance the watermark, and a slice too
+  // big to ever show whole (so the conversation cursor holds). The two must
+  // commit together with only one of them moving.
+  it("advances the event watermark but holds the conversation offset on a boundary with an observation and a CLIPPED tail", async () => {
+    process.env.MEMORIZE_RAW_SEGMENTS = "0";
+    await seedObservation("decided x");
+    // One slice larger than the whole extraction budget: not even zero
+    // memories make room for it, so no allocation policy can show it whole.
+    const huge = Array.from({ length: 4000 }, (_, i) => `USER: line ${i}`).join("\n\n");
+    const conversation = fakeConversation([
+      { text: huge, newOffset: 512 },
+      { text: `${huge}\n\nUSER: later`, newOffset: 900 },
+    ]);
+    const consolidator: Consolidator = {
+      async extract() {
+        return [];
+      },
+    };
+
+    expect(getConsolidateWatermark(projectId)).toBeUndefined();
+    const result = await consolidate({ projectId, actor: "test", conversation, consolidator });
+
+    expect(result.conversationSliceHeld).toBe(true);
+    expect(readLastConsolidateAttempt(projectId)?.conversationSliceHeld).toBe(true);
+    expect(getConsolidateWatermark(projectId)).toBeDefined();
+
+    // Re-read from 0: the conversation offset never committed, even though
+    // the watermark did — the same atomic commit wrote one cursor and held
+    // the other.
+    await consolidate({ projectId, actor: "test", conversation, consolidator });
+    expect(conversation.offsets).toEqual([0, 0]);
+  });
+
+  // Owner's 3rd comment on #139: `segmentsWritten > 0` alone (pre-#139) only
+  // proved an insert happened, not that it survived `pruneSegments`, which
+  // runs BEFORE the cursor-advance check in the same boundary. A slice whose
+  // own chunks get pruned out from under it must not be treated as "stored".
+  it("holds the conversation cursor when this slice's own segments are pruned within the same boundary", async () => {
+    // One slice larger than the whole extraction budget, so it cannot be
+    // shown WHOLE either — the only way it could advance the cursor is via
+    // "stored WHOLE", which retention is about to falsify.
+    const huge = Array.from({ length: 4000 }, (_, i) => `USER: line ${i}`).join("\n\n");
+    const conversation = fakeConversation([
+      { text: huge, newOffset: 512 },
+      { text: `${huge}\n\nUSER: later`, newOffset: 900 },
+    ]);
+    const consolidator: Consolidator = {
+      async extract() {
+        return [];
+      },
+    };
+
+    const result = await consolidate({
+      projectId,
+      actor: "test",
+      conversation,
+      consolidator,
+      // Forces pruneSegments to evict all but the single newest chunk this
+      // boundary just inserted — the disjointness check must catch that.
+      segmentRetention: { maxCount: 1 },
+    });
+
+    expect(result.segmentsWritten).toBeGreaterThan(1);
+    expect(listSegments(projectId)).toHaveLength(1);
+    expect(result.conversationSliceHeld).toBe(true);
+    expect(readLastConsolidateAttempt(projectId)?.conversationSliceHeld).toBe(true);
+
+    await consolidate({ projectId, actor: "test", conversation, consolidator });
+    // Re-read from 0: the slice's own segments were pruned, so it was never
+    // durably stored — same as the CLIPPED-and-unstored case, the cursor did
+    // not move.
+    expect(conversation.offsets).toEqual([0, 0]);
+  });
+
+  it("still advances the cursor when retention prunes OTHER, older segments — not this slice's own", async () => {
+    // Filler segments old enough for pruneSegments' default age cutoff (30
+    // days) to delete them on their own, independent of this boundary's
+    // chunks. Their ids never appear in `storedSegmentIds`, so the
+    // disjointness check must not treat their removal as touching this slice.
+    insertSegments(projectId, [
+      { id: "seg_filler_1", createdAt: "2020-01-01T00:00:00.000Z", ordinal: 0, text: "old 1" },
+      { id: "seg_filler_2", createdAt: "2020-01-01T00:00:00.000Z", ordinal: 1, text: "old 2" },
+    ]);
+    const conversation = fakeConversation([
+      { text: "USER: stored verbatim instead", newOffset: 512 },
+      { text: "USER: next", newOffset: 900 },
+    ]);
+    const consolidator: Consolidator = {
+      async extract() {
+        return [];
+      },
+    };
+
+    const first = await consolidate({ projectId, actor: "test", conversation, consolidator });
+    expect(first.segmentsWritten).toBeGreaterThan(0);
+    expect(first.conversationSliceHeld).toBe(false);
+    // The old filler was pruned (age-based, default retention); this
+    // boundary's own segments were not.
+    expect(listSegments(projectId).some((s) => s.id === "seg_filler_1")).toBe(false);
+    expect(listSegments(projectId).some((s) => s.id === "seg_filler_2")).toBe(false);
+
+    await consolidate({ projectId, actor: "test", conversation, consolidator });
+    expect(conversation.offsets).toEqual([0, 512]);
+  });
+
+  it("rolls back the event watermark when the conversation-offset write fails, so neither cursor advances", async () => {
+    await seedObservation("decided x");
+    const conversation = fakeConversation([
+      { text: "USER: hi", newOffset: 50 },
+      { text: "USER: hi", newOffset: 50 },
+    ]);
+    const consolidator: Consolidator = {
+      async extract() {
+        return [];
+      },
+    };
+
+    // Simulates a crash/failure of the SECOND cursor write inside the same
+    // transaction commitBoundaryCursors opens — a real crash can't be
+    // injected from a test, so this forces the same failure point via a
+    // trigger on the shared `meta` table the two cursors are written to.
+    const db = getDb(projectId);
+    db.exec(
+      "CREATE TRIGGER mori_test_boom_139 BEFORE INSERT ON meta " +
+        "WHEN NEW.key LIKE 'cls_conversation_offset:%' " +
+        "BEGIN SELECT RAISE(ABORT, 'injected #139 test failure'); END;",
+    );
+
+    await expect(
+      consolidate({ projectId, actor: "test", conversation, consolidator }),
+    ).rejects.toThrow(/injected #139 test failure/);
+
+    // The event watermark write was in the SAME transaction as the offset
+    // write that threw — if the two were still independent writes, this
+    // would be defined (the pre-#139 bug PR #102's Codex review flagged).
+    expect(getConsolidateWatermark(projectId)).toBeUndefined();
+
+    db.exec("DROP TRIGGER mori_test_boom_139");
+    await consolidate({ projectId, actor: "test", conversation, consolidator });
+    // Resumes from offset 0 on both the failed and the retried attempt — the
+    // conversation offset was never committed either.
+    expect(conversation.offsets).toEqual([0, 0]);
+    expect(getConsolidateWatermark(projectId)).toBeDefined();
   });
 });
 
