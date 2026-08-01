@@ -1150,6 +1150,43 @@ describe("consolidate — atomic boundary cursor commit (#139)", () => {
     expect(conversation2.offsets).toEqual([10]);
   });
 
+  // Owner's PR #162 review (2026-08-01 20:45): the existing CLIPPED-tail test
+  // has no observations, so it only pins "conversation-only hold" — the same
+  // shape as (b) above. It cannot tell whether the hold branch would also
+  // wrongly suppress an otherwise-eligible watermark advance. This boundary
+  // has both: an observation ready to advance the watermark, and a slice too
+  // big to ever show whole (so the conversation cursor holds). The two must
+  // commit together with only one of them moving.
+  it("advances the event watermark but holds the conversation offset on a boundary with an observation and a CLIPPED tail", async () => {
+    process.env.MEMORIZE_RAW_SEGMENTS = "0";
+    await seedObservation("decided x");
+    // One slice larger than the whole extraction budget: not even zero
+    // memories make room for it, so no allocation policy can show it whole.
+    const huge = Array.from({ length: 4000 }, (_, i) => `USER: line ${i}`).join("\n\n");
+    const conversation = fakeConversation([
+      { text: huge, newOffset: 512 },
+      { text: `${huge}\n\nUSER: later`, newOffset: 900 },
+    ]);
+    const consolidator: Consolidator = {
+      async extract() {
+        return [];
+      },
+    };
+
+    expect(getConsolidateWatermark(projectId)).toBeUndefined();
+    const result = await consolidate({ projectId, actor: "test", conversation, consolidator });
+
+    expect(result.conversationSliceHeld).toBe(true);
+    expect(readLastConsolidateAttempt(projectId)?.conversationSliceHeld).toBe(true);
+    expect(getConsolidateWatermark(projectId)).toBeDefined();
+
+    // Re-read from 0: the conversation offset never committed, even though
+    // the watermark did — the same atomic commit wrote one cursor and held
+    // the other.
+    await consolidate({ projectId, actor: "test", conversation, consolidator });
+    expect(conversation.offsets).toEqual([0, 0]);
+  });
+
   // Owner's 3rd comment on #139: `segmentsWritten > 0` alone (pre-#139) only
   // proved an insert happened, not that it survived `pruneSegments`, which
   // runs BEFORE the cursor-advance check in the same boundary. A slice whose
