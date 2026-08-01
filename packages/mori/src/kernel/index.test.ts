@@ -73,8 +73,27 @@ function toolStart(toolCallId: string, toolName: string, args: unknown): AgentEv
   return { type: "tool_execution_start", toolCallId, toolName, args };
 }
 
-function toolEnd(toolCallId: string, toolName: string, isError = false): AgentEvent {
-  return { type: "tool_execution_end", toolCallId, toolName, result: {}, isError };
+/**
+ * Defaults to a structurally successful result shaped like the real tool it
+ * names (`bash`'s success also needs `exitCode`/`timedOut`, see #129) so tests
+ * that aren't exercising the success/failure distinction don't have to spell
+ * it out. Pass `details` to test a specific structured outcome instead.
+ */
+function toolEnd(
+  toolCallId: string,
+  toolName: string,
+  options: { isError?: boolean; details?: unknown } = {},
+): AgentEvent {
+  const details =
+    options.details ??
+    (toolName === "bash" ? { ok: true, exitCode: 0, timedOut: false } : { ok: true });
+  return {
+    type: "tool_execution_end",
+    toolCallId,
+    toolName,
+    result: { details },
+    isError: options.isError ?? false,
+  };
 }
 
 describe("moriProjectId", () => {
@@ -124,7 +143,79 @@ describe("createAgentEventObserver", () => {
 
     observe(toolStart("c1", "bash", { command: "git commit -m wip" }));
 
-    expect(observe(toolEnd("c1", "bash", true))).toBeUndefined();
+    expect(observe(toolEnd("c1", "bash", { isError: true }))).toBeUndefined();
+  });
+
+  it("ignores a structurally-failed edit_file even though isError is false (#129)", () => {
+    // mori's tools never throw: a failed edit_file reports { ok: false, reason }
+    // as an ordinary, non-error result (tool-result.ts's errorResult).
+    const observe = createAgentEventObserver();
+
+    observe(toolStart("c1", "edit_file", { path: "src/index.ts", oldString: "a", newString: "b" }));
+
+    expect(
+      observe(
+        toolEnd("c1", "edit_file", {
+          details: { ok: false, reason: "oldString not found in file: src/index.ts" },
+        }),
+      ),
+    ).toBeUndefined();
+  });
+
+  it("ignores a bash call that ran but exited non-zero, even though isError is false (#129)", () => {
+    // runBash reports a failed command as { ok: true, exitCode: 1, ... } — the
+    // process itself started and ended fine, only the command failed.
+    const observe = createAgentEventObserver();
+
+    observe(toolStart("c1", "bash", { command: "git commit -m wip" }));
+
+    expect(
+      observe(
+        toolEnd("c1", "bash", {
+          details: { ok: true, exitCode: 1, timedOut: false },
+        }),
+      ),
+    ).toBeUndefined();
+  });
+
+  it("ignores a bash call that timed out, even though isError is false and exitCode is null (#129)", () => {
+    const observe = createAgentEventObserver();
+
+    observe(toolStart("c1", "bash", { command: "sleep 999" }));
+
+    expect(
+      observe(
+        toolEnd("c1", "bash", {
+          details: { ok: true, exitCode: null, timedOut: true },
+        }),
+      ),
+    ).toBeUndefined();
+  });
+
+  it("ignores a bash call killed by a signal (exitCode null, not a timeout) (#129)", () => {
+    const observe = createAgentEventObserver();
+
+    observe(toolStart("c1", "bash", { command: "long-running-thing" }));
+
+    expect(
+      observe(
+        toolEnd("c1", "bash", {
+          details: { ok: true, exitCode: null, signal: "SIGTERM", timedOut: false },
+        }),
+      ),
+    ).toBeUndefined();
+  });
+
+  it("masks credential-shaped values in a captured bash command (#129)", () => {
+    const observe = createAgentEventObserver();
+    const command = "pip install https://user:token@private.example/pkg";
+
+    observe(toolStart("c1", "bash", { command }));
+
+    expect(observe(toolEnd("c1", "bash"))).toEqual({
+      toolName: "bash",
+      toolInputText: "pip install https://***@private.example/pkg",
+    });
   });
 
   it("ignores read-only tools", () => {
