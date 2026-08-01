@@ -15,7 +15,7 @@
  * name would be silently dropped.
  */
 
-import type { ConsolidatorLlm } from "@mori/kernel";
+import type { ConsolidateBoundary, ConsolidatorLlm } from "@mori/kernel";
 import type { MoriKernel } from "../agent/index.js";
 
 /**
@@ -27,14 +27,26 @@ import type { MoriKernel } from "../agent/index.js";
 const chains = new WeakMap<MoriKernel, Promise<void>>();
 
 /**
- * Chains `kernel.consolidate(llm)` onto whatever the same kernel's previous call (if any) is
- * still doing, so two overlapping triggers run one after the other instead of racing. A
- * caller's own rejection is still visible to it — only the CHAINING waits on a settled prior
+ * Chains `kernel.consolidate(llm, opts)` onto whatever the same kernel's previous call (if
+ * any) is still doing, so two overlapping triggers run one after the other instead of racing.
+ * A caller's own rejection is still visible to it — only the CHAINING waits on a settled prior
  * call, an earlier failure must not permanently wedge every later trigger.
+ *
+ * `boundary` (#141) is the per-call telemetry label — this file's two triggers are the only
+ * ones actually wired (`threshold`/`session-start`/`post-compact` are out of scope, see the
+ * issue), so the two call sites below pass their own literal rather than this function
+ * defaulting one.
  */
-function consolidateGuarded(kernel: MoriKernel, llm: ConsolidatorLlm): Promise<void> {
+function consolidateGuarded(
+  kernel: MoriKernel,
+  llm: ConsolidatorLlm,
+  boundary: Extract<ConsolidateBoundary, "session-end" | "manual">,
+  signal?: AbortSignal,
+): Promise<void> {
   const prior = chains.get(kernel) ?? Promise.resolve();
-  const mine = prior.catch(() => {}).then(() => kernel.consolidate(llm));
+  const mine = prior
+    .catch(() => {})
+    .then(() => kernel.consolidate(llm, { boundary, ...(signal ? { signal } : {}) }));
   chains.set(
     kernel,
     mine.catch(() => {}),
@@ -56,7 +68,7 @@ export async function consolidateOnSessionEnd(
 ): Promise<void> {
   if (!llm) return;
   try {
-    await consolidateGuarded(kernel, llm);
+    await consolidateGuarded(kernel, llm, "session-end");
   } catch (error) {
     onError(sessionEndFailureMessage(error));
   }
@@ -67,24 +79,35 @@ function sessionEndFailureMessage(error: unknown): string {
   return `mori: 세션 종료 시 증류에 실패했습니다 (다음 세션에서 같은 구간을 다시 시도합니다) — ${reason}\n`;
 }
 
-/** What an explicit, user-requested consolidation attempt did. */
+/**
+ * What an explicit, user-requested consolidation attempt did. `cancelled` (#141) is distinct
+ * from `failed`: it means the user's own Ctrl-C stopped the boundary, not that anything broke.
+ */
 export type ExplicitConsolidateOutcome =
-  { kind: "skipped" } | { kind: "ok" } | { kind: "failed"; error: unknown };
+  { kind: "skipped" } | { kind: "ok" } | { kind: "cancelled" } | { kind: "failed"; error: unknown };
 
 /**
  * Explicit-invocation trigger (the REPL's `/consolidate`, `repl.ts`). Unlike the session-end
  * trigger, failure is not swallowed — the user asked for this by name, so the caller gets an
  * outcome to report rather than silence.
+ *
+ * `signal` (#141) lets the REPL cancel a boundary the user started with Ctrl-C. The kernel seam
+ * reports that back as an error named `AbortError` (the `AbortController`/`fetch` convention,
+ * `ConsolidateAbortedError` in `consolidate-service.ts`) rather than this file importing that
+ * class directly — recognizing it by name keeps this trigger from depending on which kernel
+ * implementation is wired in.
  */
 export async function consolidateExplicit(
   kernel: MoriKernel,
   llm: ConsolidatorLlm | undefined,
+  signal?: AbortSignal,
 ): Promise<ExplicitConsolidateOutcome> {
   if (!llm) return { kind: "skipped" };
   try {
-    await consolidateGuarded(kernel, llm);
+    await consolidateGuarded(kernel, llm, "manual", signal);
     return { kind: "ok" };
   } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") return { kind: "cancelled" };
     return { kind: "failed", error };
   }
 }

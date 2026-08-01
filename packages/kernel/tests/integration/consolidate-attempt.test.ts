@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createObservation, createProject } from "../../src/domain/entities.js";
 import type { ConsolidatorLlm } from "../../src/index.js";
 import {
+  ConsolidateAbortedError,
   ExtractionParseError,
   classifyConsolidateError,
   consolidate,
@@ -88,6 +89,10 @@ describe("classifyConsolidateError", () => {
   it("falls back to error for anything else, including non-Errors", () => {
     expect(classifyConsolidateError(new Error("boom"))).toBe("error");
     expect(classifyConsolidateError("a bare string")).toBe("error");
+  });
+
+  it("maps a ConsolidateAbortedError to aborted (#141)", () => {
+    expect(classifyConsolidateError(new ConsolidateAbortedError())).toBe("aborted");
   });
 });
 
@@ -183,6 +188,42 @@ describe("consolidate — attempt telemetry", () => {
     ).rejects.toThrow();
 
     expect(readLastConsolidateAttempt(projectId)?.error).toHaveLength(300);
+  });
+
+  it("does not call the extractor and leaves the watermark untouched when the signal is already aborted (#141)", async () => {
+    await seedObservation("decided to ship");
+    let extractCalls = 0;
+    const consolidator: Consolidator = {
+      async extract() {
+        extractCalls += 1;
+        return [];
+      },
+    };
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(
+      consolidate({ projectId, actor: "test", consolidator, signal: controller.signal }),
+    ).rejects.toBeInstanceOf(ConsolidateAbortedError);
+
+    expect(extractCalls).toBe(0);
+    // The failure must not consume the window — the next boundary retries it.
+    expect(getConsolidateWatermark(projectId)).toBeUndefined();
+    expect(readLastConsolidateAttempt(projectId)).toMatchObject({
+      outcome: "aborted",
+      pendingObservations: 1,
+    });
+  });
+
+  it("consolidates normally when no signal is passed (regression, #141)", async () => {
+    await seedObservation("decided to ship");
+
+    await consolidate({ projectId, actor: "test" });
+
+    expect(readLastConsolidateAttempt(projectId)).toMatchObject({
+      outcome: "ok",
+      consolidated: 1,
+    });
   });
 
   it("overwrites the previous attempt rather than accumulating history", async () => {

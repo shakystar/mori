@@ -559,6 +559,21 @@ export class LlmConsolidator implements Consolidator {
  */
 export class ExtractionParseError extends Error {}
 
+/**
+ * #141: thrown when `params.signal` was already aborted at the extraction-call
+ * boundary — the one point this module recognizes cancellation. Propagates
+ * exactly like `ExtractionParseError`/a transport failure: the watermark does
+ * not advance, so the next boundary retries the same window. `name` matches
+ * the platform `AbortError` convention (`AbortController`/`fetch`) so a caller
+ * can recognize it without importing this class.
+ */
+export class ConsolidateAbortedError extends Error {
+  constructor() {
+    super("Consolidation boundary aborted before the extractor was invoked");
+    this.name = "AbortError";
+  }
+}
+
 // --- #57 lifecycle-evidence sanitizers ----------------------------------------
 
 /** Caps on observe-only evidence fields — instrumentation, not content. */
@@ -737,7 +752,7 @@ export type ConsolidateBoundary = (typeof CONSOLIDATE_BOUNDARIES)[number];
  * rather than keeping a value nothing can ever produce.
  */
 export type ConsolidateAttemptOutcome =
-  "ok" | "noop" | "timeout" | "http-error" | "parse-error" | "error";
+  "ok" | "noop" | "timeout" | "http-error" | "parse-error" | "aborted" | "error";
 
 export interface ConsolidateAttempt {
   /** ISO timestamp of when the attempt finished. */
@@ -772,6 +787,7 @@ const ATTEMPT_ERROR_MAX_CHARS = 300;
  */
 export function classifyConsolidateError(error: unknown): ConsolidateAttemptOutcome {
   if (error instanceof ExtractionParseError) return "parse-error";
+  if (error instanceof ConsolidateAbortedError) return "aborted";
   const message = error instanceof Error ? error.message : String(error);
   const name = error instanceof Error ? error.name : "";
   // AbortSignal.timeout rejects with name 'TimeoutError'; a client that reports
@@ -1127,6 +1143,15 @@ export interface ConsolidateParams {
   conversation?: ConversationSource;
   /** Override extractor (tests). Defaults to LLM-if-injected else rules. */
   consolidator?: Consolidator;
+  /**
+   * #141: cancels this boundary at the extraction-call edge. Checked once, right
+   * before `consolidator.extract` would run — already-aborted means the
+   * extractor is never invoked and the watermark is left where `run()` found
+   * it. Not threaded any further than that: append-only history before this
+   * point is never rewound, and a cancellation arriving mid-extraction is not
+   * observed until the next boundary either way.
+   */
+  signal?: AbortSignal;
 }
 
 /**
@@ -1269,6 +1294,16 @@ export async function consolidate(params: ConsolidateParams): Promise<Consolidat
       // cursor-advance site, which uses the actual outcome.
       { tailPersistedElsewhere: process.env.MEMORIZE_RAW_SEGMENTS !== "0" },
     );
+
+    // #141: the extraction-call edge is the one cancellation point this module
+    // recognizes. Checked here — after the noop short-circuit above (nothing
+    // was going to be extracted anyway) and immediately before the call it
+    // guards — so an already-aborted signal skips the extractor exactly like a
+    // transport failure would: propagate, leave the watermark alone, let the
+    // next boundary retry this same window.
+    if (params.signal?.aborted) {
+      throw new ConsolidateAbortedError();
+    }
 
     // Extractor failure (LLM timeout, transport error, unparseable reply)
     // intentionally propagates WITHOUT advancing the watermark — the next
