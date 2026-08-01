@@ -101,6 +101,11 @@ async function withProjectImportLock<T>(projectId: string, fn: () => Promise<T>)
  * a one-time distillation of weeks of harness memory or an ADR folder
  * legitimately yields dozens of items; anything past this is probably an
  * unreviewed dump.
+ *
+ * It bounds the number of ITEMS of one call that take effect, not the number
+ * of items submitted: an item takes effect by minting a memory OR by retiring
+ * one through a folded supersede hint (see {@link MemoryImportResult.droppedSupersedesByCap}).
+ * A pure duplicate that carries no hint changes nothing and is free.
  */
 export const IMPORT_MAX_ITEMS = 100;
 
@@ -128,6 +133,21 @@ export interface MemoryImportResult {
    * the caller cannot act on.
    */
   honoredSupersedes: number;
+  /**
+   * Folded duplicates whose hint was otherwise valid but left unapplied
+   * because this invocation's {@link IMPORT_MAX_ITEMS} budget was already
+   * spent. A folded hint is destructive — it retires a valid memory — yet it
+   * mints nothing, so without its own budget an all-duplicates batch would
+   * slip past the cap entirely and retire an unbounded number of memories
+   * while reporting `droppedByCap: 0`. Same remedy as `droppedByCap`: re-run,
+   * which converges (the items minted this round fold next round, freeing the
+   * budget for the hints).
+   *
+   * Not part of the `imported + skippedDuplicates + droppedByCap` partition —
+   * these items are counted in `skippedDuplicates`; this refines WHY nothing
+   * further happened for them.
+   */
+  droppedSupersedesByCap: number;
 }
 
 export interface ImportMemoriesParams {
@@ -272,17 +292,40 @@ async function runImport(
   const inputs: AppendEventInput<ConsolidatedMemory | MemorySupersededPayload>[] = [];
   let honoredSupersedes = 0;
 
+  /** Ids this batch has already retired — see {@link supersedeTargetFor}. */
+  const retiredInBatch = new Set<string>();
+
   /**
-   * Honor one `supersedesMemoryId` hint on behalf of `supersededBy`. Only an
-   * id that is CURRENTLY valid may be superseded — a hallucinated or stale id
-   * must not produce a dangling event. Mirrors consolidate-service's own
-   * supersede handling exactly (#114 ③). A memory naming itself is dropped
-   * the same way: a duplicate folded INTO its own supersede target would
-   * otherwise invalidate the memory the hint is attributed to.
+   * The id `item`'s hint may retire on behalf of `supersededBy`, or undefined
+   * if the hint must be ignored. Both hint paths (new item / folded duplicate)
+   * go through here so the discipline cannot diverge between them:
+   *
+   * - Only a CURRENTLY valid id may be superseded — a hallucinated or stale id
+   *   must not produce a dangling event. Mirrors consolidate-service's own
+   *   supersede handling exactly (#114 ③), and a target already retired
+   *   earlier in this same batch is no longer valid either.
+   * - A memory may not name itself: a duplicate folded INTO its own supersede
+   *   target would otherwise invalidate the memory the hint is attributed to.
+   * - The ATTRIBUTED memory must not itself have been retired by this batch.
+   *   Only the folded path can hit this (a freshly minted memory is never a
+   *   target, since targets must be pre-existing): one item mints a
+   *   replacement for A while a later item folds INTO A and claims to retire
+   *   B. Honoring it would retire B naming the already-dead A as its
+   *   replacement, leaving B with no valid successor.
    */
-  const honorSupersedeHint = (item: ExtractedMemory, supersededBy: string): void => {
+  const supersedeTargetFor = (item: ExtractedMemory, supersededBy: string): string | undefined => {
     const target = item.supersedesMemoryId;
-    if (!target || !validIds.has(target) || target === supersededBy) return;
+    if (!target || !validIds.has(target) || retiredInBatch.has(target)) return undefined;
+    if (target === supersededBy || retiredInBatch.has(supersededBy)) return undefined;
+    return target;
+  };
+
+  /** Write the `memory.superseded` event for an already-vetted hint. */
+  const honorSupersedeHint = (
+    item: ExtractedMemory,
+    supersededBy: string,
+    target: string,
+  ): void => {
     inputs.push({
       type: "memory.superseded",
       projectId: params.projectId,
@@ -295,7 +338,7 @@ async function runImport(
         reason: item.supersedeReason ?? "Superseded by imported memory",
       },
     });
-    validIds.delete(target);
+    retiredInBatch.add(target);
     honoredSupersedes += 1;
   };
 
@@ -326,7 +369,8 @@ async function runImport(
     // in the batch can attribute its hint to it (#137 ②).
     memoryIdByTextKey.set(textKey(item.kind, item.text), memory.id);
 
-    honorSupersedeHint(item, memory.id);
+    const target = supersedeTargetFor(item, memory.id);
+    if (target) honorSupersedeHint(item, memory.id, target);
   }
 
   // #137 ②: hints carried by folded duplicates. Resolved HERE, after the cap,
@@ -339,10 +383,28 @@ async function runImport(
   // "this text replaces `oldId`", and that text is already present as that
   // memory — re-minting a second copy just to carry the hint is exactly the
   // duplication the idempotency guard exists to prevent.
+  // A folded hint mints nothing, so it consumes none of the cap above — but it
+  // still RETIRES a valid memory, and an all-duplicates batch produces no
+  // `uniqueNewItems` at all. Left unbudgeted, a 5000-item dump of existing
+  // texts each naming a distinct target would retire 5000 memories while
+  // reporting `droppedByCap: 0`, defeating the very guard the cap exists for.
+  // So folded hints spend the room the minted items left behind (both are
+  // "items of this call that take effect"), and the overflow is reported.
+  // Eligibility is judged BEFORE the budget so hints that would have been
+  // ignored anyway are not miscounted as cap drops.
+  let supersedeBudget = IMPORT_MAX_ITEMS - items.length;
+  let droppedSupersedesByCap = 0;
   for (const folded of foldedHints) {
     const supersededBy = memoryIdByTextKey.get(folded.textKey);
     if (!supersededBy) continue;
-    honorSupersedeHint(folded.item, supersededBy);
+    const target = supersedeTargetFor(folded.item, supersededBy);
+    if (!target) continue;
+    if (supersedeBudget === 0) {
+      droppedSupersedesByCap += 1;
+      continue;
+    }
+    supersedeBudget -= 1;
+    honorSupersedeHint(folded.item, supersededBy, target);
   }
 
   if (inputs.length > 0) {
@@ -360,5 +422,11 @@ async function runImport(
     });
   }
 
-  return { imported: items.length, skippedDuplicates, droppedByCap, honoredSupersedes };
+  return {
+    imported: items.length,
+    skippedDuplicates,
+    droppedByCap,
+    honoredSupersedes,
+    droppedSupersedesByCap,
+  };
 }

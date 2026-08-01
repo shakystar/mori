@@ -83,6 +83,7 @@ describe("importMemories", () => {
       skippedDuplicates: 0,
       droppedByCap: 0,
       honoredSupersedes: 0,
+      droppedSupersedesByCap: 0,
     });
 
     const memories = listValidMemories(projectId).map((row) => row.memory);
@@ -137,6 +138,7 @@ describe("importMemories", () => {
       skippedDuplicates: 0,
       droppedByCap: 0,
       honoredSupersedes: 0,
+      droppedSupersedesByCap: 0,
     });
 
     // Re-running the same import (e.g. a retried agent call) must not duplicate.
@@ -146,6 +148,7 @@ describe("importMemories", () => {
       skippedDuplicates: 1,
       droppedByCap: 0,
       honoredSupersedes: 0,
+      droppedSupersedesByCap: 0,
     });
     expect(listValidMemories(projectId)).toHaveLength(1);
   });
@@ -161,6 +164,7 @@ describe("importMemories", () => {
       skippedDuplicates: 1,
       droppedByCap: 0,
       honoredSupersedes: 0,
+      droppedSupersedesByCap: 0,
     });
   });
 
@@ -181,6 +185,7 @@ describe("importMemories", () => {
       skippedDuplicates: 0,
       droppedByCap: 20,
       honoredSupersedes: 0,
+      droppedSupersedesByCap: 0,
     });
   });
 
@@ -221,6 +226,7 @@ describe("importMemories", () => {
       skippedDuplicates: IMPORT_MAX_ITEMS,
       droppedByCap: 0,
       honoredSupersedes: 0,
+      droppedSupersedesByCap: 0,
     });
     const texts = listValidMemories(projectId).map((row) => row.memory.text);
     expect(texts).toContain("brand new item past the duplicates");
@@ -258,6 +264,7 @@ describe("importMemories", () => {
       skippedDuplicates: 1,
       droppedByCap: 0,
       honoredSupersedes: 0,
+      droppedSupersedesByCap: 0,
     });
     // The guarantee is "the crashed call's memory is not imported twice", and
     // the event log is where that is decided. #137 ③ moved the dedup snapshot
@@ -332,6 +339,7 @@ describe("importMemories", () => {
       skippedDuplicates: 1,
       droppedByCap: 0,
       honoredSupersedes: 0,
+      droppedSupersedesByCap: 0,
     });
     expect(listRecentObservations(projectId, { limit: 10 })).toHaveLength(1);
   });
@@ -436,6 +444,7 @@ describe("importMemories", () => {
       skippedDuplicates: 1,
       droppedByCap: 0,
       honoredSupersedes: 0,
+      droppedSupersedesByCap: 0,
     });
     expect(embedCalls).toBe(0);
   });
@@ -641,6 +650,7 @@ describe("importMemories — supersede hints (#114 ③)", () => {
       skippedDuplicates: 1,
       droppedByCap: 0,
       honoredSupersedes: 1,
+      droppedSupersedesByCap: 0,
     });
     expect(listValidMemories(projectId).map((row) => row.memory.text)).toEqual(["new truth"]);
     const superseded = (await readEvents(projectId)).filter(
@@ -680,6 +690,7 @@ describe("importMemories — supersede hints (#114 ③)", () => {
       skippedDuplicates: 1,
       droppedByCap: 0,
       honoredSupersedes: 1,
+      droppedSupersedesByCap: 0,
     });
     const newId = listValidMemories(projectId).find((row) => row.memory.text === "new truth")!
       .memory.id;
@@ -717,6 +728,7 @@ describe("importMemories — supersede hints (#114 ③)", () => {
       skippedDuplicates: 1,
       droppedByCap: 0,
       honoredSupersedes: 0,
+      droppedSupersedesByCap: 0,
     });
     const superseded = (await readEvents(projectId)).filter(
       (event) => event.type === "memory.superseded",
@@ -748,5 +760,155 @@ describe("importMemories — supersede hints (#114 ③)", () => {
       (event) => event.type === "memory.superseded",
     );
     expect(superseded).toHaveLength(1);
+  });
+
+  it("ignores a folded duplicate's hint when the memory it folded into was already retired by this same batch", async () => {
+    await importMemories({
+      projectId,
+      actor: "test",
+      source: "docs",
+      itemsJson: JSON.stringify([
+        { kind: "decision", text: "a truth", salience: 7 },
+        { kind: "decision", text: "b truth", salience: 7 },
+      ]),
+    });
+    const byText = new Map(
+      listValidMemories(projectId).map((row) => [row.memory.text, row.memory.id]),
+    );
+    const aId = byText.get("a truth")!;
+    const bId = byText.get("b truth")!;
+
+    // One item mints a replacement for A. A LATER item is a duplicate of A's
+    // own text, so it folds into A — and claims to retire B. Honoring that
+    // would retire B naming A as its replacement, except A is already dead by
+    // the time the folded loop runs: B would be left with no valid successor.
+    const result = await importMemories({
+      projectId,
+      actor: "test",
+      source: "docs",
+      itemsJson: JSON.stringify([
+        { kind: "decision", text: "replaces a", salience: 7, supersedesMemoryId: aId },
+        { kind: "decision", text: "a truth", salience: 7, supersedesMemoryId: bId },
+      ]),
+    });
+
+    expect(result).toEqual({
+      imported: 1,
+      skippedDuplicates: 1,
+      droppedByCap: 0,
+      honoredSupersedes: 1,
+      droppedSupersedesByCap: 0,
+    });
+    const superseded = (await readEvents(projectId)).filter(
+      (event) => event.type === "memory.superseded",
+    );
+    expect(superseded).toHaveLength(1);
+    expect(superseded[0]!.payload).toMatchObject({ supersedes: aId });
+    // B survives — the only memory that could have replaced it is itself gone.
+    expect(
+      listValidMemories(projectId)
+        .map((row) => row.memory.text)
+        .sort(),
+    ).toEqual(["b truth", "replaces a"]);
+  });
+
+  it("bounds folded supersede hints by the invocation cap and reports the overflow", async () => {
+    // Seed the fold target plus IMPORT_MAX_ITEMS + 5 distinct supersede
+    // targets. Two calls because seeding itself is capped.
+    const targetTexts = Array.from({ length: IMPORT_MAX_ITEMS + 5 }, (_, i) => `target ${i}`);
+    for (const chunk of [
+      ["folded text", ...targetTexts.slice(0, IMPORT_MAX_ITEMS - 1)],
+      targetTexts.slice(IMPORT_MAX_ITEMS - 1),
+    ]) {
+      await importMemories({
+        projectId,
+        actor: "test",
+        source: "docs",
+        itemsJson: JSON.stringify(chunk.map((text) => ({ kind: "decision", text, salience: 5 }))),
+      });
+    }
+    const idByText = new Map(
+      listValidMemories(projectId).map((row) => [row.memory.text, row.memory.id]),
+    );
+
+    // Every item is an existing-text duplicate, so `uniqueNewItems` is empty
+    // and the cap on minted items never engages — yet each carries a distinct
+    // valid target. Unbudgeted, this retires all 105 while reporting
+    // `droppedByCap: 0`.
+    const result = await importMemories({
+      projectId,
+      actor: "test",
+      source: "docs",
+      itemsJson: JSON.stringify(
+        targetTexts.map((text) => ({
+          kind: "decision",
+          text: "folded text",
+          salience: 5,
+          supersedesMemoryId: idByText.get(text)!,
+        })),
+      ),
+    });
+
+    expect(result).toEqual({
+      imported: 0,
+      skippedDuplicates: IMPORT_MAX_ITEMS + 5,
+      droppedByCap: 0,
+      honoredSupersedes: IMPORT_MAX_ITEMS,
+      droppedSupersedesByCap: 5,
+    });
+    const superseded = (await readEvents(projectId)).filter(
+      (event) => event.type === "memory.superseded",
+    );
+    expect(superseded).toHaveLength(IMPORT_MAX_ITEMS);
+    // The last 5 targets kept their budget-less hints and stayed valid.
+    const stillValid = new Set(listValidMemories(projectId).map((row) => row.memory.text));
+    expect(targetTexts.filter((text) => stillValid.has(text))).toEqual(
+      targetTexts.slice(IMPORT_MAX_ITEMS),
+    );
+  });
+
+  it("spends the cap on minted items first, and a re-run converges the hints it could not fit", async () => {
+    await importMemories({
+      projectId,
+      actor: "test",
+      source: "docs",
+      itemsJson: JSON.stringify([
+        { kind: "decision", text: "folded text", salience: 5 },
+        { kind: "decision", text: "old truth", salience: 5 },
+      ]),
+    });
+    const oldId = listValidMemories(projectId).find((row) => row.memory.text === "old truth")!
+      .memory.id;
+
+    // IMPORT_MAX_ITEMS genuinely new items exhaust the budget, so the one
+    // folded hint riding along has no room left.
+    const itemsJson = JSON.stringify([
+      ...Array.from({ length: IMPORT_MAX_ITEMS }, (_, i) => ({
+        kind: "decision",
+        text: `fresh ${i}`,
+        salience: 5,
+      })),
+      { kind: "decision", text: "folded text", salience: 5, supersedesMemoryId: oldId },
+    ]);
+
+    expect(await importMemories({ projectId, actor: "test", source: "docs", itemsJson })).toEqual({
+      imported: IMPORT_MAX_ITEMS,
+      skippedDuplicates: 1,
+      droppedByCap: 0,
+      honoredSupersedes: 0,
+      droppedSupersedesByCap: 1,
+    });
+    expect(listValidMemories(projectId).map((row) => row.memory.text)).toContain("old truth");
+
+    // The documented remedy: re-run. The items minted above now fold, freeing
+    // the whole budget for the hint — so this terminates rather than looping.
+    expect(await importMemories({ projectId, actor: "test", source: "docs", itemsJson })).toEqual({
+      imported: 0,
+      skippedDuplicates: IMPORT_MAX_ITEMS + 1,
+      droppedByCap: 0,
+      honoredSupersedes: 1,
+      droppedSupersedesByCap: 0,
+    });
+    expect(listValidMemories(projectId).map((row) => row.memory.text)).not.toContain("old truth");
   });
 });
