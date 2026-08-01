@@ -57,11 +57,45 @@
  * has already created a new lock at the path. So a holder watches its own lock
  * instead of assuming it. The heartbeat that refreshes the mtime also re-reads
  * `owner.json`, and a holder whose lock has vanished or now records someone
- * else's token declares it COMPROMISED: `withProjectLock` fails with
- * {@link ProjectLockCompromisedError} as soon as the heartbeat sees it, rather
- * than finishing a critical section it no longer owns. Capture surfaces that
- * through `onCaptureError` (one dropped observation); a boundary propagates it.
- * Both beat the silence this module exists to end.
+ * else's token declares it COMPROMISED. Capture surfaces that through
+ * `onCaptureError` (one dropped observation); a boundary propagates it. Both
+ * beat the silence this module exists to end.
+ *
+ * That notice is a REPORT, not a brake, and this module is careful not to act
+ * as if it were one. A running promise cannot be cancelled from outside, so
+ * `withProjectLock` still waits for `fn` to settle and only then fails with
+ * {@link ProjectLockCompromisedError}. Settling the wait early — racing the
+ * signal against `fn` — would hand the caller a finished call while the work
+ * went on running, and the caller that suffers most is the kernel's own capture
+ * chain: `enqueue` reads a settled task as "that capture is done" and starts
+ * the next one on top of a replace-all projection rebuild still in flight. That
+ * is this issue's ① reproduced INSIDE one process, in the one place that had
+ * always been safe from it (PR #156 review, Codex P1 ⑤).
+ *
+ * ## The overlap that remains
+ *
+ * One third-party race can still put two critical sections in flight, and it is
+ * worth naming precisely (PR #156 review, Codex P1 ⑥). A detacher that judges a
+ * private instance NOT to be the one it meant to take restores it — but the
+ * restore needs the path to be free, and a third acquirer may have `mkdir`'d
+ * there first. The restore then fails and the detacher disposes of a lock that
+ * belongs to a live holder, who now shares the section with that third
+ * acquirer. Entry is narrow: the filter in {@link acquire} does not disturb
+ * locks whose local owner is alive, so reaching the restore path at all takes a
+ * lock turning over between the filter and the `rename`.
+ *
+ * How long it lasts is the honest part. The dispossessed holder learns within
+ * one heartbeat, but learning is not stopping: with no cooperative cancellation
+ * in the critical sections, the overlap ends when the dispossessed `fn` ends.
+ * Passing an `AbortSignal` down to the projection swap and the boundary append
+ * would shorten it to the next check point; it changes service signatures and
+ * is deliberately left out of this module.
+ *
+ * That is still the better failure. The overlap this module exists to end is
+ * unbounded, unconditional and SILENT — every pair of processes, every capture,
+ * discovered only as a memory that is missing. This one needs a three-way race
+ * to start, and it announces itself to the loser: one reported error against a
+ * store that quietly loses observations.
  *
  * Related but separate: `fs-utils.ts`'s {@link withFileLock} guards an
  * arbitrary FILE path (the event-store's own use, #18) and takes no view of
@@ -159,10 +193,13 @@ export class ProjectLockTimeoutError extends MemorizeError {
 /**
  * Thrown when the lock was taken away from us while we were inside it.
  *
- * The critical section is already running when the heartbeat notices, so this
- * does not prevent the overlap; it ends our half of it at the earliest moment
- * the overlap is observable, and makes a span that would otherwise have
- * committed unguarded visible to the caller.
+ * A verdict on work that has already happened, not a brake on it. The critical
+ * section is running by the time the heartbeat notices and it runs to
+ * completion — `withProjectLock` waits for it and reports afterwards, because
+ * settling the call while the work continues is its own corruption (see the
+ * module doc). What this buys is that the span cannot be MISTAKEN for a guarded
+ * one: an overlap that would otherwise have committed in silence reaches the
+ * caller.
  */
 export class ProjectLockCompromisedError extends MemorizeError {
   constructor(projectId: string) {
@@ -354,13 +391,8 @@ export async function withProjectLock<T>(
 
   await acquire(lockDir, owner, acquireTimeoutMs, staleMs, projectId);
 
-  // Rejects only if we are dispossessed; parked forever otherwise.
-  let reportCompromised: (error: Error) => void = () => {};
-  const compromised = new Promise<never>((_, reject) => {
-    reportCompromised = reject;
-  });
-  // `fn` normally wins the race below, leaving this rejection unobserved.
-  compromised.catch(() => {});
+  // Set by the heartbeat, read once `fn` has settled. A flag rather than a
+  // racing promise on purpose — see "How a holder notices it was dispossessed".
   let dispossessed = false;
 
   const heartbeat = setInterval(() => {
@@ -371,7 +403,6 @@ export async function withProjectLock<T>(
   function lose(): void {
     dispossessed = true;
     clearInterval(heartbeat);
-    reportCompromised(new ProjectLockCompromisedError(projectId));
   }
 
   async function beat(): Promise<void> {
@@ -381,7 +412,7 @@ export async function withProjectLock<T>(
     } catch (error) {
       // Gone means gone: only an owner or a reclaimer removes a lock, and we
       // are the owner. Any other error (a full disk, say) says nothing about
-      // ownership and is no reason to abandon the critical section.
+      // ownership and is no reason to declare the lock lost.
       if (isEnoent(error)) lose();
       return;
     }
@@ -392,12 +423,25 @@ export async function withProjectLock<T>(
   }
 
   try {
-    return await Promise.race([fn(), compromised]);
+    const result = await fn();
+    // Only here, with `fn` settled: a caller who is told this call is over must
+    // be able to believe that the work it guarded is over too.
+    //
+    // A rejection from `fn` itself is left alone rather than overwritten with
+    // this one. The caller already learns the section failed, and `fn`'s error
+    // is the one that says what went wrong; a lost lock adds no diagnosis a
+    // failed span needs.
+    if (dispossessed) throw new ProjectLockCompromisedError(projectId);
+    return result;
   } finally {
     clearInterval(heartbeat);
-    // Nothing at the path is ours any more, and detaching to prove it would
-    // briefly expose whoever holds it now. Releasing a lock we lost is exactly
-    // the in-place removal this module refuses to do.
+    // Reached only once `fn` has settled, so the lock is never handed on while
+    // the work it guarded is still running.
+    //
+    // A holder that was dispossessed skips the release: nothing at the path is
+    // ours any more, and detaching to prove it would briefly expose whoever
+    // holds it now. Releasing a lock we lost is exactly the in-place removal
+    // this module refuses to do.
     if (!dispossessed) await release(lockDir, owner.token);
   }
 }

@@ -41,6 +41,9 @@ async function plantLock(owner: { pid: number; hostname?: string }): Promise<str
   return lockDir;
 }
 
+/** Swallow a rejection the way `enqueue` does, so the chain survives it. */
+function noop(): void {}
+
 /** A pid that cannot be running: `kill(pid, 0)` on it answers ESRCH. */
 function deadPid(): number {
   // 0x7FFFFFFF is above every platform's pid_max, so it is never allocated.
@@ -191,8 +194,8 @@ describe("withProjectLock — ownership transfer", () => {
 
   it("fails the call when the lock is taken over while it is held", async () => {
     // A holder cannot stop an ill-timed detach, so it watches instead: the
-    // heartbeat re-reads the owner record and gives up the moment the lock
-    // stops being ours, rather than finishing a span it no longer guards.
+    // heartbeat re-reads the owner record, and a span that turned out to be
+    // unguarded is reported to the caller instead of passing for a guarded one.
     const lockDir = getProjectLockDir(projectId);
 
     await expect(
@@ -207,6 +210,53 @@ describe("withProjectLock — ownership transfer", () => {
         { heartbeatMs: 10 },
       ),
     ).rejects.toBeInstanceOf(ProjectLockCompromisedError);
+  });
+
+  it("does not settle before its critical section, so a queued successor cannot overlap it", async () => {
+    // Losing the lock must not settle the CALL while the WORK runs on. The
+    // kernel chains captures on the previous task's promise, so an early
+    // settle starts the next capture on top of a projection rebuild still in
+    // flight — this issue's ① recreated inside one process, in the one place
+    // `enqueue` had always ruled it out (PR #156 review, Codex P1 ⑤).
+    const lockDir = getProjectLockDir(projectId);
+    let running = 0;
+    let overlapped = false;
+    let predecessorStillRunning = false;
+
+    const dispossessed = withProjectLock(
+      projectId,
+      async () => {
+        running += 1;
+        // What the timeout message tells a person to do, mistimed: the lock is
+        // cleared and taken over while we are still working under it.
+        await rm(lockDir, { recursive: true, force: true });
+        await plantLock({ pid: deadPid() });
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        running -= 1;
+      },
+      { heartbeatMs: 10 },
+    );
+
+    // `SqliteMemoryKernel.enqueue`'s chain in miniature: the next capture
+    // starts as soon as the previous task settles, whatever its outcome.
+    const successor = dispossessed.catch(noop).then(async () => {
+      if (running > 0) predecessorStillRunning = true;
+      await withProjectLock(
+        projectId,
+        async () => {
+          running += 1;
+          if (running > 1) overlapped = true;
+          running -= 1;
+        },
+        { acquireTimeoutMs: 5_000, staleMs: 5_000, heartbeatMs: 10 },
+      );
+    });
+
+    await expect(dispossessed).rejects.toBeInstanceOf(ProjectLockCompromisedError);
+    await successor;
+
+    expect(predecessorStillRunning).toBe(false);
+    expect(overlapped).toBe(false);
   });
 
   it("keeps holding the lock when the owner record is momentarily unreadable", async () => {
