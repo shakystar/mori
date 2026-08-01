@@ -23,6 +23,7 @@ import {
 } from "@mori/kernel";
 import { getEmbedder, resolveEmbeddingsConfig } from "../external/embeddings/index.js";
 import { BASH_TOOL_NAME } from "../tools/bash.js";
+import { maskSecrets } from "./mask-secrets.js";
 
 /** Provenance recorded on every event this harness appends. */
 export const MORI_ACTOR = "mori";
@@ -61,6 +62,52 @@ function stringArg(args: unknown, key: string): string | undefined {
 }
 
 /**
+ * Structured `details` every mori tool's result carries (see `tool-result.ts`).
+ * `tool_execution_end.result` is `any` at the pi-agent-core type level — this is
+ * the shape mori's own tools (`edit-file.ts`, `bash-exec.ts`) actually put there.
+ */
+interface ToolResultDetails {
+  ok: boolean;
+  /** bash only: exit code, or null when the process was killed by a signal. */
+  exitCode?: number | null;
+  /** bash only: true when the command hit its timeout and was killed. */
+  timedOut?: boolean;
+}
+
+function resultDetails(result: unknown): ToolResultDetails | undefined {
+  if (typeof result !== "object" || result === null) return undefined;
+  const details = (result as { details?: unknown }).details;
+  if (typeof details !== "object" || details === null) return undefined;
+  const ok = (details as { ok?: unknown }).ok;
+  return typeof ok === "boolean" ? (details as ToolResultDetails) : undefined;
+}
+
+/**
+ * Whether a finished tool call actually succeeded, structurally.
+ *
+ * `event.isError` alone is not enough (#129): mori's tools never throw, they
+ * report failure as a normal, non-error result — `edit_file` returns
+ * `{ ok: false, reason }` for an unmatched `oldString`, and `bash` returns
+ * `{ ok: true, exitCode: 1, ... }` for a command that ran and failed, or
+ * `{ ok: true, timedOut: true, ... }` for one that was killed. All three read
+ * as `isError === false` to the harness loop, so the structured result has to
+ * be checked directly.
+ *
+ * A signal-killed process (`exitCode === null`) is treated the same as a
+ * timeout — not captured — since the command did not run to completion either
+ * way and its effect on the working tree is no more trustworthy than a timeout's.
+ */
+function toolSucceeded(verdict: ToolCaptureVerdict | undefined, result: unknown): boolean {
+  const details = resultDetails(result);
+  if (!details || !details.ok) return false;
+  if (verdict === "shell") {
+    if (details.timedOut) return false;
+    if (details.exitCode !== 0) return false;
+  }
+  return true;
+}
+
+/**
  * Builds the `AgentEvent` → capture-candidate mapping.
  *
  * Stateful by necessity: `tool_execution_end` is the event that reports whether
@@ -71,7 +118,9 @@ function stringArg(args: unknown, key: string): string | undefined {
  *
  * Only successful calls are captured, which is the memorize behaviour this ports
  * (its filter ran on PostToolUse): a refused destructive command or a failed
- * edit changed nothing, so recording it as a work signal would be a lie.
+ * edit changed nothing, so recording it as a work signal would be a lie. Success
+ * is judged from the tool's own structured result (`toolSucceeded`), not just
+ * `event.isError` — see that function's doc for why the two diverge.
  */
 export function createAgentEventObserver(): ToolCallObserver<AgentEvent> {
   const pending = new Map<string, unknown>();
@@ -94,7 +143,10 @@ export function createAgentEventObserver(): ToolCallObserver<AgentEvent> {
     pending.delete(event.toolCallId);
     if (event.isError) return undefined;
 
-    switch (TOOL_CAPTURE[event.toolName]) {
+    const verdict = TOOL_CAPTURE[event.toolName];
+    if (!toolSucceeded(verdict, event.result)) return undefined;
+
+    switch (verdict) {
       case "write": {
         // The PATH, never the tool input as a whole: `edit_file`'s arguments also
         // carry `oldString`/`newString`, and passing the object through would
@@ -104,7 +156,12 @@ export function createAgentEventObserver(): ToolCallObserver<AgentEvent> {
       }
       case "shell": {
         const command = stringArg(args, "command");
-        return command ? observedShell({ toolName: event.toolName, command }) : undefined;
+        // Masked here, before the command ever reaches the kernel's append-only
+        // event log — see mask-secrets.ts for why that has to happen on this
+        // side of the seam.
+        return command
+          ? observedShell({ toolName: event.toolName, command: maskSecrets(command) })
+          : undefined;
       }
       default:
         return undefined;
