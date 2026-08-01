@@ -157,4 +157,25 @@ describe("maskSecrets", () => {
     expect(maskSecrets("curl --token=sk-abc|tee out.log")).toBe("curl --token=***|tee out.log");
     expect(maskSecrets("curl --token=sk-abc&background")).toBe("curl --token=***&background");
   });
+
+  it("masks a quoted secret value containing whitespace, keeping the quotes and the rest of the command", () => {
+    const masked = maskSecrets("DB_PASSWORD='correct horse' ./generate && git commit -am update");
+
+    expect(masked).toBe("DB_PASSWORD='***' ./generate && git commit -am update");
+    expect(masked).not.toContain("correct horse");
+    expect(masked).toContain("git commit -am update");
+  });
+
+  it("masks a lowercase secret-shaped env assignment", () => {
+    const masked = maskSecrets("db_password=hunter2 ./generate && git commit -am update");
+
+    expect(masked).toBe("db_password=*** ./generate && git commit -am update");
+    expect(masked).not.toContain("hunter2");
+  });
+
+  it("does not mask the word Bearer outside an Authorization context", () => {
+    const command = "git commit -m 'Document Bearer authentication'";
+
+    expect(maskSecrets(command)).toBe(command);
+  });
 });

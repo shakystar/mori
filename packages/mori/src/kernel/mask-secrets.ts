@@ -15,6 +15,21 @@
  * safeguard is a human never needing to eyeball the raw event log at all.
  * Only the secret VALUE is replaced (`--token=***`); the rest of the command
  * is kept so the observation still says something useful.
+ *
+ * Value boundary rule (decided once here; every pattern that accepts a quoted
+ * value follows it — see `VALUE_TOKEN`): a value either starts with a quote,
+ * in which case it runs through the matching closing quote and whitespace
+ * inside the quotes is NOT a terminator (`DB_PASSWORD='correct horse'` masks
+ * to `DB_PASSWORD='***'`, not a truncated match) — or it has no opening quote,
+ * in which case whitespace, a quote, and the shell control operators `;`/`|`/`&`
+ * all terminate it. Quoting is the shell's own way of saying "this token may
+ * contain the characters that would otherwise end it", so the rule inside
+ * quotes has to be more permissive than outside them.
+ *
+ * Known gap (accepted, not fixed): command substitution (`` `cmd` ``, `$(cmd)`)
+ * and here-docs aren't recognized as value forms, so a secret produced that way
+ * (e.g. `--token=$(cat secret.txt)`) passes through unmasked. Catching those
+ * would require actually parsing shell, not pattern-matching it.
  */
 
 /** One entry of the secret-masking seed list. */
@@ -22,23 +37,35 @@ export interface SecretMaskPattern {
   /** Stable id, used to pin one test per pattern (mirrors bash-guard.ts). */
   id: string;
   description: string;
-  /** Matched against the raw command. `$1`/`$2` in `replacement` refer to this. */
+  /** Matched against the raw command. */
   pattern: RegExp;
-  /** `String.replace` template — keeps everything except the secret value. */
-  replacement: string;
+  /** `String.replace` template, or a replacer function for patterns whose
+   *  masked portion has to preserve quotes around a value that may itself
+   *  contain whitespace — a static template can't branch on that. */
+  replacement: string | ((...args: string[]) => string);
 }
 
-/** Value characters allowed in a masked capture: no whitespace, no quotes (so a
- *  quoted value's closing quote survives the redaction instead of being eaten),
- *  and none of `;`/`|`/`&` (shell control operators — without this exclusion the
- *  value swallows the operator plus the start of the next command). */
-const VALUE = `[^\\s"';|&]+`;
+/** A credential value token: either a `"..."`/`'...'` quoted string — which may
+ *  contain whitespace, since a real secret can (`DB_PASSWORD='correct horse'`) —
+ *  or an unquoted run that stops at whitespace, a quote, or a shell control
+ *  operator (`;`/`|`/`&`; without this exclusion the value would swallow the
+ *  operator plus the start of the next command). Wrap in `()` at each use site
+ *  so the replacer gets the whole token (quotes included) as one group. */
+const VALUE_TOKEN = `(?:"[^"]*"|'[^']*'|[^\\s"';|&]+)`;
 
-/** Optional matching quote wrapped around a value: capture group N is the quote
- *  character (or `""` if unquoted), and the caller's own `\N` backreference right
- *  after `${VALUE}` requires the same character to close it. Used so `--token 'x'`
- *  and `--password="x"` are recognized instead of only the unquoted form. */
-const QUOTE = `(["']?)`;
+/** Unquoted-only value, for patterns that don't need quote support. */
+const VALUE_UNQUOTED = `[^\\s"';|&]+`;
+
+/** Replaces a captured value token with `***`, preserving its surrounding
+ *  quotes (if any) so `'secret'` becomes `'***'` instead of losing the quotes
+ *  or (worse) masking through them and eating the quote characters. */
+function maskValueToken(token: string): string {
+  const quote = token[0];
+  if ((quote === '"' || quote === "'") && token.length >= 2 && token.at(-1) === quote) {
+    return `${quote}***${quote}`;
+  }
+  return "***";
+}
 
 export const SECRET_MASK_PATTERNS: readonly SecretMaskPattern[] = [
   {
@@ -51,10 +78,11 @@ export const SECRET_MASK_PATTERNS: readonly SecretMaskPattern[] = [
     id: "long-flag-value",
     description: "--token/--password/--secret/--api-key/--access-key style flag (= or space form)",
     pattern: new RegExp(
-      `(--(?:token|password|passwd|secret|api-key|apikey|access-key|access-token|auth-token))([= ])${QUOTE}${VALUE}\\3`,
+      `(--(?:token|password|passwd|secret|api-key|apikey|access-key|access-token|auth-token))([= ])(${VALUE_TOKEN})`,
       "gi",
     ),
-    replacement: "$1$2$3***$3",
+    replacement: (_match: string, flag: string, sep: string, value: string) =>
+      `${flag}${sep}${maskValueToken(value)}`,
   },
   {
     id: "short-p-flag",
@@ -63,34 +91,48 @@ export const SECRET_MASK_PATTERNS: readonly SecretMaskPattern[] = [
       "Explicitly excludes find's -print/-print0/-printf/-perm/-path/-prune " +
       "primaries, which share the -p<word> shape but are not password flags.",
     pattern: new RegExp(
-      `(\\s-p)(?!\\s|$)(?!(?:rint(?:0|f)?|erm|ath|rune)\\b)${QUOTE}${VALUE}\\2`,
+      `(\\s-p)(?!\\s|$)(?!(?:rint(?:0|f)?|erm|ath|rune)\\b)(${VALUE_TOKEN})`,
       "g",
     ),
-    replacement: "$1$2***$2",
+    replacement: (_match: string, prefix: string, value: string) =>
+      `${prefix}${maskValueToken(value)}`,
   },
   {
     id: "bearer-token",
-    description: "Authorization: Bearer <token> header",
-    pattern: new RegExp(`(\\bBearer\\s+)${VALUE}`, "gi"),
+    description:
+      "Authorization: Bearer <token> header — requires an Authorization context so " +
+      'prose that merely contains the word "Bearer" (e.g. a commit message) isn\'t masked',
+    pattern: new RegExp(`(\\bAuthorization\\b\\s*:?\\s*Bearer\\s+)${VALUE_UNQUOTED}`, "gi"),
     replacement: "$1***",
   },
   {
     id: "secret-env-assignment",
     description:
       "environment variable assignment whose name looks like a secret " +
-      "(…SECRET…, …API_KEY…, …TOKEN…, …PASSWORD…)",
+      "(…secret…, …api_key…, …token…, …password…), matched case-insensitively " +
+      "since shell env var names are case-sensitive but may legally be lowercase. " +
+      "Known false positive from case-insensitivity: text-substitution commands " +
+      "whose argument merely contains one of these words as a literal, e.g. " +
+      "`sed 's/password=old/password=new/'`, now match and get partially redacted " +
+      "even though nothing there is a credential — accepted, since over-redacting " +
+      "a non-secret is cheaper than leaking one.",
     pattern: new RegExp(
-      `(\\b(?:[A-Z0-9]+_)*(?:SECRET|API_KEY|APIKEY|TOKEN|PASSWORD|PASSWD)(?:_[A-Z0-9]+)*=)${QUOTE}${VALUE}\\2`,
-      "g",
+      `(\\b(?:[A-Z0-9]+_)*(?:SECRET|API_KEY|APIKEY|TOKEN|PASSWORD|PASSWD)(?:_[A-Z0-9]+)*=)(${VALUE_TOKEN})`,
+      "gi",
     ),
-    replacement: "$1$2***$2",
+    replacement: (_match: string, prefix: string, value: string) =>
+      `${prefix}${maskValueToken(value)}`,
   },
 ];
 
 /** Redacts every recognized secret shape in `command`, keeping the rest intact. */
 export function maskSecrets(command: string): string {
-  return SECRET_MASK_PATTERNS.reduce(
-    (text, { pattern, replacement }) => text.replace(pattern, replacement),
-    command,
-  );
+  return SECRET_MASK_PATTERNS.reduce((text, { pattern, replacement }) => {
+    // Branched (not `text.replace(pattern, replacement)` directly): TS can't pick
+    // the right `String.replace` overload from a union type without narrowing first.
+    if (typeof replacement === "function") {
+      return text.replace(pattern, replacement);
+    }
+    return text.replace(pattern, replacement);
+  }, command);
 }
