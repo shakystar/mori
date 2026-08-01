@@ -4,6 +4,7 @@ import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+import { CURRENT_SCHEMA_VERSION } from "../../src/domain/common.js";
 import {
   createConsolidatedMemory,
   createObservation,
@@ -17,12 +18,14 @@ import type {
   Embedder,
 } from "../../src/index.js";
 import {
+  CONSERVATIVE_CHARS_PER_TOKEN,
   ExtractionParseError,
   MAX_EXTRACTION_INPUT_CHARS,
   boundExtractionInput,
   buildExtractionUserContent,
   chunkConversation,
   consolidate,
+  extractionCharBudget,
   getConsolidateWatermark,
   getConsolidationStatus,
   parseExtractedMemories,
@@ -37,7 +40,7 @@ import {
   rebuildProjectProjection,
 } from "../../src/services/projection-store.js";
 import { listSegments } from "../../src/services/segment-store.js";
-import { closeAll } from "../../src/storage/db.js";
+import { closeAll, getDb } from "../../src/storage/db.js";
 import { appendEvent, readEvents } from "../../src/storage/event-store.js";
 
 let sandbox: string;
@@ -113,6 +116,14 @@ function fakeLlm(replies: string[]): ConsolidatorLlm & { prompts: string[] } {
       return replies[Math.min(i++, replies.length - 1)] ?? "[]";
     },
   };
+}
+
+/** {@link fakeLlm} plus a declared `contextWindowTokens` (#143 item②). */
+function fakeLlmWithContext(
+  contextWindowTokens: number,
+  replies: string[],
+): ConsolidatorLlm & { prompts: string[] } {
+  return { ...fakeLlm(replies), contextWindowTokens };
 }
 
 /** A `ConversationSource` that replays canned slices and records requested offsets. */
@@ -596,6 +607,154 @@ describe("consolidate — excludes foreign-lane observations (#113)", () => {
   });
 });
 
+/**
+ * Inserts a raw `events` row bypassing `appendEvent` — needed to construct a
+ * row `appendEvent` itself can never produce: a NULL `source_project_id`
+ * (every normal append defaults it to the writer's own project id) whose
+ * `project_id` column differs from the local store's identity, i.e. a
+ * pre-Phase-0 legacy row a workspace union carried in under its ORIGINAL
+ * writer's id. Same technique `observation-lane-backfill.test.ts` uses
+ * against a hand-built old-schema db; here the current (already-migrated)
+ * `events` table has the same columns, so it writes straight into it.
+ */
+function insertRawEvent(params: {
+  id: string;
+  type: string;
+  eventProjectId: string;
+  sourceProjectId: string | null;
+  createdAt: string;
+  payload: unknown;
+}): void {
+  getDb(projectId)
+    .prepare(
+      `INSERT INTO events
+         (id, schema_version, created_at, updated_at, type,
+          project_id, scope_type, scope_id, actor, writer, source_project_id, payload)
+       VALUES (?, ?, ?, ?, ?, ?, 'project', ?, 'test', 'test', ?, ?)`,
+    )
+    .run(
+      params.id,
+      CURRENT_SCHEMA_VERSION,
+      params.createdAt,
+      params.createdAt,
+      params.type,
+      params.eventProjectId,
+      params.eventProjectId,
+      params.sourceProjectId,
+      JSON.stringify(params.payload),
+    );
+}
+
+// #143 item① — `getConsolidationStatus` used to materialize every pending
+// event row into JS just to run `laneOf` over it; a workspace union's foreign
+// backlog never crosses the local threshold (so it never advances the
+// watermark) and only grows, so every status call re-read all of it. These
+// pin the SQL-aggregate replacement (`laneWhereSql`) to the exact same
+// classification `laneOf` makes.
+describe("getConsolidationStatus — aggregate SQL backlog count (#143)", () => {
+  it("counts only self-lane observations for both count and oldest, ignoring a larger foreign backlog", async () => {
+    for (let i = 0; i < 5; i++) {
+      await seedForeignObservation(`foreign ${i}`);
+    }
+    const firstSelfId = await seedObservation("self oldest");
+    await seedObservation("self middle");
+    await seedObservation("self newest");
+
+    const status = getConsolidationStatus(projectId);
+    expect(status.pendingObservations).toBe(3);
+
+    const events = await readEvents(projectId);
+    const firstSelfEvent = events.find(
+      (e) => e.type === "observation.captured" && (e.payload as { id: string }).id === firstSelfId,
+    );
+    expect(status.oldestPendingAt).toBe(firstSelfEvent!.createdAt);
+  });
+
+  it("behaves as before for a non-union (single-genesis) store", async () => {
+    await seedObservation("solo self decision one");
+    await seedObservation("solo self decision two");
+
+    const status = getConsolidationStatus(projectId);
+    expect(status.pendingObservations).toBe(2);
+    expect(status.oldestPendingAt).toBeDefined();
+  });
+
+  it("classifies a legacy NULL-provenance row by isUnion + the event's own project_id, matching laneOf", async () => {
+    const FOREIGN = "proj_legacy_foreign_member";
+    // A second genesis in the SAME db makes `isUnionLog(projectId)` true —
+    // the same trigger both `run()`'s lane filter and this status query key
+    // off, so a single-genesis store never hits this branch of `laneOf`.
+    insertRawEvent({
+      id: "evt_foreign_genesis",
+      type: "project.created",
+      eventProjectId: FOREIGN,
+      sourceProjectId: FOREIGN,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      payload: {
+        id: FOREIGN,
+        schemaVersion: CURRENT_SCHEMA_VERSION,
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+        title: "foreign member",
+        summary: "foreign",
+        goals: [],
+        status: "active",
+        rootPath: "/tmp/foreign",
+        activeWorkstreamIds: [],
+        activeTaskIds: [],
+        acceptedDecisionIds: [],
+        ruleIds: [],
+      },
+    });
+
+    // Legacy row that is genuinely THIS store's own history: no source column
+    // at all (pre-Phase-0), but its own project_id already names this store.
+    insertRawEvent({
+      id: "evt_legacy_self_obs",
+      type: "observation.captured",
+      eventProjectId: projectId,
+      sourceProjectId: null,
+      createdAt: "2026-01-02T00:00:00.000Z",
+      payload: {
+        id: "obs_legacy_self",
+        schemaVersion: CURRENT_SCHEMA_VERSION,
+        createdAt: "2026-01-02T00:00:00.000Z",
+        updatedAt: "2026-01-02T00:00:00.000Z",
+        projectId,
+        sessionId: "s1",
+        signal: "decision-keyword",
+        summary: "legacy self observation",
+      },
+    });
+
+    // Legacy row that rode in under a foreign member's OWN project_id — the
+    // exact shape `laneOf`'s doc calls out ("a foreign member's legacy block
+    // rides in under ITS projectId"). Older than the self row above, so a
+    // naive MIN(created_at) with no lane filter would wrongly report it.
+    insertRawEvent({
+      id: "evt_legacy_foreign_obs",
+      type: "observation.captured",
+      eventProjectId: FOREIGN,
+      sourceProjectId: null,
+      createdAt: "2026-01-01T12:00:00.000Z",
+      payload: {
+        id: "obs_legacy_foreign",
+        schemaVersion: CURRENT_SCHEMA_VERSION,
+        createdAt: "2026-01-01T12:00:00.000Z",
+        updatedAt: "2026-01-01T12:00:00.000Z",
+        projectId: FOREIGN,
+        sessionId: "s1",
+        signal: "decision-keyword",
+        summary: "legacy foreign observation",
+      },
+    });
+
+    const status = getConsolidationStatus(projectId);
+    expect(status.pendingObservations).toBe(1);
+    expect(status.oldestPendingAt).toBe("2026-01-02T00:00:00.000Z");
+  });
+});
+
 // #113 ③ — the extraction prompt has no cap on observations / existing
 // memories / conversation tail, and a context-limit rejection is treated as
 // an ordinary (non-advancing) extractor failure, so an oversized window would
@@ -907,6 +1066,67 @@ describe("consolidate — bounded input keeps the watermark self-healing (#113)"
     expect(remaining).toBe(0);
 
     const drained = await consolidate({ projectId, actor: "test", consolidator: noopConsolidator });
+    expect(drained).toMatchObject({ observationsProcessed: 0, outcome: "noop" });
+  });
+});
+
+// #143 item② — MAX_EXTRACTION_INPUT_CHARS is a fixed char count, so it makes
+// no promise about TOKENS: a CJK-heavy prompt (this project's own
+// observations/conversation are substantially Korean) runs far more tokens
+// per char than the English text the constant was sized against, and a
+// small local model's real context can be smaller than the constant assumes
+// either way. `extractionCharBudget` derives the char budget from the
+// injected LLM's declared `contextWindowTokens` instead, when it has one.
+describe("extractionCharBudget — model-aware extraction budget (#143)", () => {
+  it("falls back to MAX_EXTRACTION_INPUT_CHARS when the LLM declares no context window", () => {
+    expect(extractionCharBudget(undefined)).toBe(MAX_EXTRACTION_INPUT_CHARS);
+    expect(extractionCharBudget({ complete: async () => "[]" })).toBe(MAX_EXTRACTION_INPUT_CHARS);
+  });
+
+  it("derives a strictly smaller budget from a small declared context window", () => {
+    const budget = extractionCharBudget({ complete: async () => "[]", contextWindowTokens: 4_000 });
+    expect(budget).toBeGreaterThan(0);
+    expect(budget).toBeLessThan(MAX_EXTRACTION_INPUT_CHARS);
+  });
+
+  it("keeps the estimated prompt tokens (system + rendered user content) within a small declared context window, for a dense CJK backlog", async () => {
+    // CJK observation content: no spaces, so this stresses the same axis the
+    // issue calls out — many tokens per character relative to English.
+    const cjk = "가".repeat(6_000);
+    await seedObservation(cjk, "decision-keyword");
+
+    const llm = fakeLlmWithContext(4_000, ["[]"]);
+    await consolidate({ projectId, actor: "test", llm });
+
+    expect(llm.prompts.length).toBe(1);
+    const estimatedTokens = Math.ceil(llm.prompts[0]!.length / CONSERVATIVE_CHARS_PER_TOKEN);
+    expect(estimatedTokens).toBeLessThanOrEqual(4_000);
+  });
+
+  it("still guarantees at least one observation per boundary and drains the backlog under a narrow declared window", async () => {
+    const bigSummary = "y".repeat(2000);
+    const total = 8;
+    for (let i = 0; i < total; i++) {
+      await seedObservation(`${bigSummary} #${i}`, "decision-keyword");
+    }
+
+    const llm = fakeLlmWithContext(4_000, Array(total).fill("[]"));
+
+    const first = await consolidate({ projectId, actor: "test", llm });
+    expect(first.observationsProcessed).toBeGreaterThan(0);
+    expect(first.observationsProcessed).toBeLessThan(total);
+
+    let remaining = total - first.observationsProcessed;
+    let guard = 0;
+    while (remaining > 0 && guard < total) {
+      const next = await consolidate({ projectId, actor: "test", llm });
+      expect(next.observationsProcessed).toBeGreaterThan(0);
+      remaining -= next.observationsProcessed;
+      guard += 1;
+    }
+    expect(remaining).toBe(0);
+
+    const drained = await consolidate({ projectId, actor: "test", llm });
     expect(drained).toMatchObject({ observationsProcessed: 0, outcome: "noop" });
   });
 });
