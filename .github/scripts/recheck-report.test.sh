@@ -24,7 +24,7 @@ BOT="github-actions[bot]"
 MARKER="<!-- recheck-open-prs -->"
 
 reset_scenario() {
-  unset GH_ROUTES GH_FAIL RESULT_SUFFIX NO_RESULT_DETAIL BASE_SHA_OVERRIDE
+  unset GH_ROUTES GH_FAIL RESULT_SUFFIX NO_RESULT_DETAIL BASE_SHA_OVERRIDE AUTHORITATIVE
   ROUTE_SEQ=0
   rm -rf "${SANDBOX}/results"
   mkdir -p "${SANDBOX}/results"
@@ -80,6 +80,7 @@ run_report() {
   default_main_route
   env REPO=o/r PRS="${PRS:-[7]}" UNVERIFIED="${UNVERIFIED:-[]}" \
     RESULTS_DIR="${SANDBOX}/results" BASE_SHA="${BASE_SHA_OVERRIDE-$BASE}" \
+    AUTHORITATIVE="${AUTHORITATIVE:-1}" \
     RESULT_SUFFIX="${RESULT_SUFFIX:-}" NO_RESULT_DETAIL="${NO_RESULT_DETAIL:-}" \
     RUN_URL="https://example.test/run/1" BOT_LOGIN="$BOT" TMPDIR="$SANDBOX" \
     GH_LOG="$GH_LOG" GH_BODY_LOG="$GH_BODY_LOG" \
@@ -444,6 +445,157 @@ route "issues/7/comments" '[]'
 run_report
 assert_eq "posted|대상 선정(discover) 잡이 실패해 재검증 대상을 정하지 못했습니다." \
   "$(grep -q 'method POST repos/o/r/issues/7/comments' "$GH_LOG" && echo posted || echo no-post)|$(grep -o '대상 선정(discover) 잡이 실패해 재검증 대상을 정하지 못했습니다.' "$GH_BODY_LOG" | head -1)"
+
+# --- 폴백 보고(AUTHORITATIVE=0)가 확정 판정을 덮지 않는다 (#152) -------------------------
+# report-discovery-failure 잡은 discover가 죽어 **어떤 head·base를 검증할지조차 정하지 못한
+# 채** 도는 잡이다. 그 잡이 남기는 "판정 불가"가 겹친 다른 실행(push 스윕 ↔ synchronize)이
+# 방금 남긴 확정 판정을 덮으면, 판정하지 않은 잡이 판정한 잡의 결과를 지우는 것이 된다:
+#   T1 push 스윕이 PR 7을 검증 → 🔴로 마커 PATCH        (확정 판정)
+#   T2 PR 7에 synchronize → 그 실행의 discover가 죽는다
+#   T3 폴백이 같은 마커를 ⛔ 판정 불가로 PATCH           ← 이것을 막는다
+# 다만 침묵해서는 안 되므로(#125 항목 3) 게이트 마커가 없는 별도 알림 코멘트를 남긴다.
+
+GREEN_HEAD="🟢 이 PR은 현재 main 기준으로 그린입니다."
+RED_HEAD="🔴 **이 PR은 현재 main 기준으로 레드입니다.**"
+STALE_HEAD="⛔ **판정 불가 — 이 재검증 결과가 현재 PR head·현재 \`main\` 기준인지 확인되지 않습니다.**"
+NOTICE_MARKER="<!-- recheck-open-prs-notice -->"
+FALLBACK_DETAIL="재검증 대상 선정(discover) 잡이 실패해 이 PR을 검증하지 못했습니다."
+
+# gate_body <verdict> <headline> — 판정 종류를 마커에 심은 게이트 코멘트 본문.
+# `\\n`은 JSON 문자열 안의 개행 이스케이프다 (comment()가 본문을 JSON에 그대로 끼워 넣는다).
+gate_body() {
+  printf '🤖 [ci]\\n\\n%s\\n<!-- recheck-verdict:%s -->\\n%s' "$MARKER" "$1" "$2"
+}
+
+# legacy_gate_body <headline> [추가 줄] — 판정 마커가 없던 시절(이 이슈 이전)의 본문.
+# 이미 열려 있는 PR에 붙어 있는 코멘트가 이 모양이므로 이쪽도 읽어낼 수 있어야 한다.
+legacy_gate_body() {
+  printf '🤖 [ci]\\n\\n%s\\n%s\\n%s' "$MARKER" "$1" "${2:-}"
+}
+
+# discover 실패 폴백 잡과 같은 입력: 판정 아티팩트 없음, base 없음, 자기 원인 문구.
+use_fallback_env() {
+  AUTHORITATIVE=0
+  BASE_SHA_OVERRIDE=""
+  NO_RESULT_DETAIL="$FALLBACK_DETAIL"
+}
+
+it "폴백 보고는 겹친 실행이 남긴 확정 레드를 판정 불가로 덮지 않는다 (T1–T3)"
+reset_scenario
+use_fallback_env
+route "issues/7/comments" "[$(comment 100 "$BOT" "$(gate_body red "$RED_HEAD")")]"
+run_report
+assert_not_contains "$(cat "$GH_LOG")" "method PATCH repos/o/r/issues/comments/100"
+
+it "폴백 보고는 확정 그린도 덮지 않는다"
+reset_scenario
+use_fallback_env
+route "issues/7/comments" "[$(comment 100 "$BOT" "$(gate_body green "$GREEN_HEAD")")]"
+run_report
+assert_not_contains "$(cat "$GH_LOG")" "method PATCH repos/o/r/issues/comments/100"
+
+it "폴백 보고는 충돌 판정도 덮지 않는다"
+reset_scenario
+use_fallback_env
+route "issues/7/comments" "[$(comment 100 "$BOT" "$(gate_body conflict "⚠️ **현재 \`main\` 기준 재검증을 하지 못했습니다.**")")]"
+run_report
+assert_not_contains "$(cat "$GH_LOG")" "method PATCH repos/o/r/issues/comments/100"
+
+it "확정 판정을 지키면서도 discover 실패는 새 코멘트로 보인다 (침묵 금지)"
+reset_scenario
+use_fallback_env
+route "issues/7/comments" "[$(comment 100 "$BOT" "$(gate_body red "$RED_HEAD")")]"
+run_report
+assert_eq "posted|${FALLBACK_DETAIL}" \
+  "$(grep -q 'method POST repos/o/r/issues/7/comments' "$GH_LOG" && echo posted || echo no-post)|$(grep -o "$FALLBACK_DETAIL" "$GH_BODY_LOG" | head -1)"
+
+it "폴백 알림 코멘트는 게이트 마커를 심지 않는다 (게이트 신호는 하나로 유지)"
+reset_scenario
+use_fallback_env
+route "issues/7/comments" "[$(comment 100 "$BOT" "$(gate_body red "$RED_HEAD")")]"
+run_report
+# 게이트를 덮지 않았으므로 이 실행이 쓴 본문은 알림 코멘트 하나뿐이다.
+assert_not_contains "$(cat "$GH_BODY_LOG")" "$MARKER"
+
+it "폴백 알림 코멘트가 이미 있으면 새로 만들지 않고 갱신한다"
+reset_scenario
+use_fallback_env
+route "issues/7/comments" \
+  "[$(comment 100 "$BOT" "$(gate_body red "$RED_HEAD")"),$(comment 300 "$BOT" "🤖 [ci]\\n\\n${NOTICE_MARKER}\\n⚠️ 지난 실행의 알림")]"
+run_report
+assert_eq "patched|no-post" \
+  "$(grep -q 'method PATCH repos/o/r/issues/comments/300' "$GH_LOG" && echo patched || echo no-patch)|$(grep -q 'method POST' "$GH_LOG" && echo posted || echo no-post)"
+
+it "폴백 알림 코멘트는 게이트 코멘트로 오인되지 않는다"
+reset_scenario
+use_fallback_env
+# 알림만 있고 게이트 코멘트는 없는 상태. 알림을 게이트로 오인하면 그것을 PATCH해 버린다.
+route "issues/7/comments" "[$(comment 300 "$BOT" "🤖 [ci]\\n\\n${NOTICE_MARKER}\\n⚠️ 지난 실행의 알림")]"
+run_report
+assert_not_contains "$(cat "$GH_LOG")" "method PATCH repos/o/r/issues/comments/300"
+
+it "기존 게이트 코멘트가 없으면 폴백도 종전대로 판정 불가를 남긴다"
+reset_scenario
+use_fallback_env
+route "issues/7/comments" '[]'
+run_report
+assert_eq "posted|판정 불가" \
+  "$(grep -q 'method POST repos/o/r/issues/7/comments' "$GH_LOG" && echo posted || echo no-post)|$(grep -o '판정 불가' "$GH_BODY_LOG" | head -1)"
+
+it "기존 게이트 코멘트가 이미 판정 불가면 폴백이 그 코멘트를 갱신한다"
+reset_scenario
+use_fallback_env
+route "issues/7/comments" "[$(comment 100 "$BOT" "$(gate_body stale "$STALE_HEAD")")]"
+run_report
+assert_eq "patched|${FALLBACK_DETAIL}" \
+  "$(grep -q 'method PATCH repos/o/r/issues/comments/100' "$GH_LOG" && echo patched || echo no-patch)|$(grep -o "$FALLBACK_DETAIL" "$GH_BODY_LOG" | head -1)"
+
+it "판정 마커가 없는 옛 코멘트도 헤드라인으로 확정 판정으로 읽어 덮지 않는다"
+reset_scenario
+use_fallback_env
+route "issues/7/comments" "[$(comment 100 "$BOT" "$(legacy_gate_body "$RED_HEAD")")]"
+run_report
+assert_not_contains "$(cat "$GH_LOG")" "method PATCH repos/o/r/issues/comments/100"
+
+it "판정 종류는 헤드라인에서만 읽는다 — 본문 뒤쪽의 그린 인용에 속지 않는다"
+reset_scenario
+use_fallback_env
+# 레드 본문은 체크 출력 꼬리를 그대로 싣는다. 본문 전체를 이모지로 훑으면 판정 불가 코멘트가
+# 확정 그린으로 읽혀 폴백이 침묵하게 된다.
+route "issues/7/comments" "[$(comment 100 "$BOT" "$(legacy_gate_body "$STALE_HEAD" "이전 판정 인용: 🟢 그린입니다")")]"
+run_report
+assert_contains "$(cat "$GH_LOG")" "method PATCH repos/o/r/issues/comments/100"
+
+it "기존 코멘트 조회에 실패하면 폴백은 게이트를 건드리지 않고 알림만 남긴다"
+reset_scenario
+use_fallback_env
+# 확정 판정이 거기 있는지 알 수 없다 — 덮지 않는 쪽이 보수적이고, 알림이 침묵을 막는다.
+fail_calls_matching "issues/7/comments?per_page"
+run_report
+assert_eq "posted|no-marker" \
+  "$(grep -q 'method POST repos/o/r/issues/7/comments' "$GH_LOG" && echo posted || echo no-post)|$(grep -q -- "$MARKER" "$GH_BODY_LOG" && echo marker || echo no-marker)"
+
+it "정상 report 잡은 판정 아티팩트가 없을 때 확정 레드를 판정 불가로 갱신한다 (회귀 없음)"
+reset_scenario
+# 이 잡은 authoritative하다 — 이번 실행에서 실제로 검증을 시도했고 결과가 없다고 보고한다.
+route "issues/7/comments" "[$(comment 100 "$BOT" "$(gate_body red "$RED_HEAD")")]"
+run_report
+assert_eq "patched|판정 불가" \
+  "$(grep -q 'method PATCH repos/o/r/issues/comments/100' "$GH_LOG" && echo patched || echo no-patch)|$(grep -o '판정 불가' "$GH_BODY_LOG" | head -1)"
+
+it "게이트 코멘트 본문에 판정 종류가 기계적으로 읽을 수 있게 심긴다 (레드)"
+reset_scenario
+make_result 7 red "" "pnpm lint" "$MERGE" "$HEAD_A"
+route "issues/7/comments" '[]'
+run_report
+assert_contains "$(cat "$GH_BODY_LOG")" "<!-- recheck-verdict:red -->"
+
+it "게이트 코멘트 본문에 판정 종류가 기계적으로 읽을 수 있게 심긴다 (그린)"
+reset_scenario
+make_result 7 green "" "" "$MERGE" "$HEAD_A"
+route "issues/7/comments" "[$(comment 100 "$BOT" "$(gate_body red "$RED_HEAD")")]"
+run_report
+assert_contains "$(cat "$GH_BODY_LOG")" "<!-- recheck-verdict:green -->"
 
 it "여러 PR을 보고할 때 각 PR에 코멘트를 남긴다"
 reset_scenario
