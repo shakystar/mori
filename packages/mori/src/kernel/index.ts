@@ -16,12 +16,18 @@ import {
   observedShell,
   observedWrite,
   projectStoreExists,
+  renderMemoryContext,
   SqliteMemoryKernel,
   type Embedder,
+  type MemoryContext,
   type ObservedToolCall,
   type ToolCallObserver,
 } from "@mori/kernel";
-import { getEmbedder, resolveEmbeddingsConfig } from "../external/embeddings/index.js";
+import {
+  getEmbedder,
+  resolveEmbeddingsConfig,
+  sessionStartEmbeddingsConfig,
+} from "../external/embeddings/index.js";
 import { BASH_TOOL_NAME } from "../tools/bash.js";
 import { maskSecrets } from "./mask-secrets.js";
 
@@ -170,6 +176,25 @@ export function createAgentEventObserver(): ToolCallObserver<AgentEvent> {
 }
 
 /**
+ * The kernel's `renderContext` seam, mori-side: retrieved memory → one pi
+ * `AgentMessage` (#5 1/3).
+ *
+ * Split exactly where the seam is. The TEXT comes from the kernel's own
+ * `renderMemoryContext` — what a consolidated memory or an observation means is
+ * kernel vocabulary, and every harness would otherwise invent its own labels for
+ * it. Only the ENVELOPE is decided here, and mori's is a plain user message:
+ * pi-agent-core keeps one `systemPrompt` string on the agent state (it is not
+ * part of `messages`), and the tool-result and assistant roles are structurally
+ * wrong for it, so `user` is the only role a transformed context can occupy.
+ *
+ * The header `renderMemoryContext` writes is what keeps that from reading as
+ * something the user typed.
+ */
+export function renderContextMessage(context: MemoryContext): AgentMessage {
+  return { role: "user", content: renderMemoryContext(context), timestamp: Date.now() };
+}
+
+/**
  * Store id for a working root: stable across runs (same checkout ⇒ same memory)
  * and distinct across checkouts (two repos never share a store).
  *
@@ -240,7 +265,14 @@ export function createMoriKernel(
 
   // The one construction point for the `Embedder` seam (external/embeddings) —
   // the kernel never builds one and never reads this config.
-  const embedder = options.embedder ?? getEmbedder(resolveEmbeddingsConfig(options.env));
+  const config = resolveEmbeddingsConfig(options.env);
+  const embedder = options.embedder ?? getEmbedder(config);
+  // A SECOND client over the same config for session-start retrieval, whose
+  // budget is the kernel's `SESSION_START_EMBED_TIMEOUT_MS` rather than the
+  // consolidation one: memory must never make the first turn wait on the
+  // network. An explicitly injected `options.embedder` (tests, alternative
+  // providers) serves both — mori cannot re-budget a client it did not build.
+  const contextEmbedder = options.embedder ?? getEmbedder(sessionStartEmbeddingsConfig(config));
 
   return new SqliteMemoryKernel<AgentMessage, AgentEvent>({
     projectId: moriProjectId(root),
@@ -248,7 +280,9 @@ export function createMoriKernel(
     project: { title: path.basename(root) || root, rootPath: root },
     sessionId: options.sessionId ?? createId("session"),
     observeEvent: createAgentEventObserver(),
+    renderContext: renderContextMessage,
     ...(embedder ? { embedder } : {}),
+    ...(contextEmbedder ? { contextEmbedder } : {}),
     onCaptureError: (error: unknown) => {
       if (!warn || warned) return;
       warned = true;

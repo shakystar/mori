@@ -15,6 +15,13 @@ export * from "./domain/index.js";
 export * from "./kernel/sqlite-memory-kernel.js";
 export { projectStoreExists } from "./storage/event-store.js";
 export type { ConsolidateBoundary };
+// Session-start injection (#5 1/3). The harness needs three things to fill the
+// `renderContext` seam: the context type, the default text rendering of it, and
+// the embed budget it must bake into the client it hands over as
+// `contextEmbedder`. Nothing else from `services/` is exported — this is the
+// seam's surface, not a door onto the retrieval internals.
+export { isEmptyMemoryContext, renderMemoryContext } from "./services/context-render.js";
+export { SESSION_START_EMBED_TIMEOUT_MS, type MemoryContext } from "./services/context-service.js";
 
 /** LLM seam for consolidation. The harness supplies an in-process implementation. */
 export interface ConsolidatorLlm {

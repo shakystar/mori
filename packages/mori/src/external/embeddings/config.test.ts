@@ -1,3 +1,4 @@
+import { SESSION_START_EMBED_TIMEOUT_MS } from "@mori/kernel";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { getEmbedder } from "./index.js";
@@ -5,6 +6,7 @@ import {
   DEFAULT_EMBEDDINGS_ENDPOINT,
   DEFAULT_EMBEDDINGS_MODEL,
   resolveEmbeddingsConfig,
+  sessionStartEmbeddingsConfig,
 } from "./config.js";
 
 // Moved from packages/kernel/tests/integration/semantic-search.test.ts in #82:
@@ -36,6 +38,28 @@ describe("resolveEmbeddingsConfig", () => {
     });
     expect(resolved?.model).toBe(DEFAULT_EMBEDDINGS_MODEL);
     expect(resolved?.endpoint).toBe(DEFAULT_EMBEDDINGS_ENDPOINT);
+  });
+});
+
+describe("sessionStartEmbeddingsConfig", () => {
+  it("bakes the kernel's SessionStart budget in without touching the rest", () => {
+    const base = resolveEmbeddingsConfig({
+      MEMORIZE_EMBEDDINGS_API_KEY: "k",
+      MEMORIZE_EMBEDDINGS_ENDPOINT: "http://localhost:11434/v1",
+    })!;
+
+    const sessionStart = sessionStartEmbeddingsConfig(base);
+
+    expect(sessionStart?.timeoutMs).toBe(SESSION_START_EMBED_TIMEOUT_MS);
+    expect(sessionStart).toMatchObject({ endpoint: base.endpoint, model: base.model, apiKey: "k" });
+    // The consolidation config it was derived from keeps the full HTTP budget:
+    // a 5s cap on whole-window embed batches would be a regression, which is why
+    // session start gets its own client instead of a retuned shared one.
+    expect(base.timeoutMs).toBeUndefined();
+  });
+
+  it("stays off when embeddings are unconfigured", () => {
+    expect(sessionStartEmbeddingsConfig(resolveEmbeddingsConfig({}))).toBeUndefined();
   });
 });
 

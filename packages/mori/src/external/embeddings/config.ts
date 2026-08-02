@@ -5,6 +5,8 @@
  * `Embedder` and knows nothing about how it was configured.
  */
 
+import { SESSION_START_EMBED_TIMEOUT_MS } from "@mori/kernel";
+
 export interface EmbeddingsConfig {
   /** Base URL of an OpenAI-compatible API exposing `/embeddings`. */
   endpoint: string;
@@ -15,6 +17,22 @@ export interface EmbeddingsConfig {
   timeoutMs?: number;
   /** Test seam; defaults to globalThis.fetch. */
   fetchImpl?: typeof fetch;
+}
+
+/**
+ * The same endpoint/model/key with the SESSION START budget baked in — the
+ * "APPLIED by the harness" half of the kernel's `SESSION_START_EMBED_TIMEOUT_MS`
+ * (context-service.ts declares the policy; the kernel builds no clients).
+ *
+ * A SEPARATE config, not a mutation of the shared one: consolidation embeds
+ * whole windows through the same endpoint and needs the full
+ * `EMBEDDINGS_TIMEOUT_MS`, so tightening one client to 5s must not tighten that
+ * one. Undefined in, undefined out — embeddings unconfigured stays FTS-only.
+ */
+export function sessionStartEmbeddingsConfig(
+  config: EmbeddingsConfig | undefined,
+): EmbeddingsConfig | undefined {
+  return config ? { ...config, timeoutMs: SESSION_START_EMBED_TIMEOUT_MS } : undefined;
 }
 
 export const DEFAULT_EMBEDDINGS_ENDPOINT = "https://api.openai.com/v1";
