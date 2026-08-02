@@ -57,13 +57,32 @@ import globals from "globals";
 // (`x/../` cancels itself out under path resolution) so a specifier like
 // `../domain/../services/x.js` — which Node/TypeScript resolve to
 // `../services/x.js` — is caught the same as the direct form (#161). Each
-// `(?:[^/]+/)*\.\./` repetition consumes one such cancelling pair; a segment
-// that is *not* followed by its own `../` (e.g. `../foo/services/x.js`,
-// which really does resolve into a `foo/` directory) cannot be swallowed and
-// so is correctly left unmatched.
+// `(?:(?!\.\./)[^/]+/)?\.\./` repetition consumes AT MOST ONE non-`..`
+// segment immediately followed by its own cancelling `../` — never more.
+// This is deliberate, not an arbitrary tightening: path resolution cancels
+// exactly one segment per `../`, so a repetition that could swallow several
+// segments before its `../` (the original `(?:[^/]+/)*\.\./` shape) would
+// accept `../foo/bar/../services/x.js` too — which resolves to
+// `../foo/services/x.js`, NOT into `services/`, and so must stay unmatched
+// (#161 PR #186 review: that broader shape was a real false positive, not a
+// hypothetical). One-segment-per-repetition also collapses the regex engine's
+// split ambiguity — `(?:[^/]+/)*` nested inside the outer `*` let the same
+// input be partitioned exponentially many ways on a non-matching specifier,
+// e.g. `"../" + "x/../".repeat(24)` took ~680ms; the `(?!\.\./)`-guarded,
+// one-segment shape stays flat (<1ms) at the same input size because each
+// repetition's split is now unique. The lookahead itself only rules out a
+// segment that is literally `..` (which would make the segment ambiguous
+// with the cancelling `../` that must follow it) — plain segment names are
+// unaffected.
+// Known limit: only a SINGLE cancelling segment per `../` is recognized, so
+// a multi-hop cancellation like `../x/y/../../services/x.js` (`x/y/../../`
+// resolves away to nothing) is not caught — regexes can't express balanced,
+// arbitrary-depth cancellation. This is fail-open (a real reach could slip
+// through), same direction as the case-insensitivity limit below; it is not
+// fail-closed like the single-segment form this fixes.
 const layerReach = (pkg, dirs) => {
   const alt = dirs.join("|");
-  return `^\\.{1,2}/(?:(?:[^/]+/)*\\.\\./)*(?:${alt})/|(?:^|/)packages/${pkg}/src/(?:${alt})/`;
+  return `^\\.{1,2}/(?:(?:(?!\\.\\./)[^/]+/)?\\.\\./)*(?:${alt})/|(?:^|/)packages/${pkg}/src/(?:${alt})/`;
 };
 
 const NOT_KERNEL_INTERNALS = {
@@ -76,6 +95,16 @@ const NOT_KERNEL_INTERNALS = {
   // or a `packages/` segment respectively — an external package subpath
   // (`@vendor/kernel/src/client`) can spell neither, so it no longer matches
   // (#161; it used to, via an unanchored `(?:^|/)`).
+  // Known limit (#161 PR #186 review): the narrowing's structural cost is an
+  // ABSOLUTE in-repo path with a cancelling segment ahead of `packages/`,
+  // e.g. `/workspace/mori/packages/mori/../kernel/src/index.js` — the
+  // relative alternative doesn't apply (no `./`/`../` start) and the
+  // `packages/` alternative requires the literal substring
+  // `packages/kernel/(src|dist)/`, which the `mori/../` in the middle
+  // breaks. This used to match (unanchored) and no longer does. Not
+  // reimplemented: absolute specifiers aren't used in this repo, and
+  // un-anchoring the `packages/` alternative to close it would reopen the
+  // external-subpath false positive #161 exists to close.
   regex:
     "^@mori/kernel/|^\\.{1,2}/(?:[^/]+/)*kernel/(?:src|dist)/|(?:^|/)packages/kernel/(?:src|dist)/",
   message:
@@ -86,7 +115,8 @@ const NOT_MORI = {
   // Same narrowing as NOT_KERNEL_INTERNALS above, for the same reason: an
   // external package subpath (`@vendor/mori/src/client`) can't spell a
   // relative start or a `packages/` segment, so it's no longer caught by the
-  // in-repo-path alternatives (#161).
+  // in-repo-path alternatives (#161). Same absolute-path known limit as
+  // NOT_KERNEL_INTERNALS above applies here too.
   regex: "^@shakystar/mori(?:/|$)|(?:^|/)packages/mori/|^\\.{1,2}/(?:[^/]+/)*mori/(?:src|dist)/",
   message:
     "kernel must not depend on mori (the host harness) — the dependency is host -> kernel only, never the reverse.",
