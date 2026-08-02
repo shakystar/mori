@@ -95,8 +95,15 @@ export function renderMemoryContext(context: MemoryContext): string {
       [
         "## Verbatim detail from earlier transcripts",
         // Segments are multi-turn quotes, not one-liners: fenced whole rather
-        // than flattened, so the dialogue inside stays readable.
-        ...segments.map((segment) => ["```", segment.text.trim(), "```"].join("\n")),
+        // than flattened, so the dialogue inside stays readable. The fence
+        // length is sized per segment (CommonMark closes a fence only on a
+        // line with >= as many backticks as the opener), so a segment body
+        // that itself contains a code block cannot close the wrapper early.
+        ...segments.map((segment) => {
+          const body = segment.text.trim();
+          const fence = fenceFor(body);
+          return [fence, body, fence].join("\n");
+        }),
       ].join("\n\n"),
     );
   }
@@ -115,4 +122,15 @@ function day(isoDate: string): string {
  */
 function oneLine(text: string): string {
   return text.replace(/\s+/g, " ").trim();
+}
+
+/**
+ * A backtick fence longer than any backtick run already in `text` — one
+ * longer than the longest run, minimum 3. CommonMark only closes a fence on
+ * a line with at least as many backticks as the opener, so no run inside
+ * `text` can reach that length.
+ */
+function fenceFor(text: string): string {
+  const longestRun = Math.max(0, ...(text.match(/`+/g) ?? []).map((run) => run.length));
+  return "`".repeat(Math.max(3, longestRun + 1));
 }
