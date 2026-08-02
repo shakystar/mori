@@ -18,8 +18,10 @@ import type {
   Embedder,
 } from "../../src/index.js";
 import {
+  EXTRACTION_SYSTEM_PROMPT,
   ExtractionParseError,
   MAX_EXTRACTION_INPUT_CHARS,
+  MAX_MEMORIES_PER_BOUNDARY,
   RESERVED_OUTPUT_TOKENS,
   boundExtractionInput,
   buildExtractionUserContent,
@@ -241,6 +243,17 @@ describe("parseExtractedMemories", () => {
     expect(() => parseExtractedMemories("I could not comply.")).toThrow(ExtractionParseError);
     expect(() => parseExtractedMemories("[not json]")).toThrow(ExtractionParseError);
     expect(() => parseExtractedMemories('{"kind":"decision"}')).toThrow(ExtractionParseError);
+  });
+});
+
+describe("EXTRACTION_SYSTEM_PROMPT — count cap stated at generation time (#169)", () => {
+  it("states MAX_MEMORIES_PER_BOUNDARY, not a hardcoded number", () => {
+    const occurrences =
+      EXTRACTION_SYSTEM_PROMPT.split(String(MAX_MEMORIES_PER_BOUNDARY)).length - 1;
+    // The prompt must actually reference the cap (not just happen to avoid
+    // the number some other way) — bumping MAX_MEMORIES_PER_BOUNDARY changes
+    // this rendered prompt, which is the point: the two can never drift apart.
+    expect(occurrences).toBeGreaterThan(0);
   });
 });
 

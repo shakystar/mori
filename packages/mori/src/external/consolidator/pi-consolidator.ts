@@ -1,5 +1,5 @@
 import { contentText, type Models } from "@earendil-works/pi-ai";
-import type { ConsolidatorLlm } from "@mori/kernel";
+import { RESERVED_OUTPUT_TOKENS, type ConsolidatorLlm } from "@mori/kernel";
 
 /**
  * The harness implementation of the kernel's `ConsolidatorLlm` seam
@@ -48,6 +48,14 @@ export class PiConsolidatorLlm implements ConsolidatorLlm {
    * a `"length"` truncation can still end on syntactically valid partial JSON,
    * which the kernel's memory parser would then silently accept as complete,
    * permanently advancing the consolidation watermark past dropped memories.
+   *
+   * The request itself is capped at `RESERVED_OUTPUT_TOKENS` (#169) — the same
+   * output budget `@mori/kernel`'s `extractionCharBudget` already reserves out
+   * of the model's declared context window when sizing the INPUT side. Without
+   * this, nothing generation-time stops the model from running past that
+   * reservation; the only enforcement left would be `parseExtractedMemories`'s
+   * post-hoc slice, which only ever sees a reply that already finished (or hit
+   * `"length"` and been thrown above).
    */
   async complete(prompt: string): Promise<string> {
     const model = this.models.getModel(this.providerId, this.modelId);
@@ -57,9 +65,11 @@ export class PiConsolidatorLlm implements ConsolidatorLlm {
       );
     }
 
-    const result = await this.models.completeSimple(model, {
-      messages: [{ role: "user", content: prompt, timestamp: Date.now() }],
-    });
+    const result = await this.models.completeSimple(
+      model,
+      { messages: [{ role: "user", content: prompt, timestamp: Date.now() }] },
+      { maxTokens: RESERVED_OUTPUT_TOKENS },
+    );
     if (result.stopReason !== "stop") {
       throw new Error(result.errorMessage ?? `consolidator LLM stream ended: ${result.stopReason}`);
     }

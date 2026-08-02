@@ -1,4 +1,5 @@
 import { createModels, fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai";
+import { RESERVED_OUTPUT_TOKENS } from "@mori/kernel";
 import { describe, expect, it } from "vitest";
 
 import { PiConsolidatorLlm } from "./pi-consolidator.js";
@@ -49,6 +50,25 @@ describe("PiConsolidatorLlm", () => {
     const llm = new PiConsolidatorLlm(models, faux.provider.id, faux.getModel().id);
 
     await expect(llm.complete("prompt")).rejects.toThrow(/length/);
+  });
+
+  it("caps completeSimple's maxTokens at the kernel's RESERVED_OUTPUT_TOKENS (#169)", async () => {
+    const faux = fauxProvider();
+    const models = createModels();
+    models.setProvider(faux.provider);
+
+    let seenMaxTokens: number | undefined;
+    faux.setResponses([
+      (_context, options) => {
+        seenMaxTokens = options?.maxTokens;
+        return fauxAssistantMessage("distilled summary");
+      },
+    ]);
+
+    const llm = new PiConsolidatorLlm(models, faux.provider.id, faux.getModel().id);
+    await llm.complete("prompt");
+
+    expect(seenMaxTokens).toBe(RESERVED_OUTPUT_TOKENS);
   });
 
   it("throws when the configured provider/model is not registered", async () => {
