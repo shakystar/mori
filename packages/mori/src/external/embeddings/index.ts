@@ -8,6 +8,7 @@ export {
   DEFAULT_EMBEDDINGS_MODEL,
   EMBEDDINGS_TIMEOUT_MS,
   resolveEmbeddingsConfig,
+  sessionStartEmbeddingsConfig,
   type EmbeddingsConfig,
 } from "./config.js";
 export { HttpEmbedder, MAX_EMBED_BATCH_CHARS, MIN_EMBED_INPUT_CHARS } from "./http-embedder.js";

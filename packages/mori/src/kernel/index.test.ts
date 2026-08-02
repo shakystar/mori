@@ -2,7 +2,13 @@ import { mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentEvent, StreamFn } from "@earendil-works/pi-agent-core";
-import type { AssistantMessage, AssistantMessageEvent, ToolCall } from "@earendil-works/pi-ai";
+import type {
+  AssistantMessage,
+  AssistantMessageEvent,
+  Context,
+  Message,
+  ToolCall,
+} from "@earendil-works/pi-ai";
 import { createAssistantMessageEventStream, InMemoryCredentialStore } from "@earendil-works/pi-ai";
 import type { ConsolidatorLlm } from "@mori/kernel";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -13,6 +19,7 @@ import {
   createAgentEventObserver,
   createMoriKernel,
   moriProjectId,
+  renderContextMessage,
   toolCaptureVerdict,
 } from "./index.js";
 
@@ -69,6 +76,23 @@ function scriptedStreamFn(turns: FakeTurn[]): StreamFn {
   };
 }
 
+/** `scriptedStreamFn` plus a record of the context each LLM call actually saw. */
+function recordingStreamFn(turns: FakeTurn[], seen: Context[]): StreamFn {
+  const scripted = scriptedStreamFn(turns);
+  return (model, context, options) => {
+    seen.push(context);
+    return scripted(model, context, options);
+  };
+}
+
+/** Flattens one message's content to text, whichever content shape it uses. */
+function messageText(message: Message): string {
+  if (typeof message.content === "string") return message.content;
+  return message.content
+    .map((part) => ("text" in part && typeof part.text === "string" ? part.text : ""))
+    .join("");
+}
+
 function toolStart(toolCallId: string, toolName: string, args: unknown): AgentEvent {
   return { type: "tool_execution_start", toolCallId, toolName, args };
 }
@@ -102,6 +126,28 @@ describe("moriProjectId", () => {
     expect(moriProjectId("/repos/mori")).not.toBe(moriProjectId("/repos/other"));
     // It is also a directory name, so it must satisfy the kernel's id pattern.
     expect(moriProjectId("/repos/mori")).toMatch(/^[a-z][a-z0-9]*(?:_[a-z0-9]+)+$/);
+  });
+});
+
+describe("renderContextMessage", () => {
+  it("wraps the kernel's rendering in one timestamped user message", async () => {
+    const message = renderContextMessage({
+      consolidatedMemories: [
+        {
+          id: "mem_1",
+          kind: "decision",
+          text: "chose zephyr as the deploy target",
+          salience: 9,
+          createdAt: "2026-06-15T10:04:00.000Z",
+        },
+      ],
+    });
+
+    expect(message.role).toBe("user");
+    // The text is the kernel's, verbatim — mori decides the envelope only.
+    expect(message).toMatchObject({ content: expect.stringContaining("# Project memory") });
+    expect(message).toMatchObject({ content: expect.stringContaining("chose zephyr") });
+    expect(message).toMatchObject({ timestamp: expect.any(Number) });
   });
 });
 
@@ -307,8 +353,15 @@ describe("mori turn -> sqlite store", () => {
     rmSync(store, { recursive: true, force: true });
   });
 
-  /** One real `mori "…"` invocation: nothing about the kernel is substituted. */
-  async function run(turns: FakeTurn[], env: NodeJS.ProcessEnv = {}): Promise<number> {
+  /**
+   * One real `mori "…"` invocation: nothing about the kernel is substituted.
+   * Pass `seen` to keep the context of every LLM call the run made.
+   */
+  async function run(
+    turns: FakeTurn[],
+    env: NodeJS.ProcessEnv = {},
+    seen?: Context[],
+  ): Promise<number> {
     return runCli(
       ["한 턴만"],
       { ANTHROPIC_API_KEY: "sk-ant-test", ...env },
@@ -316,7 +369,7 @@ describe("mori turn -> sqlite store", () => {
         stdout: () => {},
         stderr: () => {},
         credentialStore: new InMemoryCredentialStore(),
-        streamFn: scriptedStreamFn(turns),
+        streamFn: seen ? recordingStreamFn(turns, seen) : scriptedStreamFn(turns),
         root,
       },
     );
@@ -422,6 +475,38 @@ describe("mori turn -> sqlite store", () => {
     // advanced means a second real boundary over the same window finds nothing left to do.
     const second = await kernel.consolidateWithResult(llm);
     expect(second.outcome).toBe("noop");
+  });
+
+  it("recalls the previous session's work into the next session's first LLM request", async () => {
+    // What #5 1/3 is for, end to end: session 1 leaves a captured observation,
+    // session 2 gets it in front of its first model call without asking.
+    expect(
+      await run([
+        {
+          toolCall: {
+            name: "edit_file",
+            arguments: { path: "notes.md", oldString: "", newString: "zephyr로 간다\n" },
+          },
+        },
+        { text: "만들었습니다" },
+      ]),
+    ).toBe(0);
+
+    const seen: Context[] = [];
+    expect(
+      await run(
+        [{ toolCall: { name: "list_dir", arguments: { path: "." } } }, { text: "네" }],
+        {},
+        seen,
+      ),
+    ).toBe(0);
+
+    expect(seen).toHaveLength(2);
+    expect(messageText(seen[0]!.messages[0]!)).toContain("# Project memory");
+    expect(messageText(seen[0]!.messages[0]!)).toContain("notes.md");
+    // Only the FIRST request of the session — the second call in the same turn
+    // gets the untouched transcript (per-turn retrieval is #5 2/3).
+    expect(seen[1]!.messages.map(messageText).join("\n")).not.toContain("# Project memory");
   });
 
   it("writes nothing at all for a turn that only reads", async () => {
