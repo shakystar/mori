@@ -7,7 +7,10 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { CURRENT_SCHEMA_VERSION } from "../../src/domain/common.js";
 import { createObservation } from "../../src/domain/entities.js";
 import { DEFAULT_ACCOUNT_ID } from "../../src/domain/identity/account.js";
-import { getPersonalStoreId } from "../../src/domain/identity/personal-store.js";
+import {
+  accountOfPersonalStore,
+  getPersonalStoreId,
+} from "../../src/domain/identity/personal-store.js";
 import {
   listRecentObservations,
   rebuildProjectProjection,
@@ -118,5 +121,19 @@ describe("personal-store id family isolation (#155)", () => {
 
     expect(selfRows).toEqual([{ lane: null }]);
     expect(otherRows).toEqual([{ lane: null }]);
+  });
+
+  it("rejects the noncanonical spelling that survived path isolation — personal_self vs personal_local_default", () => {
+    // DEFAULT_ACCOUNT_ID is "local_default", so "personal_local_default" is a
+    // second, syntactically valid spelling of the default account's personal
+    // store id. Path isolation alone does not separate it from SELF_ID: both
+    // strip down to DEFAULT_ACCOUNT_ID and would resolve to the SAME flat
+    // `personal/` directory (#155 fix-request ①). Opening it must be rejected
+    // at the identity layer, not silently aliased into SELF_ID's db.
+    const ALIASED_DEFAULT_ID = `personal_${DEFAULT_ACCOUNT_ID}`;
+    expect(ALIASED_DEFAULT_ID).not.toBe(SELF_ID);
+    expect(() => accountOfPersonalStore(ALIASED_DEFAULT_ID)).toThrow();
+    expect(() => getProjectDbFile(ALIASED_DEFAULT_ID)).toThrow();
+    expect(() => getDb(ALIASED_DEFAULT_ID)).toThrow();
   });
 });
