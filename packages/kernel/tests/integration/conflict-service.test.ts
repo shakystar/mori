@@ -13,6 +13,7 @@ import {
 } from "../../src/services/conflict-service.js";
 import {
   getConflict,
+  getMemoryIndex,
   listOpenConflicts,
   rebuildProjectProjection,
 } from "../../src/services/projection-store.js";
@@ -161,5 +162,44 @@ describe("conflict-service", () => {
         .map((c) => c.id)
         .sort(),
     ).toEqual([second].sort());
+  });
+
+  it("getMemoryIndex().openConflicts agrees with listOpenConflicts (#148)", async () => {
+    const resolvedId = await seedConflict();
+    const autoResolvedId = await seedConflict();
+    const escalatedId = await seedConflict();
+
+    await resolveConflict({ projectId, conflictId: resolvedId, status: "resolved", actor: "test" });
+    await resolveConflict({
+      projectId,
+      conflictId: autoResolvedId,
+      status: "auto_resolved",
+      actor: "test",
+    });
+    await resolveConflict({
+      projectId,
+      conflictId: escalatedId,
+      status: "escalated",
+      actor: "test",
+    });
+
+    const indexOpenIds = getMemoryIndex(projectId)
+      ?.openConflicts.map((c) => c.id)
+      .sort();
+    const readerOpenIds = listOpenConflicts(projectId)
+      .map((c) => c.id)
+      .sort();
+
+    // Both terminal statuses (explicit `resolved` and pipeline-driven
+    // `auto_resolved`) must be filtered from the index, not just the reader.
+    expect(indexOpenIds).not.toContain(resolvedId);
+    expect(indexOpenIds).not.toContain(autoResolvedId);
+    // `escalated` still has an outgoing transition (-> resolved), so it is
+    // not terminal and must stay in both.
+    expect(indexOpenIds).toContain(escalatedId);
+
+    // The two "open conflicts" readers must never drift apart again.
+    expect(indexOpenIds).toEqual(readerOpenIds);
+    expect(indexOpenIds).toEqual([escalatedId]);
   });
 });
