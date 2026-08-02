@@ -29,8 +29,15 @@ export interface ConsolidatorLlm {
    * to the ACTUAL model instead of that one-size-fits-all default, which a
    * small local model (or a CJK-heavy prompt, whose tokenizer runs far more
    * tokens per character than English) can otherwise overflow.
+   *
+   * Typed `| undefined` explicitly, not just `?:` — under this package's
+   * `exactOptionalPropertyTypes`, a bare `?:` only permits OMITTING the key,
+   * not a present key holding `undefined`. The production implementation
+   * (`PiConsolidatorLlm`) resolves this from a live model lookup that itself
+   * returns `T | undefined` (unknown provider/model id), so the property must
+   * accept an explicit `undefined` value, not just absence.
    */
-  readonly contextWindowTokens?: number;
+  readonly contextWindowTokens?: number | undefined;
 }
 
 /**

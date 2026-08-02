@@ -18,9 +18,9 @@ import type {
   Embedder,
 } from "../../src/index.js";
 import {
-  CONSERVATIVE_CHARS_PER_TOKEN,
   ExtractionParseError,
   MAX_EXTRACTION_INPUT_CHARS,
+  RESERVED_OUTPUT_TOKENS,
   boundExtractionInput,
   buildExtractionUserContent,
   chunkConversation,
@@ -1099,8 +1099,22 @@ describe("extractionCharBudget — model-aware extraction budget (#143)", () => 
     await consolidate({ projectId, actor: "test", llm });
 
     expect(llm.prompts.length).toBe(1);
-    const estimatedTokens = Math.ceil(llm.prompts[0]!.length / CONSERVATIVE_CHARS_PER_TOKEN);
-    expect(estimatedTokens).toBeLessThanOrEqual(4_000);
+    // Deliberately NOT `promptLength / CONSERVATIVE_CHARS_PER_TOKEN` (PR #168
+    // review, Codex + owner): that reuses the exact approximation
+    // `extractionCharBudget` used to derive the budget in the first place, so
+    // the assertion moves in lockstep with that constant and stays green even
+    // if it regresses back to an unsafe value. Instead, estimate worst-case
+    // tokens per script independently: Hangul syllables at 1 char/token (the
+    // floor `CONSERVATIVE_CHARS_PER_TOKEN`'s doc argues for) and everything
+    // else (the English system prompt, punctuation) at a generous 4
+    // chars/token — unrelated to the production constant, so this only
+    // passes if the render is ACTUALLY within budget, not merely consistent
+    // with itself.
+    const prompt = llm.prompts[0]!;
+    const hangulChars = prompt.match(/[가-힣]/g)?.length ?? 0;
+    const otherChars = prompt.length - hangulChars;
+    const independentEstimatedTokens = hangulChars * 1 + otherChars / 4;
+    expect(independentEstimatedTokens).toBeLessThanOrEqual(4_000 - RESERVED_OUTPUT_TOKENS);
   });
 
   it("still guarantees at least one observation per boundary and drains the backlog under a narrow declared window", async () => {

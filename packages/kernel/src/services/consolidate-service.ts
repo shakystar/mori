@@ -240,17 +240,23 @@ const EXTRACTION_SYSTEM_PROMPT = [
 /**
  * #143 item② — chars-per-token used to translate a `ConsolidatorLlm`'s
  * declared `contextWindowTokens` into the character budget `run()` actually
- * hands `boundExtractionInput`. Deliberately LOW (most tokenizers average
- * closer to 3-4 chars/token for English): this project's observations and
- * conversation tails are substantially Korean/CJK, and CJK text commonly runs
- * near 1-2 chars/token — well denser than English. A low chars-per-token
- * makes the derived char budget UNDER-estimate how much text a given token
- * count buys, which is the conservative direction (the alternative, assuming
- * English-like density, would let a CJK-heavy render exceed the real limit,
- * exactly the failure item② documents). Not a tokenizer — a fixed,
- * documented approximation, per the issue's explicit non-goal of adding one.
+ * hands `boundExtractionInput`. This is a MULTIPLIER (`chars = tokens *
+ * CONSERVATIVE_CHARS_PER_TOKEN`), so lower is safer — it makes the derived
+ * char budget UNDER-estimate how much text a given token count buys, which is
+ * the conservative direction. `2` was tried first and rejected on this PR
+ * (PR #168 review): byte-level BPE tokenizers commonly split a Hangul
+ * syllable (3 bytes in UTF-8) into more than one token, so this project's
+ * substantially Korean observations/conversation tails can run close to, or
+ * above, 1 token PER CHARACTER — the opposite of `2` chars/token. Pinned to
+ * the worst case the issue asks for (Korean 1 char ≥ 1 token, so chars-per-
+ * token ≤ 1): `1`. Not a tokenizer — a fixed, documented approximation, per
+ * the issue's explicit non-goal of adding one. `estimateTokens` also applies
+ * this same low constant to the (English) system prompt, which is safe in
+ * the other direction: English is comfortably below 1 char/token in reality,
+ * so this OVER-counts its tokens and reserves more budget than strictly
+ * needed rather than less.
  */
-export const CONSERVATIVE_CHARS_PER_TOKEN = 2;
+export const CONSERVATIVE_CHARS_PER_TOKEN = 1;
 
 /**
  * #143 item② — output tokens reserved out of a declared `contextWindowTokens`
@@ -259,8 +265,10 @@ export const CONSERVATIVE_CHARS_PER_TOKEN = 2;
  * `MAX_MEMORIES_PER_BOUNDARY` (12) short one-sentence items renders to
  * roughly 2,000-2,500 output chars (see `MAX_EXTRACTION_INPUT_CHARS`'s doc);
  * divided by `CONSERVATIVE_CHARS_PER_TOKEN` and rounded up generously.
+ * Exported so tests can check the render against it directly instead of
+ * duplicating the number.
  */
-const RESERVED_OUTPUT_TOKENS = 1_300;
+export const RESERVED_OUTPUT_TOKENS = 1_300;
 
 /** Chars → estimated tokens, using the same conservative constant throughout
  *  so a budget derived from it and a later check against it never disagree. */
