@@ -9,7 +9,12 @@ import {
   type Project,
 } from "../domain/entities.js";
 import type { DomainEvent } from "../domain/events.js";
-import type { ConsolidatorLlm, ConversationSource, Embedder } from "../index.js";
+import type {
+  ConsolidatorLlm,
+  ConversationSlice,
+  ConversationSource,
+  Embedder,
+} from "../index.js";
 import { laneOf, laneWhereSql, SELF_LANE } from "../projections/projector.js";
 import { getDb } from "../storage/db.js";
 import {
@@ -336,14 +341,19 @@ const MIN_USEFUL_TAIL_CHARS = 200;
 /**
  * How much of `input.transcriptTail` the extractor was actually shown.
  *
- * Only `"absent"`/`"whole"` let `run()` consume the conversation slice when
- * the raw buffer is off: `ConversationSlice.newOffset` is opaque to the kernel
- * (a slice is consumed whole or not at all), so advancing the cursor over a
- * tail that was only PARTLY shown loses the unshown prefix as surely as
- * dropping it did (Codex P1 on PR #136, owner-adjudicated: the test was never
- * "whole vs. partial", it was "shown or stored, or else not consumed").
+ * `"absent"`/`"whole"` let `run()` consume the conversation slice outright.
+ * `"prefix"` consumes exactly the part that was shown — see
+ * `ConversationSlice.resumePoints` (#144): the shown text is a PREFIX ending on
+ * a point the source declared resumable, so committing that point's offset
+ * leaves the unshown remainder for the next boundary.
+ *
+ * `"clipped"`/`"dropped"` consume nothing: advancing the cursor over a tail
+ * that was only partly shown, with no resume point to name where "partly"
+ * ended, loses the unshown part as surely as dropping it did (Codex P1 on PR
+ * #136, owner-adjudicated: the test was never "whole vs. partial", it was
+ * "shown or stored, or else not consumed").
  */
-export type TranscriptTailCoverage = "absent" | "whole" | "clipped" | "dropped";
+export type TranscriptTailCoverage = "absent" | "whole" | "prefix" | "clipped" | "dropped";
 
 /** Options for {@link boundExtractionInput}. */
 export interface BoundExtractionOptions {
@@ -359,6 +369,19 @@ export interface BoundExtractionOptions {
    * for a recoverable one is precisely the data loss this option prevents.
    */
   tailPersistedElsewhere?: boolean;
+  /**
+   * Prefix lengths of `transcriptTail` at which the CALLER can resume — i.e.
+   * `ConversationSlice.resumePoints`' `chars`, already validated. Ascending,
+   * strictly inside the tail. Given these, a RESERVED tail (only copy, see
+   * `tailPersistedElsewhere`) that cannot be shown whole is cut to the largest
+   * of them that fits and reported as `"prefix"` instead of `"clipped"`, so
+   * the caller can consume just that much.
+   *
+   * Defaults to empty = the pre-#144 all-or-nothing tail: shortening it is then
+   * a pure loss, so the cut keeps the NEWEST turns and the caller must hold its
+   * cursor.
+   */
+  tailResumePrefixes?: readonly number[];
 }
 
 /** {@link boundExtractionInput}'s result: a `ConsolidationInput` that renders
@@ -375,10 +398,18 @@ export interface BoundedConsolidationInput extends ConsolidationInput {
   observationsTruncated: boolean;
   /**
    * How much of a non-empty `input.transcriptTail` reached the returned input.
-   * `run()` may consume the conversation slice only on `"whole"`/`"absent"`,
-   * or when the raw buffer stored the slice regardless.
+   * `run()` may consume the conversation slice WHOLE only on `"whole"`/
+   * `"absent"`, or when the raw buffer stored the slice regardless; on
+   * `"prefix"` it consumes exactly `transcriptTailPrefixChars`.
    */
   transcriptTailCoverage: TranscriptTailCoverage;
+  /**
+   * On `"prefix"` coverage: how many chars of the ORIGINAL `transcriptTail`
+   * were shown, always one of `options.tailResumePrefixes`. Absent on every
+   * other coverage. (`transcriptTail` itself carries a `TRIM_MARKER` the
+   * original did not, so its length is not this number.)
+   */
+  transcriptTailPrefixChars?: number;
 }
 
 /**
@@ -427,6 +458,18 @@ export interface BoundedConsolidationInput extends ConsolidationInput {
  *    Whatever the order, a tail that cannot be shown WHOLE is reported as
  *    `"clipped"`/`"dropped"` and `run()` then holds the conversation cursor —
  *    a partly-shown slice is not a consumed slice.
+ *
+ *    UNLESS the tail is RESERVED (only copy) and the caller passed
+ *    `tailResumePrefixes` (#144). Shortening it is then not a sacrifice at
+ *    all: what is left out comes back at the next boundary, because `run()`
+ *    commits the resume offset of the prefix it did show. So the reservation
+ *    covers the largest resumable PREFIX when the whole tail cannot fit, and
+ *    that cut runs the other way round — oldest turns kept, newest deferred.
+ *
+ *    Only there. With the raw buffer ON the slice is consumed whole via its
+ *    stored copy no matter what was shown, so cutting to the oldest turns
+ *    would trade the most actionable content for a resumability that never
+ *    gets used. The allocation ORDER is untouched either way.
  *
  * Because every section is measured, the returned input ALWAYS renders within
  * `maxChars` — with no exception, which is the whole value of the guarantee:
@@ -532,36 +575,91 @@ export function boundExtractionInput(
   };
 
   const full = input.transcriptTail ?? "";
+
+  // #144: the prefix lengths the CALLER can resume from, normalised so the
+  // search below is monotone in the candidate index — strictly inside the
+  // tail (a point at `full.length` is just "whole", handled above), unique,
+  // ascending. A source that supplies none keeps the all-or-nothing tail.
+  const resumePrefixes = [
+    ...new Set(
+      (options.tailResumePrefixes ?? []).filter(
+        (n) => Number.isInteger(n) && n > 0 && n < full.length,
+      ),
+    ),
+  ].sort((a, b) => a - b);
+
+  /** Largest resumable prefix that fits with zero memories — the reservation
+   *  budget, matching the whole-tail test just below — or 0 if none does.
+   *  Searched over the candidate INDEX: `resumePrefixes` ascends and every
+   *  step carries the same marker, so the render is monotone in it. */
+  const largestReservablePrefix = (): number => {
+    if (resumePrefixes.length === 0) return 0;
+    const index = largestFitting(resumePrefixes.length, (n) =>
+      n === 0
+        ? { observations, existingMemories: [] }
+        : {
+            observations,
+            existingMemories: [],
+            transcriptTail: prefixClippedTo(full, resumePrefixes[n - 1]!),
+          },
+    );
+    return index === 0 ? 0 : resumePrefixes[index - 1]!;
+  };
+
   let existingMemories: ConsolidatedMemory[];
   let transcriptTail: string | undefined;
   let transcriptTailCoverage: TranscriptTailCoverage = full.length > 0 ? "dropped" : "absent";
+  let transcriptTailPrefixChars: number | undefined;
 
-  if (
-    full.length > 0 &&
-    options.tailPersistedElsewhere !== true &&
-    render({ observations, existingMemories: [], transcriptTail: full }) <= maxChars
-  ) {
-    // RESERVED: the tail is this conversation's only copy and it fits once the
-    // (recoverable) memory section is sacrificed. Take it whole, then give the
-    // memories whatever is left — so the slice is consumable and the cursor
-    // moves, which is what stops the conversation axis from stalling forever.
-    transcriptTail = full;
-    transcriptTailCoverage = "whole";
-    existingMemories = fitMemories(full);
+  // RESERVED: the tail is this conversation's only copy, so as much of it as
+  // can ever be CONSUMED is allocated before the (recoverable) memory section.
+  // Whole when it fits with zero memories; failing that, its largest resumable
+  // prefix (#144) — which is consumable for exactly the same reason the whole
+  // tail is, and leaves the rest for the next boundary. Nothing reservable
+  // means no allocation could make this tail consumable, so the reservation
+  // buys nothing and the memory section keeps the budget.
+  const reserveTail = ():
+    { text: string; coverage: "whole" | "prefix"; chars?: number } | undefined => {
+    if (full.length === 0 || options.tailPersistedElsewhere === true) return undefined;
+    if (render({ observations, existingMemories: [], transcriptTail: full }) <= maxChars) {
+      return { text: full, coverage: "whole" };
+    }
+    const kept = largestReservablePrefix();
+    return kept > 0
+      ? { text: prefixClippedTo(full, kept), coverage: "prefix", chars: kept }
+      : undefined;
+  };
+  const reserved = reserveTail();
+
+  if (reserved) {
+    transcriptTail = reserved.text;
+    transcriptTailCoverage = reserved.coverage;
+    transcriptTailPrefixChars = reserved.chars;
+    // Give the memories whatever the reservation left — so the slice is
+    // consumable and the cursor moves, which is what stops the conversation
+    // axis from stalling forever.
+    existingMemories = fitMemories(reserved.text);
   } else {
-    // Either the tail is recoverable (raw buffer on), or it cannot fit even
-    // with zero memories. In the latter case the cursor is held regardless of
-    // what we show, so keeping the dedup/contradiction context is strictly
-    // better: without it every boundary would re-extract the same held slice
-    // with no way to notice it is re-emitting the same memories.
+    // Either the tail is recoverable (raw buffer on), or no part of it is
+    // consumable even with zero memories. In the latter case the cursor is
+    // held regardless of what we show, so keeping the dedup/contradiction
+    // context is strictly better: without it every boundary would re-extract
+    // the same held slice with no way to notice it is re-emitting the same
+    // memories.
     existingMemories = fitMemories(undefined);
     if (full.length > 0) {
       if (render({ observations, existingMemories, transcriptTail: full }) <= maxChars) {
         transcriptTail = full;
         transcriptTailCoverage = "whole";
       } else {
-        // Untrimmed is out, so `[0, length - 1]` — every step of which carries
-        // the marker — is monotone.
+        // No prefix cut here, deliberately. Reaching this branch means either
+        // the raw buffer holds the slice — so the caller consumes it WHOLE
+        // regardless of what was shown, and cutting to the oldest turns would
+        // trade the most actionable content for a resumability nobody uses —
+        // or nothing of it was reservable, in which case a prefix taken out of
+        // the leftover is smaller still. Either way the right cut keeps the
+        // turns NEAREST the boundary. Untrimmed is out, so `[0, length - 1]` —
+        // every step of which carries the marker — is monotone.
         const keptTail = largestFitting(full.length - 1, (n) => ({
           observations,
           existingMemories,
@@ -581,6 +679,7 @@ export function boundExtractionInput(
     ...(transcriptTail !== undefined ? { transcriptTail } : {}),
     observationsTruncated,
     transcriptTailCoverage,
+    ...(transcriptTailPrefixChars !== undefined ? { transcriptTailPrefixChars } : {}),
   };
 }
 
@@ -590,9 +689,17 @@ function clippedTo(summary: string, n: number): string {
 }
 
 /** LAST `n` chars of the transcript tail — the turns nearest the boundary are
- *  the ones the extractor can still act on — marked when anything was cut. */
+ *  the ones the extractor can still act on — marked when anything was cut.
+ *  For an all-or-nothing tail only: what this cut leaves out is lost. */
 function tailClippedTo(tail: string, n: number): string {
   return n >= tail.length ? tail : `${TRIM_MARKER}\n${tail.slice(tail.length - n)}`;
+}
+
+/** FIRST `n` chars of the transcript tail, `n` being a point the source
+ *  declared resumable (#144) — so what this cut leaves out is not lost but
+ *  re-delivered at the next boundary — marked when anything was cut. */
+function prefixClippedTo(tail: string, n: number): string {
+  return n >= tail.length ? tail : `${tail.slice(0, n)}\n${TRIM_MARKER}`;
 }
 
 /**
@@ -795,6 +902,64 @@ function readConversationOffset(projectId: string, sourceId: string): number {
 
 function writeConversationOffset(projectId: string, sourceId: string, offset: number): void {
   writeMeta(projectId, conversationOffsetKey(sourceId), String(offset));
+}
+
+/**
+ * #144: the `chars → offset` resume points of a slice that this boundary may
+ * actually commit. A `ConversationSource` is harness code, so the kernel
+ * VALIDATES rather than trusts: committing a bad point would move the cursor
+ * over content that was neither shown nor stored, which is precisely the loss
+ * #136 closed. A point is kept only when it is
+ *
+ * - an object — the array itself is harness data, so an element that is `null`
+ *   or a primitive is discarded before any field is read (dereferencing it
+ *   would fail the boundary, which is exactly what the non-array degrade
+ *   below refuses to do);
+ * - an integer strictly inside the slice (`0 < chars < text.length`) — `chars`
+ *   indexes `text`, and "consumed the whole slice" is `newOffset`, not a point;
+ * - a real forward step that stops SHORT of the whole slice
+ *   (`currentOffset < offset < newOffset`) — a point that does not advance
+ *   cannot drain anything, and one at (or beyond) `newOffset` would consume the
+ *   whole slice while only its `chars`-prefix was shown, dropping `text.slice(chars)`
+ *   unshown and unstored. Every point here is internal by the `chars` rule
+ *   above, so the bound is strict: whole-slice consumption is the separate
+ *   `newOffset` path in `run()`, never a point;
+ * - order-consistent with its neighbours once sorted by `chars`: offsets must
+ *   not go backwards, so "a longer prefix is at least as far along" holds.
+ *
+ * Violators are dropped individually rather than voiding the whole set — one
+ * malformed entry should not cost an oversized slice its ability to drain.
+ */
+export function resumePointsOf(
+  slice: ConversationSlice,
+  currentOffset: number,
+): Map<number, number> {
+  const kept = new Map<number, number>();
+  let lastOffset = currentOffset;
+  // A `ConversationSource` is harness code and may be plain JS, so an absent
+  // (or non-array) `resumePoints` has to degrade to "not resumable" rather
+  // than throw — `read` is contractually allowed to be unhelpful, never to
+  // fail the boundary.
+  const declared = Array.isArray(slice.resumePoints) ? slice.resumePoints : [];
+  const candidates = declared
+    .filter(
+      (point) =>
+        typeof point === "object" &&
+        point !== null &&
+        Number.isInteger(point.chars) &&
+        point.chars > 0 &&
+        point.chars < slice.text.length &&
+        Number.isFinite(point.offset) &&
+        point.offset > currentOffset &&
+        point.offset < slice.newOffset,
+    )
+    .sort((a, b) => a.chars - b.chars);
+  for (const point of candidates) {
+    if (kept.has(point.chars) || point.offset < lastOffset) continue;
+    kept.set(point.chars, point.offset);
+    lastOffset = point.offset;
+  }
+  return kept;
 }
 
 /**
@@ -1202,13 +1367,31 @@ export interface ConsolidateResult {
   /** Raw-detail segments written from this boundary's conversation slice. */
   segmentsWritten: number;
   /**
-   * #113: true when this boundary did NOT consume its conversation slice —
-   * the budget could not show the tail WHOLE and the raw buffer did not store
-   * it either, so the cursor was held rather than advanced over content that
-   * was neither shown nor stored. A slice that keeps failing to fit (one
-   * larger than the budget on its own) pins the conversation axis until the
-   * `ConversationSource` contract gains a resumable offset, so this must be
-   * observable rather than silent.
+   * #113: true when this boundary consumed NOTHING of its conversation slice —
+   * the budget could not show the tail whole, no resumable prefix of it could
+   * be shown either, and the raw buffer did not store it, so the cursor was
+   * held rather than advanced over content that was neither shown nor stored.
+   *
+   * #144 removed the case this field was introduced for (an oversized slice
+   * pinning the axis forever, because the contract had no resumable offset).
+   * It is KEPT because three ways to hold survive, and every one of them still
+   * stalls the conversation axis until something outside this boundary changes:
+   *
+   * 1. The source declares no usable `resumePoints`. That is legal — a source
+   *    may be unable to map a text position back to a cursor — and such a
+   *    slice, once too big for the budget, is exactly as stuck as before #144.
+   * 2. Resume points exist but not even the SMALLEST one fits: the budget is
+   *    below one turn plus the prompt's structural floor. The next boundary
+   *    only has more room if this one consumed observations.
+   * 3. `MEMORIZE_RAW_SEGMENTS` is ON, so the slice's stored copy — not a shown
+   *    prefix — is what consumes it (`boundExtractionInput` deliberately does
+   *    NOT prefix-cut a tail that is persisted elsewhere), and that copy did
+   *    not survive: `pruneSegments` can evict this boundary's own chunks in
+   *    the boundary that wrote them (#139), which `sliceFullyStored` catches.
+   *    Turning the raw buffer OFF puts such a slice back on the drain path.
+   *
+   * A run of boundaries reporting this field is still the signal that the axis
+   * is pinned, so it stays on the result and on the attempt telemetry.
    */
   conversationSliceHeld: boolean;
 }
@@ -1340,10 +1523,13 @@ export async function consolidate(params: ConsolidateParams): Promise<Consolidat
     // conversation-only session (zero observations) still consolidates. The
     // byte watermark advances only on success (below).
     const source = params.conversation;
-    const slice = source
-      ? await source.read(readConversationOffset(params.projectId, source.id))
-      : undefined;
+    const sliceStartOffset = source ? readConversationOffset(params.projectId, source.id) : 0;
+    const slice = source ? await source.read(sliceStartOffset) : undefined;
     const transcriptTail = slice && slice.text.length > 0 ? slice.text : undefined;
+    // #144: where this slice may be consumed PARTLY, keyed by prefix length —
+    // validated here (see `resumePointsOf`) so both the budget search below and
+    // the cursor-advance tail work from the same trusted set.
+    const resumePoints = slice ? resumePointsOf(slice, sliceStartOffset) : undefined;
 
     // Nothing to do when there are neither fresh observations NOR new
     // conversation content. Still advance the event watermark past a fully
@@ -1395,6 +1581,10 @@ export async function consolidate(params: ConsolidateParams): Promise<Consolidat
       {
         tailPersistedElsewhere: process.env.MEMORIZE_RAW_SEGMENTS !== "0",
         maxChars: extractionCharBudget(params.llm),
+        // #144: ascending by construction (`resumePointsOf` inserts sorted).
+        ...(resumePoints && resumePoints.size > 0
+          ? { tailResumePrefixes: [...resumePoints.keys()] }
+          : {}),
       },
     );
 
@@ -1618,32 +1808,43 @@ export async function consolidate(params: ConsolidateParams): Promise<Consolidat
 
     // Per-conversation offset target: advance in lockstep with the event
     // watermark — the extractor has now seen this slice, so the next boundary
-    // reads only what is new. The invariant is "shown WHOLE or stored WHOLE,
-    // or not consumed": `newOffset` is opaque to the kernel
-    // (`ConversationSlice`), so a slice can only be consumed whole or not at
-    // all, and a tail that was merely CLIPPED leaves its oldest part neither
-    // shown to the extractor nor — with the raw buffer off, or pruned back
-    // out — stored anywhere, which is the same loss as dropping it (owner
-    // adjudication on PR #136). So anything short of `"whole"` holds the
-    // cursor, and the next boundary — with this boundary's observations
-    // already consumed, hence more budget, and with the tail reserved ahead of
-    // existing memories — gets the slice. An EMPTY slice has nothing to lose
-    // and always advances, so an idle conversation never pins the cursor.
-    // Computed here but not yet written: committed together with the event
-    // watermark below, in one transaction (#139).
+    // reads only what is new. The invariant is unchanged from #136: "shown or
+    // stored, or else not consumed". What #144 changed is the GRANULARITY.
+    //
+    // - Shown WHOLE (or stored whole regardless) ⇒ commit `newOffset`.
+    // - Shown as a PREFIX ending on one of the source's own resume points ⇒
+    //   commit THAT point's offset. Only the shown part is consumed; the rest
+    //   comes back at the next boundary, which is what lets a slice too large
+    //   for the extraction budget drain over successive boundaries instead of
+    //   pinning the conversation axis forever.
+    // - Anything else (`"clipped"`/`"dropped"` with no resume point) leaves
+    //   part of the slice neither shown to the extractor nor — with the raw
+    //   buffer off, or pruned back out — stored anywhere, which is the same
+    //   loss as dropping it (owner adjudication on PR #136). The cursor holds.
+    //
+    // An EMPTY slice has nothing to lose and always advances, so an idle
+    // conversation never pins the cursor. Computed here but not yet written:
+    // committed together with the event watermark below, in one transaction
+    // (#139).
     let conversationSliceHeld = false;
     let conversationOffsetTarget: { sourceId: string; offset: number } | undefined;
     if (source && slice) {
       const shownWhole =
         bounded.transcriptTailCoverage === "whole" || bounded.transcriptTailCoverage === "absent";
+      const shownPrefixOffset =
+        bounded.transcriptTailCoverage === "prefix" &&
+        bounded.transcriptTailPrefixChars !== undefined
+          ? resumePoints?.get(bounded.transcriptTailPrefixChars)
+          : undefined;
       if (shownWhole || sliceFullyStored || slice.text.length === 0) {
         conversationOffsetTarget = { sourceId: source.id, offset: slice.newOffset };
+      } else if (shownPrefixOffset !== undefined) {
+        conversationOffsetTarget = { sourceId: source.id, offset: shownPrefixOffset };
       } else {
-        // The remaining stuck case is a single slice too large for the budget
-        // even with zero memories — a `ConversationSource` contract limit
-        // (no resumable offset), tracked separately. Holding is correct, but
-        // it must not be SILENT: surface it on the result and the attempt
-        // telemetry so a pinned conversation axis is observable from outside.
+        // Still reachable, and still not allowed to be SILENT — surface it on
+        // the result and the attempt telemetry so a pinned conversation axis is
+        // observable from outside. See `ConsolidateResult.conversationSliceHeld`
+        // for the conditions that survive #144.
         conversationSliceHeld = true;
       }
     }
