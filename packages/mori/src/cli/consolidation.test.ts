@@ -1,5 +1,5 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { ConsolidatorLlm } from "@mori/kernel";
+import type { ConsolidateCallOptions, ConsolidatorLlm } from "@mori/kernel";
 import { describe, expect, it } from "vitest";
 import type { MoriKernel } from "../agent/index.js";
 import { consolidateExplicit, consolidateOnSessionEnd } from "./consolidation.js";
@@ -9,7 +9,9 @@ function stubLlm(): ConsolidatorLlm {
 }
 
 /** A `MoriKernel` whose `consolidate` is a spy calling `onConsolidate` instead of doing anything real. */
-function spyKernel(onConsolidate: (llm: ConsolidatorLlm) => Promise<void>): MoriKernel {
+function spyKernel(
+  onConsolidate: (llm: ConsolidatorLlm, opts?: ConsolidateCallOptions) => Promise<void>,
+): MoriKernel {
   return {
     transformContext: async (messages: AgentMessage[]) => messages,
     observe: () => {},
@@ -31,6 +33,19 @@ describe("consolidateOnSessionEnd", () => {
     });
 
     expect(calls).toEqual([llm]);
+  });
+
+  it("passes boundary: session-end on every call (#141)", async () => {
+    const opts: (ConsolidateCallOptions | undefined)[] = [];
+    const kernel = spyKernel(async (_llm, o) => {
+      opts.push(o);
+    });
+
+    await consolidateOnSessionEnd(kernel, stubLlm(), () => {
+      throw new Error("onError must not fire on success");
+    });
+
+    expect(opts).toEqual([{ boundary: "session-end" }]);
   });
 
   it("skips silently when no llm is configured", async () => {
@@ -89,6 +104,30 @@ describe("consolidateExplicit", () => {
 
     expect(outcome.kind).toBe("failed");
     expect(outcome.kind === "failed" && outcome.error).toBeInstanceOf(Error);
+  });
+
+  it("passes boundary: manual and the given signal to kernel.consolidate (#141)", async () => {
+    const opts: (ConsolidateCallOptions | undefined)[] = [];
+    const kernel = spyKernel(async (_llm, o) => {
+      opts.push(o);
+    });
+    const controller = new AbortController();
+
+    await consolidateExplicit(kernel, stubLlm(), controller.signal);
+
+    expect(opts).toEqual([{ boundary: "manual", signal: controller.signal }]);
+  });
+
+  it("reports cancelled, not failed, when kernel.consolidate rejects with an AbortError (#141)", async () => {
+    const kernel = spyKernel(async () => {
+      const error = new Error("aborted");
+      error.name = "AbortError";
+      throw error;
+    });
+
+    const outcome = await consolidateExplicit(kernel, stubLlm(), new AbortController().signal);
+
+    expect(outcome).toEqual({ kind: "cancelled" });
   });
 });
 

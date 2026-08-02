@@ -26,6 +26,10 @@ export function replConsolidateOkMessage(): string {
   return "mori: 증류를 완료했습니다.\n";
 }
 
+export function replConsolidateCancelledMessage(): string {
+  return "mori: 증류를 취소했습니다.\n";
+}
+
 export function replConsolidateFailedMessage(error: unknown): string {
   const reason = error instanceof Error ? error.message : String(error);
   return `mori: 증류에 실패했습니다 — ${reason}\n`;

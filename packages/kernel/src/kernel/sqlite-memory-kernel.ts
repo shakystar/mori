@@ -15,7 +15,13 @@
  */
 
 import { createProject } from "../domain/entities.js";
-import type { ConsolidatorLlm, ConversationSource, Embedder, MemoryKernel } from "../index.js";
+import type {
+  ConsolidateCallOptions,
+  ConsolidatorLlm,
+  ConversationSource,
+  Embedder,
+  MemoryKernel,
+} from "../index.js";
 import { captureObservation, evaluateCapture } from "../services/capture-service.js";
 import {
   consolidate as consolidateBoundary,
@@ -228,9 +234,16 @@ export class SqliteMemoryKernel<M, E> implements MemoryKernel<M, E> {
    * boundary caller (#107). A lock failure propagates for the same reason: a
    * boundary that never ran must be visible to whoever asked for it, which is
    * the opposite of `observe`'s contract above.
+   *
+   * `opts.boundary` (#141), when given, wins over the construction-time
+   * `SqliteMemoryKernelOptions.boundary` fallback — the only way one kernel
+   * instance can serve two triggers (e.g. session end AND an explicit request)
+   * and have each recorded under its own label instead of whichever one was
+   * fixed at construction. `opts.signal` is forwarded as-is; see
+   * `consolidate-service.ts` for where it is actually checked.
    */
-  async consolidate(llm: ConsolidatorLlm): Promise<void> {
-    await this.consolidateWithResult(llm);
+  async consolidate(llm: ConsolidatorLlm, opts?: ConsolidateCallOptions): Promise<void> {
+    await this.consolidateWithResult(llm, opts);
   }
 
   /**
@@ -238,7 +251,10 @@ export class SqliteMemoryKernel<M, E> implements MemoryKernel<M, E> {
    * boundary (counts, resolved extractor, `ok`/`noop`). The seam returns void,
    * so this is the surface the harness reaches for when it wants telemetry.
    */
-  async consolidateWithResult(llm: ConsolidatorLlm): Promise<ConsolidateResult> {
+  async consolidateWithResult(
+    llm: ConsolidatorLlm,
+    opts?: ConsolidateCallOptions,
+  ): Promise<ConsolidateResult> {
     // OUTSIDE the lock, deliberately. `drain()` settles the queued captures,
     // and each of those takes the project lock itself (see `observe`) — draining
     // from inside the lock would make this call wait for work that is waiting
@@ -251,6 +267,7 @@ export class SqliteMemoryKernel<M, E> implements MemoryKernel<M, E> {
     // exactly as before, and a foreign process that grabs the lock in between
     // consolidates them instead — which is the point of the lock, not a gap.
     await this.drain();
+    const boundary = opts?.boundary ?? this.options.boundary;
     return withProjectLock(this.options.projectId, async () => {
       await this.ensureGenesis();
       return consolidateBoundary({
@@ -258,7 +275,8 @@ export class SqliteMemoryKernel<M, E> implements MemoryKernel<M, E> {
         actor: this.options.actor,
         llm,
         ...(this.options.sessionId ? { sessionId: this.options.sessionId } : {}),
-        ...(this.options.boundary ? { boundary: this.options.boundary } : {}),
+        ...(boundary ? { boundary } : {}),
+        ...(opts?.signal ? { signal: opts.signal } : {}),
         ...(this.options.embedder ? { embedder: this.options.embedder } : {}),
         ...(this.options.conversation ? { conversation: this.options.conversation } : {}),
       });

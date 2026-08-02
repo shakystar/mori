@@ -350,5 +350,50 @@ describe("runRepl", () => {
       expect(exitCode).toBe(0);
       expect(io.err()).toContain("boom");
     });
+
+    it("cancels an in-flight consolidation on Ctrl-C without ending the session (#141)", async () => {
+      const provider = recordingProvider(["answer one"]);
+      const { agent, kernel } = testAgent(provider.streamFn);
+      const io = captureOutput();
+      const input = scriptedInput([
+        { type: "line", value: "/consolidate", interruptDuringTurn: true },
+        { type: "line", value: "question one" },
+        { type: "eof" },
+      ]);
+
+      // Hangs until its `AbortSignal` fires, then rejects the way a real kernel's boundary
+      // does once `consolidate-service.ts` sees an aborted signal at the extraction-call
+      // edge — `ConsolidateAbortedError`'s `name` is `AbortError`.
+      let sawAbortedSignal = false;
+      const cancellableKernel: MoriKernel = {
+        transformContext: (messages) => kernel.transformContext(messages),
+        observe: (event) => kernel.observe(event),
+        drain: () => kernel.drain(),
+        consolidate: (_llm, opts) =>
+          new Promise((_resolve, reject) => {
+            opts?.signal?.addEventListener(
+              "abort",
+              () => {
+                sawAbortedSignal = true;
+                const error = new Error("aborted");
+                error.name = "AbortError";
+                reject(error);
+              },
+              { once: true },
+            );
+          }),
+      };
+
+      const exitCode = await runRepl(agent, input.source, io, {
+        kernel: cancellableKernel,
+        llm: stubLlm(),
+      });
+
+      expect(exitCode).toBe(0);
+      expect(sawAbortedSignal).toBe(true);
+      expect(io.err()).toContain("취소");
+      // The cancelled /consolidate does not end the session — the turn right after it runs.
+      expect(provider.contexts).toHaveLength(1);
+    });
   });
 });
