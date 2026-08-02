@@ -847,11 +847,19 @@ function writeConversationOffset(projectId: string, sourceId: string, offset: nu
  * over content that was neither shown nor stored, which is precisely the loss
  * #136 closed. A point is kept only when it is
  *
+ * - an object — the array itself is harness data, so an element that is `null`
+ *   or a primitive is discarded before any field is read (dereferencing it
+ *   would fail the boundary, which is exactly what the non-array degrade
+ *   below refuses to do);
  * - an integer strictly inside the slice (`0 < chars < text.length`) — `chars`
  *   indexes `text`, and "consumed the whole slice" is `newOffset`, not a point;
- * - a real forward step (`currentOffset < offset <= newOffset`) — a point that
- *   does not advance cannot drain anything, and one beyond `newOffset` would
- *   consume more than the slice contains;
+ * - a real forward step that stops SHORT of the whole slice
+ *   (`currentOffset < offset < newOffset`) — a point that does not advance
+ *   cannot drain anything, and one at (or beyond) `newOffset` would consume the
+ *   whole slice while only its `chars`-prefix was shown, dropping `text.slice(chars)`
+ *   unshown and unstored. Every point here is internal by the `chars` rule
+ *   above, so the bound is strict: whole-slice consumption is the separate
+ *   `newOffset` path in `run()`, never a point;
  * - order-consistent with its neighbours once sorted by `chars`: offsets must
  *   not go backwards, so "a longer prefix is at least as far along" holds.
  *
@@ -872,12 +880,14 @@ export function resumePointsOf(
   const candidates = declared
     .filter(
       (point) =>
+        typeof point === "object" &&
+        point !== null &&
         Number.isInteger(point.chars) &&
         point.chars > 0 &&
         point.chars < slice.text.length &&
         Number.isFinite(point.offset) &&
         point.offset > currentOffset &&
-        point.offset <= slice.newOffset,
+        point.offset < slice.newOffset,
     )
     .sort((a, b) => a.chars - b.chars);
   for (const point of candidates) {

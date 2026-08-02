@@ -1218,6 +1218,92 @@ describe("consolidate — drains a slice larger than the extraction budget (#144
     expect(conversation.offsets).toEqual([0, 0]);
   });
 
+  // A source that hands over `[null, …]` is not hypothetical: `resumePoints`
+  // crosses the harness boundary, so it may arrive from JSON or untyped JS.
+  // Reading `.chars` off such an element would throw INSIDE the boundary, and
+  // `read` is contractually allowed to be unhelpful but never to fail — so one
+  // bad element must cost only itself, not the slice's ability to drain.
+  it("drains past malformed resume-point entries instead of failing the boundary", async () => {
+    process.env.MEMORIZE_RAW_SEGMENTS = "0";
+    const full = oversizedConversation();
+    const base = fakeStreamConversation(full);
+    const conversation: ConversationSource & { offsets: number[] } = {
+      id: base.id,
+      offsets: base.offsets,
+      async read(offset: number): Promise<ConversationSlice | undefined> {
+        const slice = await base.read(offset);
+        if (!slice) return slice;
+        // Poison the array around the real points, so a validator that trips
+        // on the first bad element loses the good ones behind it too.
+        return {
+          ...slice,
+          resumePoints: [
+            null,
+            undefined,
+            42,
+            "nope",
+            ...slice.resumePoints,
+            null,
+          ] as unknown as ConversationSlice["resumePoints"],
+        };
+      },
+    };
+    const consolidator: Consolidator = {
+      async extract() {
+        return [];
+      },
+    };
+
+    let guard = 0;
+    while ((conversation.offsets.at(-1) ?? 0) < full.length && guard < 20) {
+      const result = await consolidate({ projectId, actor: "test", conversation, consolidator });
+      expect(result.conversationSliceHeld).toBe(false);
+      guard += 1;
+    }
+
+    // The surviving points still drain the slice to the end, monotonically —
+    // i.e. the malformed entries were dropped individually, not fatally.
+    expect(conversation.offsets.at(-1)).toBe(full.length);
+    expect(conversation.offsets.length).toBeGreaterThan(2);
+    for (let i = 1; i < conversation.offsets.length; i++) {
+      expect(conversation.offsets[i]!).toBeGreaterThan(conversation.offsets[i - 1]!);
+    }
+  });
+
+  // The `offset === newOffset` hole: an INTERNAL point (`chars < text.length`)
+  // that declares the whole slice's cursor. It fits any budget, so it would be
+  // picked for an oversized tail, and committing it drops `text.slice(chars)`
+  // unshown and unstored. The bound has to be strict for internal points.
+  it("holds rather than consuming an internal resume point that carries the terminal offset", async () => {
+    process.env.MEMORIZE_RAW_SEGMENTS = "0";
+    const huge = Array.from({ length: 4000 }, (_, i) => `USER: line ${i}`).join("\n\n");
+    // `chars: 100` is a tiny prefix that trivially fits the budget, while the
+    // slice as a whole does not — the exact case the point would be chosen for.
+    const terminal = [{ chars: 100, offset: 512 }];
+    const conversation = fakeConversation([
+      { text: huge, newOffset: 512, resumePoints: terminal },
+      { text: huge, newOffset: 512, resumePoints: terminal },
+    ]);
+    const shown: string[] = [];
+    const consolidator: Consolidator = {
+      async extract(input) {
+        shown.push(input.transcriptTail ?? "");
+        return [];
+      },
+    };
+
+    const first = await consolidate({ projectId, actor: "test", conversation, consolidator });
+    expect(first.conversationSliceHeld).toBe(true);
+    // Nothing was consumed on the strength of that point: had it been kept,
+    // the boundary would have shown the 100-char prefix and committed 512.
+    expect(shown[0]).not.toBe(huge.slice(0, 100));
+
+    await consolidate({ projectId, actor: "test", conversation, consolidator });
+    // The cursor never moved, so the unshown suffix is back in the next
+    // boundary's input in full — held, not lost.
+    expect(conversation.offsets).toEqual([0, 0]);
+  });
+
   // The deliberate limit of the design, pinned so it cannot drift into being
   // an accident: with the raw buffer ON the tail is not prefix-cut, because the
   // stored copy — not the shown prefix — is what consumes the slice, and
@@ -1371,6 +1457,25 @@ describe("resumePointsOf (#144)", () => {
         900,
       ),
     ]).toEqual([[50, 950]]);
+  });
+
+  // A `ConversationSource` is harness code and may be plain JS or JSON-backed,
+  // so a malformed ELEMENT has to degrade the same way a malformed `resumePoints`
+  // does: dropped individually, never dereferenced into a thrown boundary.
+  it("drops non-object entries without throwing, keeping the valid ones", () => {
+    const points = [null, undefined, 42, "50", { chars: 50, offset: 950 }] as unknown as Array<{
+      chars: number;
+      offset: number;
+    }>;
+    expect([...resumePointsOf(slice(points), 900)]).toEqual([[50, 950]]);
+  });
+
+  // The one shape the old `offset <= newOffset` bound let through: a point
+  // INSIDE the text carrying the cursor for the WHOLE slice. Committing it
+  // would consume `text.slice(chars)` while only the prefix was ever shown —
+  // exactly the loss #136 closed.
+  it("drops an internal point that declares the slice's terminal offset", () => {
+    expect([...resumePointsOf(slice([{ chars: 50, offset: 1000 }]), 900)]).toEqual([]);
   });
 
   it("drops a point whose offset goes backwards relative to a shorter prefix", () => {

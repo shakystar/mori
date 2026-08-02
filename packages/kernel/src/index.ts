@@ -86,7 +86,17 @@ export interface ConversationSlice {
    * the agent answered — tool traffic alone is not conversation.
    */
   text: string;
-  /** Cursor to hand back on the next boundary. Opaque to the kernel. */
+  /**
+   * Cursor to hand back on the next boundary. Opaque to the kernel — it never
+   * derives one offset from another. It does, however, assume offsets are
+   * MONOTONICALLY NON-DECREASING as the conversation grows: the stored
+   * watermark is compared against incoming values to tell "moved forward" from
+   * "went backwards" (`resumePointsOf`, and the cursor-advance tail in
+   * `consolidate-service.ts`). A source whose cursor tokens wrap or otherwise
+   * run backwards does not lose content — its points are simply dropped and
+   * the slice holds — but it will not drain, so make the value order-comparable
+   * (a char/byte count, a turn index, a sequence number).
+   */
   newOffset: number;
   /**
    * Points at which a consumer may resume mid-slice, ascending by `chars` and
