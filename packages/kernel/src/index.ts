@@ -9,13 +9,40 @@
  * inversion — no host CLI, no spawn).
  */
 
+import type { ConsolidateBoundary } from "./services/consolidate-service.js";
+
 export * from "./domain/index.js";
 export * from "./kernel/sqlite-memory-kernel.js";
 export { projectStoreExists } from "./storage/event-store.js";
+export type { ConsolidateBoundary };
 
 /** LLM seam for consolidation. The harness supplies an in-process implementation. */
 export interface ConsolidatorLlm {
   complete(prompt: string): Promise<string>;
+}
+
+/**
+ * Per-call options for {@link MemoryKernel.consolidate} (#141). A single optional object,
+ * added once in an extensible shape, so a future field does not change the seam's signature
+ * again — every existing implementation and caller (including {@link BufferKernel}) keeps
+ * compiling unmodified because both fields are optional and the parameter itself is.
+ */
+export interface ConsolidateCallOptions {
+  /**
+   * Telemetry label for THIS call, overriding whatever boundary a construction-time option
+   * fixed (`SqliteMemoryKernelOptions.boundary`). One kernel instance can serve more than one
+   * trigger (session end AND an explicit request share the same instance in mori), so a label
+   * fixed once at construction can only ever be right for one of them — this is the per-call
+   * value that lets it be right for both.
+   */
+  boundary?: ConsolidateBoundary;
+  /**
+   * Cancels the boundary at the extraction-call edge ONLY — consolidation is append-only, so
+   * nothing already durable is rewound. An already-aborted signal means the extractor is never
+   * invoked and the watermark does not advance, exactly like an extractor failure: the next
+   * boundary retries the same window.
+   */
+  signal?: AbortSignal;
 }
 
 /**
@@ -123,7 +150,7 @@ export interface MemoryKernel<M, E> {
   /** Capture hot path: observes every loop event. Must stay cheap and rule-based. */
   observe(event: E): void;
   /** Distill captured events into long-term memory via the injected LLM. */
-  consolidate(llm: ConsolidatorLlm): Promise<void>;
+  consolidate(llm: ConsolidatorLlm, opts?: ConsolidateCallOptions): Promise<void>;
 }
 
 /**
