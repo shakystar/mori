@@ -9,12 +9,7 @@ import {
   type Project,
 } from "../domain/entities.js";
 import type { DomainEvent } from "../domain/events.js";
-import type {
-  ConsolidatorLlm,
-  ConversationSlice,
-  ConversationSource,
-  Embedder,
-} from "../index.js";
+import type { ConsolidatorLlm, ConversationSlice, ConversationSource, Embedder } from "../index.js";
 import { laneOf, laneWhereSql, SELF_LANE } from "../projections/projector.js";
 import { getDb } from "../storage/db.js";
 import {
