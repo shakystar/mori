@@ -35,6 +35,22 @@ export interface Embedder {
   readonly model: string;
 }
 
+/**
+ * One resumable point inside a {@link ConversationSlice}: "a consumer that was
+ * shown (or stored) exactly the first `chars` characters of `text` may commit
+ * `offset` as its new cursor".
+ *
+ * This is what makes PARTIAL consumption expressible without making offsets
+ * transparent to the kernel — the kernel never does arithmetic on an offset, it
+ * only picks one of the values the source itself declared (#144).
+ */
+export interface ConversationResumePoint {
+  /** Prefix length, in characters of `ConversationSlice.text`. */
+  chars: number;
+  /** The cursor value that corresponds to consuming exactly that prefix. */
+  offset: number;
+}
+
 /** One boundary's worth of conversation, as produced by a {@link ConversationSource}. */
 export interface ConversationSlice {
   /**
@@ -45,6 +61,27 @@ export interface ConversationSlice {
   text: string;
   /** Cursor to hand back on the next boundary. Opaque to the kernel. */
   newOffset: number;
+  /**
+   * Points at which a consumer may resume mid-slice, ascending by `chars` and
+   * all strictly inside `text` (`0 < chars < text.length`). Cut them at turn
+   * boundaries: the kernel shows the extractor `text.slice(0, chars)` verbatim,
+   * so a point mid-sentence hands over a fragment.
+   *
+   * WHY IT EXISTS (#144): the kernel's extraction prompt has a char budget, and
+   * a slice bigger than that budget could previously only be consumed WHOLE or
+   * not at all. The #136 invariant ("never consume what was neither shown nor
+   * stored") then held the cursor forever — every later boundary re-read the
+   * same, now larger, slice. With resume points the kernel commits the offset
+   * of the prefix it actually showed, so an oversized slice DRAINS across
+   * boundaries instead of pinning the conversation axis.
+   *
+   * EMPTY is legal and means "all-or-nothing" — the pre-#144 contract, for a
+   * source that cannot map a text position back to a cursor. Such a source
+   * keeps the permanent-hold failure mode, reported as
+   * `ConsolidateResult.conversationSliceHeld`. Supply points whenever the
+   * offset is derivable from the text (a char/byte index, a turn index, …).
+   */
+  resumePoints: readonly ConversationResumePoint[];
 }
 
 /**
