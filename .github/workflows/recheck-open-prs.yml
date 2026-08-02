@@ -351,6 +351,11 @@ jobs:
           # 판정 아티팩트가 있을 수 없는 경로다. 빈 디렉터리를 주면 recheck-report.sh가
           # 전건을 "판정 불가"로 보고한다 — 부재를 그린으로 단정하지 않는 기존 규율 그대로다.
           RESULTS_DIR: ${{ runner.temp }}/no-results
+          # 이 잡은 **판정하지 않았다** — discover가 죽어 어떤 head·base로 검증할지조차 정하지
+          # 못했다. 겹친 다른 실행(push 스윕 ↔ pull_request)이 방금 남긴 확정 판정을 이 잡의
+          # 판정 불가로 덮지 않게 한다 (#152). 침묵하지는 않는다 — 그때는 게이트 마커가 없는
+          # 별도 알림 코멘트가 남는다.
+          AUTHORITATIVE: "0"
           NO_RESULT_DETAIL: >-
             재검증 대상 선정(discover) 잡이 실패해 이 PR을 현재 `main` 기준으로 검증하지
             못했습니다. 아래 실행 로그에서 원인을 확인하세요.
