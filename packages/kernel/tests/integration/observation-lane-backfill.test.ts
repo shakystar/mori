@@ -7,7 +7,10 @@ import Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { CURRENT_SCHEMA_VERSION } from "../../src/domain/common.js";
-import { listRecentObservations } from "../../src/services/projection-store.js";
+import {
+  listRecentObservations,
+  rebuildProjectProjection,
+} from "../../src/services/projection-store.js";
 import { closeAll, getDb } from "../../src/storage/db.js";
 import { getProjectDbFile } from "../../src/storage/path-resolver.js";
 
@@ -366,4 +369,230 @@ describe("observations lane backfill (#120)", () => {
       .all() as Array<{ id: string; lane: string | null }>;
     expect(rows).toEqual([{ id: "obs_orphan", lane: null }]);
   });
+});
+
+// #154 — the two weaknesses owner review left on PR #153's v15, now fixed by
+// pointing v15 at #150's `backfillEntityTableLane`:
+//
+//  ① v15 adopted the FIRST `observation.captured` event per payload id, while
+//     `reduceProjectState` overwrites the record on every capture. On an id
+//     with more than one capture event the two disagree, so the backfill
+//     produced a row a rebuild would never produce.
+//  ② v15 materialized the whole table and the whole capture history at once.
+//     The helper pages the table in fixed batches, and a batch boundary is
+//     where a paging bug drops rows.
+//
+// Both suites below upgrade a store and read WITHOUT WRITING first, for the
+// same reason the #120 suite does: a write would rebuild the projection and
+// mask whatever the migration got wrong.
+
+/**
+ * A store carrying the CURRENT schema for every table (so
+ * `rebuildProjectProjection` — which replaces all of them — can run against
+ * it) but rewound to `userVersion` with the observation lanes never
+ * populated, i.e. exactly what a store that had run v14 and stopped looks
+ * like. Built by letting the real migrations create the tables on an empty
+ * db and then winding `user_version` back, rather than by hand-writing the
+ * DDL, so it cannot drift from the schema the rebuild expects.
+ */
+function seedAtCurrentSchema(
+  projectId: string,
+  seedRows: (db: Database.Database) => void,
+  userVersion = 14,
+): void {
+  const dbFile = getProjectDbFile(projectId);
+  mkdirSync(dirname(dbFile), { recursive: true });
+  getDb(projectId);
+  closeAll();
+
+  const seed = new Database(dbFile);
+  seedRows(seed);
+  // Rows go in with the lane column left NULL (insertObservationRow does not
+  // name it) — the v14 state this migration exists to repair.
+  seed.pragma(`user_version = ${userVersion}`);
+  seed.close();
+}
+
+function laneRows(db: Database.Database): Array<{ id: string; lane: string | null }> {
+  return db
+    .prepare("SELECT id, source_project_id AS lane FROM observations ORDER BY id")
+    .all() as Array<{ id: string; lane: string | null }>;
+}
+
+describe("observations lane backfill — adoption order (#154 ①)", () => {
+  // The equation this suite exists to pin: for ANY store, the lane the
+  // migration writes == the lane a real rebuild would write. #120's original
+  // v15 satisfied it only for ids with a single capture event; the point of
+  // last-wins is that the equation holds unconditionally.
+  it("matches rebuildProjectProjection when one id has two captures on different lanes", async () => {
+    const projectId = "proj_backfill_dup";
+    const FOREIGN = "proj_backfill_bob";
+
+    seedAtCurrentSchema(projectId, (seed) => {
+      insertGenesis(seed, projectId, "Self");
+      insertGenesis(seed, FOREIGN, "Bob");
+
+      // Two ids, one per direction of the disagreement — neither is caught by
+      // a backfill that reads only the first event, and they fail differently:
+      // `obs_ff` needs an UPDATE the old code skipped, `obs_sf` needs the old
+      // code's UPDATE NOT to happen.
+      //
+      // obs_ff: captured foreign first, then self. The projected row is the
+      // SECOND capture, so the rebuild leaves it on the self lane (NULL).
+      const ffForeign = observationPayload("obs_ff", FOREIGN, "sess_bob");
+      insertEvent(seed, {
+        id: "evt_ff_1",
+        type: "observation.captured",
+        projectId,
+        scopeId: "sess_bob",
+        sourceProjectId: FOREIGN,
+        payload: ffForeign,
+      });
+      const ffSelf = { ...observationPayload("obs_ff", projectId, "sess_self"), summary: "later" };
+      insertEvent(seed, {
+        id: "evt_ff_2",
+        type: "observation.captured",
+        projectId,
+        scopeId: "sess_self",
+        sourceProjectId: projectId,
+        payload: ffSelf,
+      });
+      insertObservationRow(seed, ffSelf);
+
+      // obs_sf: captured self first, then foreign — the rebuild puts it on
+      // the foreign lane.
+      const sfSelf = observationPayload("obs_sf", projectId, "sess_self");
+      insertEvent(seed, {
+        id: "evt_sf_1",
+        type: "observation.captured",
+        projectId,
+        scopeId: "sess_self",
+        sourceProjectId: projectId,
+        payload: sfSelf,
+      });
+      const sfForeign = { ...observationPayload("obs_sf", FOREIGN, "sess_bob"), summary: "later" };
+      insertEvent(seed, {
+        id: "evt_sf_2",
+        type: "observation.captured",
+        projectId,
+        scopeId: "sess_bob",
+        sourceProjectId: FOREIGN,
+        payload: sfForeign,
+      });
+      insertObservationRow(seed, sfForeign);
+    });
+
+    const db = getDb(projectId);
+    expect(db.pragma("user_version", { simple: true })).toBeGreaterThanOrEqual(15);
+
+    const afterBackfill = laneRows(db);
+    expect(afterBackfill).toEqual([
+      { id: "obs_ff", lane: null },
+      { id: "obs_sf", lane: FOREIGN },
+    ]);
+
+    // The equation itself: replay the log through the projection writer and
+    // the lanes must not move. (This is the first write in the test, and it
+    // is the assertion — not setup.)
+    await rebuildProjectProjection(projectId);
+    expect(laneRows(getDb(projectId))).toEqual(afterBackfill);
+  });
+
+  it("keeps the byte-identity property on a repeated self capture", async () => {
+    const projectId = "proj_backfill_dup_solo";
+
+    const first = observationPayload("obs_rep", projectId, "sess_1");
+    const second = { ...observationPayload("obs_rep", projectId, "sess_1"), summary: "later" };
+    const rawData = JSON.stringify(second);
+
+    seedAtCurrentSchema(projectId, (seed) => {
+      insertGenesis(seed, projectId, "Solo");
+      insertEvent(seed, {
+        id: "evt_rep_1",
+        type: "observation.captured",
+        projectId,
+        scopeId: "sess_1",
+        sourceProjectId: projectId,
+        payload: first,
+      });
+      insertEvent(seed, {
+        id: "evt_rep_2",
+        type: "observation.captured",
+        projectId,
+        scopeId: "sess_1",
+        sourceProjectId: projectId,
+        payload: second,
+      });
+      insertObservationRow(seed, second);
+    });
+
+    // Last-wins resolves to self here, and a self lane is still skipped
+    // outright: `data` must come back as the exact bytes that went in.
+    const rows = getDb(projectId)
+      .prepare("SELECT id, source_project_id AS lane, data FROM observations")
+      .all() as Array<{ id: string; lane: string | null; data: string }>;
+    expect(rows).toEqual([{ id: "obs_rep", lane: null, data: rawData }]);
+  });
+});
+
+describe("observations lane backfill — batch boundaries (#154 ②)", () => {
+  // `backfillEntityTableLane` pages the table by rowid, 500 rows at a time,
+  // so the migration no longer holds the whole table in memory. The risk that
+  // buys is a paging bug at the seam, which shows up as rows silently left
+  // un-backfilled. Both sizes below cross the seam twice; 1000 is an exact
+  // multiple of the batch size (last page full, next page empty) and 1001 is
+  // not (last page short), which are the two different loop exits.
+  for (const total of [1000, 1001]) {
+    it(`backfills every row of a ${total}-row store — no row dropped at a page boundary`, () => {
+      const projectId = `proj_backfill_batch_${total}`;
+      const FOREIGN = "proj_backfill_bob";
+      // Every third observation is foreign, so both the UPDATE path and the
+      // skip path land on either side of each boundary.
+      const isForeign = (i: number): boolean => i % 3 === 0;
+      const obsId = (i: number): string => `obs_${String(i).padStart(5, "0")}`;
+
+      seedAtCurrentSchema(projectId, (seed) => {
+        insertGenesis(seed, projectId, "Self");
+        insertGenesis(seed, FOREIGN, "Bob");
+        const insertMany = seed.transaction(() => {
+          for (let i = 0; i < total; i++) {
+            const foreign = isForeign(i);
+            const observation = observationPayload(
+              obsId(i),
+              foreign ? FOREIGN : projectId,
+              foreign ? "sess_bob" : "sess_self",
+            );
+            insertEvent(seed, {
+              id: `evt_${obsId(i)}`,
+              type: "observation.captured",
+              projectId,
+              scopeId: foreign ? "sess_bob" : "sess_self",
+              sourceProjectId: foreign ? FOREIGN : projectId,
+              payload: observation,
+            });
+            insertObservationRow(seed, observation);
+          }
+        });
+        insertMany();
+      });
+
+      const db = getDb(projectId);
+      expect(db.pragma("user_version", { simple: true })).toBeGreaterThanOrEqual(15);
+
+      const rows = laneRows(db);
+      expect(rows).toHaveLength(total);
+      const expected = Array.from({ length: total }, (_, i) => ({
+        id: obsId(i),
+        lane: isForeign(i) ? FOREIGN : null,
+      }));
+      expect(rows).toEqual(expected);
+
+      // Same statement the reader uses: nothing foreign leaked into the self
+      // lane, at any page boundary.
+      const selfCount = db
+        .prepare("SELECT COUNT(*) AS n FROM observations WHERE source_project_id IS NULL")
+        .get() as { n: number };
+      expect(selfCount.n).toBe(expected.filter((row) => row.lane === null).length);
+    });
+  }
 });
