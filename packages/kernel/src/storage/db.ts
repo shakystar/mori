@@ -7,6 +7,172 @@ import { getMemorizeRoot, getProjectDbFile } from "./path-resolver.js";
 import { resolveNativeBinding } from "./native-addon.js";
 
 /**
+ * Self/union classification shared by the v15 (#120) and v16 (#150) lane
+ * backfills: prescan `project.created` genesis events the same way
+ * `reduceProjectState` does, so a legacy (pre-v11) NULL-provenance event
+ * resolves identically here and at projection time.
+ */
+function scanGenesis(
+  db: Database.Database,
+  projectId: string | undefined,
+): { isUnion: boolean; selfId: string | undefined } {
+  const genesisIds = new Set<string>();
+  let firstGenesisId: string | undefined;
+  for (const row of db
+    .prepare("SELECT payload FROM events WHERE type = 'project.created' ORDER BY seq")
+    .iterate() as IterableIterator<{ payload: string }>) {
+    const id = (JSON.parse(row.payload) as { id?: string }).id;
+    if (id === undefined) continue;
+    if (firstGenesisId === undefined) firstGenesisId = id;
+    genesisIds.add(id);
+  }
+  return { isUnion: genesisIds.size > 1, selfId: projectId ?? firstGenesisId };
+}
+
+/** Mirrors `laneOf` (projections/projector.ts) against raw event columns. */
+function laneFromEvent(
+  source: string | null,
+  eventProjectId: string,
+  selfId: string | undefined,
+  isUnion: boolean,
+): string | null {
+  if (source != null) return source === selfId ? null : source;
+  if (!isUnion || eventProjectId === selfId) return null;
+  return eventProjectId;
+}
+
+/**
+ * Backfill `source_project_id` on one v12 entity table from the LAST
+ * matching creation event per entity id (seq order) — #150, generalizing
+ * v15's single-table (`observations`) mechanism to tasks/handoffs/sessions/
+ * memories.
+ *
+ * Last-wins (unconditional `Map.set`, no `has()`-guard), not v15's
+ * first-wins: `reduceProjectState` overwrites an entity's projected record on
+ * every event that touches it (`memories` most plainly — id-keyed with a
+ * plain overwrite on repeat `memory.consolidated`), so the row a real rebuild
+ * would produce reflects the LATEST matching event, not the earliest. v15's
+ * first-wins was never wrong for `observations` in practice (a capture event
+ * is not repeated per id), but generalizing the same shape here would be
+ * wrong the moment it is (owner review of PR #153, weakness ①).
+ *
+ * Cursors (`db.prepare(...).iterate()`), not `.all()`, on both the event scan
+ * and the table scan: v15 materializing one table + one event type in full
+ * was a one-off cost for `observations`; multiplying that by four tables here
+ * would multiply the memory spike and the risk of exceeding another opener's
+ * `busy_timeout` inside this migration's transaction (owner review of PR
+ * #153, weakness ②).
+ *
+ * `laneInData` says whether this table's `data` blob ALSO carries the lane —
+ * it is NOT uniform across the five tables, and writing it where the rebuild
+ * does not would break the identity property just as surely as omitting it
+ * where the rebuild does. `memories` (like v15's `observations`) is id-keyed
+ * with the lane on the record itself (`MemoryRecord.sourceProjectId`,
+ * projections/projector.ts), so its `data` carries it. `tasks`/`handoffs`/
+ * `sessions` are LANE-KEYED instead — the reducer keeps the lane in the
+ * state-map key (`laneKey`) and stores the bare domain entity, so
+ * `JSON.stringify(task)` has no `sourceProjectId` and the column is the only
+ * sink (see the `insert*` loops in services/projection-store.ts).
+ */
+function backfillEntityTableLane(
+  db: Database.Database,
+  table: string,
+  eventType: string,
+  extractId: (payload: unknown) => string | undefined,
+  laneInData: boolean,
+  selfId: string | undefined,
+  isUnion: boolean,
+): void {
+  // LIMIT 1 instead of a count/materialize: existence is all this check needs.
+  if (!db.prepare(`SELECT 1 FROM ${table} LIMIT 1`).get()) return;
+
+  const laneById = new Map<string, string | null>();
+  for (const row of db
+    .prepare(
+      `SELECT source_project_id, project_id, payload FROM events WHERE type = ? ORDER BY seq`,
+    )
+    .iterate(eventType) as IterableIterator<{
+    source_project_id: string | null;
+    project_id: string;
+    payload: string;
+  }>) {
+    const id = extractId(JSON.parse(row.payload) as unknown);
+    if (id === undefined) continue;
+    laneById.set(id, laneFromEvent(row.source_project_id, row.project_id, selfId, isUnion));
+  }
+
+  // Whichever sinks the projection writer keeps in step for THIS table: the
+  // column always (it is what `laneWhere` filters on), plus
+  // `data.sourceProjectId` only where the rebuilt record carries it too — see
+  // `laneInData` above.
+  const updateColumnOnly = db.prepare(`UPDATE ${table} SET source_project_id = ? WHERE id = ?`);
+  const updateWithData = db.prepare(
+    `UPDATE ${table} SET source_project_id = ?, data = ? WHERE id = ?`,
+  );
+  // Keyset-paginated `.all()` batches, NOT a live `.iterate()` cursor: better-
+  // sqlite3 forbids running a second statement (the UPDATE below) while a
+  // cursor from a `.prepare().iterate()` on this same connection is paused
+  // mid-stream ("This database connection is busy executing a query"). Paging
+  // by rowid keeps each batch's memory bounded without hitting that limit.
+  const BATCH_SIZE = 500;
+  const selectBatch = db.prepare(
+    `SELECT rowid AS rowid_, id${laneInData ? ", data" : ""} FROM ${table} ` +
+      `WHERE rowid > ? ORDER BY rowid LIMIT ?`,
+  );
+  let afterRowid = 0;
+  for (;;) {
+    const batch = selectBatch.all(afterRowid, BATCH_SIZE) as Array<{
+      rowid_: number;
+      id: string;
+      data?: string;
+    }>;
+    if (batch.length === 0) break;
+    for (const row of batch) {
+      // No matching creating event (should not occur), or the event resolves
+      // to self: keep NULL, the pre-existing default — no guessing (mirrors v15).
+      const lane = laneById.get(row.id);
+      if (lane == null) continue;
+      if (laneInData) {
+        const data = JSON.parse(row.data!) as Record<string, unknown>;
+        data.sourceProjectId = lane;
+        updateWithData.run(lane, JSON.stringify(data), row.id);
+      } else {
+        updateColumnOnly.run(lane, row.id);
+      }
+    }
+    afterRowid = batch[batch.length - 1]!.rowid_;
+    if (batch.length < BATCH_SIZE) break;
+  }
+}
+
+/**
+ * Mirror the now-corrected entity-table lanes onto `search_fts` (#150) — v12
+ * gave `search_fts` its own copy of `source_project_id` (a virtual table
+ * column, populated at index time, not a live join), so it needs the same
+ * correction the entity tables just got. Set-based SQL, no JS
+ * materialization needed: `entity_id` is already the join key on both sides.
+ * `SearchKind` (services/projection-store.ts) excludes `session` (sessions
+ * are never indexed) and has no lane concept for `decision`/`checkpoint`/
+ * `topic` (their source tables never got a v12 column — out of #150's
+ * scope), so only these four kinds apply.
+ */
+function backfillSearchFtsLane(db: Database.Database): void {
+  const kindTables: ReadonlyArray<readonly [string, string]> = [
+    ["task", "tasks"],
+    ["handoff", "handoffs"],
+    ["memory", "memories"],
+    ["segment", "segments"],
+  ];
+  for (const [kind, table] of kindTables) {
+    db.prepare(
+      `UPDATE search_fts SET source_project_id = (
+         SELECT source_project_id FROM ${table} WHERE ${table}.id = search_fts.entity_id
+       ) WHERE kind = ?`,
+    ).run(kind);
+  }
+}
+
+/**
  * Ordered DDL migrations applied via `PRAGMA user_version`. The user_version
  * tracks table DDL only; it is ORTHOGONAL to per-row `event.schemaVersion`
  * (which versions payload shape, not table structure). Append future
@@ -267,14 +433,41 @@ const MIGRATIONS: ReadonlyArray<(db: Database.Database, projectId?: string) => v
   // A NULLABLE `source_project_id` on each projection table that must not fold
   // a foreign writer's row into local truth (SoT-040). NULL = self (this
   // store); a non-NULL value is the origin store of an event carried in by a
-  // workspace union. The entity tables take a plain additive ALTER (O(1),
-  // existing rows read back NULL = self). search_fts is a virtual table whose
-  // columns can't be ALTERed, so it is rebuilt with the extra UNINDEXED column,
-  // copying every existing row with a NULL lane — no empty-index window (the
-  // hot telemetry rebuild path uses reindexSearch:false, so a lazy repopulate
-  // is NOT guaranteed; carrying rows across keeps search intact on upgrade).
-  // Consumed by the single private-vs-union selector; single-writer stores are
-  // byte-identical because every local row is NULL-lane.
+  // workspace union. The entity tables take a plain additive ALTER (O(1)).
+  // search_fts is a virtual table whose columns can't be ALTERed, so it is
+  // rebuilt with the extra UNINDEXED column, copying every existing row with a
+  // NULL lane — no empty-index window (the hot telemetry rebuild path uses
+  // reindexSearch:false, so a lazy repopulate is NOT guaranteed; carrying rows
+  // across keeps search intact on upgrade). Consumed by the single
+  // private-vs-union selector; single-writer stores are byte-identical because
+  // every local row is NULL-lane.
+  //
+  // "existing rows read back NULL = self" (#150 verified this, do not copy the
+  // sentence elsewhere without re-deriving it — v14 copied it unverified onto a
+  // table that DID already hold foreign rows and that became #120): this is
+  // provably true FOR v12, for two independent reasons. (1) Structural: this
+  // MIGRATIONS array is applied in full, in order, inside one transaction on
+  // every `open()` (see `runMigrations`) — so no build of this codebase has
+  // ever been able to append a foreign-lane event without first running this
+  // exact ALTER on that same store. A foreign row can only exist once code
+  // that understands multiple project identities is deployed, and that code
+  // necessarily ships with this migration already a permanent, earlier entry
+  // in the array. (2) Historical (upstream shakystar/memorize, whose ladder
+  // this table was ported from verbatim, 4bd9e37): the reducer carried a hard
+  // divergence guard (#30, memorize 13fffa4) that THREW on more than one
+  // distinct `project.created` genesis, and the ONLY commit that relaxed it is
+  // the one that introduced whole-DB workspace union sync (memorize cde51f0,
+  // "3.0.0 M4") — which is a strict DESCENDANT of the commit that added this
+  // very migration (memorize 5458663, "3.0.0 M2"). So on the whole interval
+  // where a store could be at v12, a foreign genesis still threw. mori's own
+  // port never brought the union sync mechanism over at all — there is no
+  // `insertExternalEvents`/`pullProject` here, and `appendEvent` defaults
+  // `sourceProjectId` to the store's own `projectId`
+  // (`storage/event-store.ts`) — so today reason (1) alone already holds: no
+  // code path in this repo can produce a foreign-lane row in the first place.
+  // #150 backfills the five tables + search_fts anyway (reusing #120's v15
+  // mechanism) as defense-in-depth against a future port of that mechanism,
+  // not because any real store needs repair.
   (db) => {
     db.exec(`
       ALTER TABLE tasks    ADD COLUMN source_project_id TEXT;
@@ -432,6 +625,50 @@ const MIGRATIONS: ReadonlyArray<(db: Database.Database, projectId?: string) => v
       data.sourceProjectId = lane;
       updateLane.run(lane, JSON.stringify(data), row.id);
     }
+  },
+  // v16 — #150: generalizes v15's backfill from `observations` alone to the
+  // five v12 tables (tasks/handoffs/sessions/memories) + `search_fts`, reusing
+  // the SAME mechanism (SQL backfill against this store's own event log; no
+  // async `rebuildProjectProjection` call from this layer — the same layering
+  // constraint v15 documents), corrected per owner review of PR #153: see
+  // `backfillEntityTableLane` for last-wins (not v15's first-wins) and
+  // cursored iteration (not `.all()`).
+  //
+  // Judgement (#150 body, gate ①) recorded here because it is the reason this
+  // migration exists at all: verified (see the corrected v12 comment above,
+  // and the PR description) that no real store can currently hold a
+  // foreign-lane row in any of these tables — mori has never carried the
+  // union-sync mechanism that would write one (no `insertExternalEvents`;
+  // `storage/event-store.ts` stamps every event with this store's own id),
+  // and upstream (shakystar/memorize) that mechanism landed strictly after
+  // v12. This migration is therefore a provable no-op on every store that
+  // exists today; it is written anyway as defense-in-depth against a future
+  // port of workspace union, at which point a store that upgraded through v12
+  // before that port shipped would otherwise carry stale NULL lanes exactly
+  // like #120/#74 did for `observations`.
+  //
+  // `segments` is deliberately NOT backfilled here: unlike the other four
+  // tables, it is not part of `reduceProjectState` — no `segment.*` domain
+  // event backs it. It is a DERIVED short-term buffer that `insertSegments`
+  // writes directly (services/segment-store.ts), and that insert path never
+  // accepts a non-self lane, so there is no event to read a lane off and
+  // nothing on the row that could be wrong. Its v12 column stays exactly as
+  // the v12 ALTER left it — search_fts still mirrors it (below), so a future
+  // fix to segment provenance only needs to touch segment-store.ts, not add
+  // another migration here.
+  (db, projectId) => {
+    const { isUnion, selfId } = scanGenesis(db, projectId);
+    const idOf = (payload: unknown): string | undefined => (payload as { id?: string }).id;
+
+    // `laneInData` (4th arg) is true only for `memories` — see the docstring
+    // on backfillEntityTableLane: the other three are lane-KEYED, their `data`
+    // blob is the bare domain entity and a rebuild never puts a lane in it.
+    backfillEntityTableLane(db, "tasks", "task.created", idOf, false, selfId, isUnion);
+    backfillEntityTableLane(db, "handoffs", "handoff.created", idOf, false, selfId, isUnion);
+    backfillEntityTableLane(db, "sessions", "session.started", idOf, false, selfId, isUnion);
+    backfillEntityTableLane(db, "memories", "memory.consolidated", idOf, true, selfId, isUnion);
+
+    backfillSearchFtsLane(db);
   },
 ];
 
