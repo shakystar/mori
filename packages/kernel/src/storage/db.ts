@@ -42,26 +42,33 @@ function laneFromEvent(
 }
 
 /**
- * Backfill `source_project_id` on one v12 entity table from the LAST
- * matching creation event per entity id (seq order) — #150, generalizing
+ * Backfill `source_project_id` on one entity table from the LAST matching
+ * creation event per entity id (seq order) — introduced by #150 to generalize
  * v15's single-table (`observations`) mechanism to tasks/handoffs/sessions/
- * memories.
+ * memories, and adopted BY v15 itself in #154 so `observations` and the v12
+ * tables share one implementation rather than two copies that drift.
  *
- * Last-wins (unconditional `Map.set`, no `has()`-guard), not v15's
- * first-wins: `reduceProjectState` overwrites an entity's projected record on
- * every event that touches it (`memories` most plainly — id-keyed with a
- * plain overwrite on repeat `memory.consolidated`), so the row a real rebuild
- * would produce reflects the LATEST matching event, not the earliest. v15's
- * first-wins was never wrong for `observations` in practice (a capture event
- * is not repeated per id), but generalizing the same shape here would be
- * wrong the moment it is (owner review of PR #153, weakness ①).
+ * Last-wins (unconditional `Map.set`, no `has()`-guard): the projected row is
+ * the product of the LAST event that touched its id, not the first.
+ * `reduceProjectState` overwrites an entity's record on every such event
+ * (`observations` plainly — `state.observations[observation.id] = ...` per
+ * capture; `memories` likewise on repeat `memory.consolidated`), so the
+ * provenance stapled onto that row has to come from the same event whose
+ * `data` the rebuild would leave there. Anything else pairs one event's
+ * payload with another event's lane, which is a state no rebuild can produce
+ * — and since the next write runs `rebuildProjectProjection`, the lane would
+ * then flip silently. v15 originally took the first event per id and said so
+ * in a comment; that comment asserted an intent the projector does not share,
+ * and #154 reversed it (owner review of PR #153, weakness ①). Event ids are
+ * unique but payload entity ids are not constrained by the schema, so
+ * "captures are not repeated per id" is a convention, not an invariant.
  *
  * Cursors (`db.prepare(...).iterate()`), not `.all()`, on both the event scan
- * and the table scan: v15 materializing one table + one event type in full
- * was a one-off cost for `observations`; multiplying that by four tables here
- * would multiply the memory spike and the risk of exceeding another opener's
- * `busy_timeout` inside this migration's transaction (owner review of PR
- * #153, weakness ②).
+ * and the table scan: materializing a whole table + a whole event type at
+ * once has no upper bound (both are append-only), and this runs inside
+ * `runMigrations`' `BEGIN IMMEDIATE`, where the spike is paid while holding
+ * the write lock — long enough, on an old store, to blow through another
+ * opener's `busy_timeout = 5000` (owner review of PR #153, weakness ②).
  *
  * `laneInData` says whether this table's `data` blob ALSO carries the lane —
  * it is NOT uniform across the five tables, and writing it where the rebuild
@@ -86,6 +93,14 @@ function backfillEntityTableLane(
   // LIMIT 1 instead of a count/materialize: existence is all this check needs.
   if (!db.prepare(`SELECT 1 FROM ${table} LIMIT 1`).get()) return;
 
+  // The one structure that scales with the store: an id -> lane entry per
+  // DISTINCT entity, two short strings each. Deliberate — the cursor above is
+  // what keeps event PAYLOADS (unbounded blobs, and the actual source of the
+  // spike weakness ② reports) from ever being resident together, and this map
+  // is what lets the table pass below stay a single ordered scan instead of a
+  // per-row event lookup. Collapsing it further would mean joining events to
+  // the table in SQL, which cannot express `laneFromEvent`'s genesis-dependent
+  // branch without duplicating `scanGenesis` into the query.
   const laneById = new Map<string, string | null>();
   for (const row of db
     .prepare(
@@ -114,6 +129,24 @@ function backfillEntityTableLane(
   // cursor from a `.prepare().iterate()` on this same connection is paused
   // mid-stream ("This database connection is busy executing a query"). Paging
   // by rowid keeps each batch's memory bounded without hitting that limit.
+  //
+  // 500 rows: large enough that the per-batch `SELECT` overhead stays noise
+  // next to the per-row `UPDATE`s it feeds (so the write lock is not held any
+  // longer than the unbatched version held it), small enough that the resident
+  // set is a few hundred `data` blobs rather than the whole table. The exact
+  // number is not load-bearing — only that it is a constant, which is what
+  // puts the ceiling on concurrent residency.
+  //
+  // Every batch runs inside `runMigrations`' single `BEGIN IMMEDIATE`, not one
+  // transaction per batch: the `user_version` bump lives in that same
+  // transaction, so committing per batch would mean restructuring the
+  // migration runner (out of #154's scope) to leave a store at a version whose
+  // migration only half-ran. It is also unnecessary — the bound this wants is
+  // on MEMORY, and batching alone gives that. An interrupted run therefore
+  // rolls back whole, and even a hypothetical partial one would be harmless to
+  // re-run: the lane is a pure function of `events` rows, which are immutable
+  // and append-only, so recomputing it yields the same value it wrote before
+  // (`data.sourceProjectId` is overwritten, not accumulated).
   const BATCH_SIZE = 500;
   const selectBatch = db.prepare(
     `SELECT rowid AS rowid_, id${laneInData ? ", data" : ""} FROM ${table} ` +
@@ -129,7 +162,9 @@ function backfillEntityTableLane(
     if (batch.length === 0) break;
     for (const row of batch) {
       // No matching creating event (should not occur), or the event resolves
-      // to self: keep NULL, the pre-existing default — no guessing (mirrors v15).
+      // to self: keep NULL, the pre-existing default — no guessing (#120).
+      // Skipping rather than writing NULL is also what keeps a single-writer
+      // store byte-identical: no UPDATE, so `data` is not re-serialized.
       const lane = laneById.get(row.id);
       if (lane == null) continue;
       if (laneInData) {
@@ -545,94 +580,61 @@ const MIGRATIONS: ReadonlyArray<(db: Database.Database, projectId?: string) => v
   // injection is the canonical one) reads the wrong lane forever, no matter
   // how many times it runs.
   //
-  // Scope: `observations` only. The equivalent question for v12's five tables
-  // (tasks/handoffs/sessions/memories/segments) and `search_fts` is tracked
-  // separately in #150, which reuses this mechanism.
+  // Scope: `observations` only. v12's five tables (tasks/handoffs/sessions/
+  // memories/segments) and `search_fts` are v16 (#150), which generalized this
+  // migration's mechanism into `backfillEntityTableLane` and, per owner review
+  // of PR #153, fixed two weaknesses in it. #154 pulls that corrected helper
+  // back down here so `observations` runs the same code path rather than a
+  // second copy — a copy that had already drifted, which is the shape of
+  // defect that produced #120 in the first place:
+  //
+  //  ① this body took the FIRST `observation.captured` event per id and a
+  //     comment declared that intent ("so a later re-projection cannot flip
+  //     the lane"). `reduceProjectState` does the opposite — it overwrites the
+  //     record on every capture — so on an id with more than one capture event
+  //     the backfill stapled the first event's lane onto the last event's
+  //     `data`, a pairing no rebuild produces. See the helper's docstring.
+  //  ② this body read the whole table and the whole `observation.captured`
+  //     history through `.all()`, both unbounded, inside `runMigrations`'
+  //     write lock. The helper bounds concurrent residency instead.
+  //
+  // Stores that ALREADY ran the old v15 are deliberately NOT re-backfilled by
+  // a later migration (#154 judgement): a wrong lane here needs two capture
+  // events sharing one payload id AND disagreeing on lane, and the second
+  // requires a foreign-lane event, which mori has no path to write — the same
+  // argument v16 records for why it is a provable no-op on every store that
+  // exists today. A repair migration built on this helper would also only be
+  // half of one: `if (lane == null) continue` cannot walk a wrongly-written
+  // non-NULL lane back to NULL, and teaching it to would cost the
+  // byte-identity property below. If workspace union is ever ported, that
+  // repair becomes real work and has to handle the reset-to-NULL direction.
   //
   // Single-writer stores are untouched: every row resolves to the self lane,
   // and self rows are skipped without an UPDATE, so both the column and the
   // `data` JSON stay byte-identical.
   (db, projectId) => {
-    const observationRows = db.prepare("SELECT id, data FROM observations").all() as Array<{
-      id: string;
-      data: string;
-    }>;
-    if (observationRows.length === 0) return;
-
-    // Same genesis prescan `reduceProjectState` does. `projectId` is the
-    // authoritative self identity when the caller knows it (`getDb`), matching
-    // what every real projection path passes; the first `project.created`
-    // is the same fallback the reducer uses when it does not, and is correct
-    // for a single-genesis (non-union) log. `isUnion` = more than one distinct
-    // member genesis, which is what makes a NULL-provenance legacy event
-    // ambiguous.
-    const genesisRows = db
-      .prepare("SELECT payload FROM events WHERE type = 'project.created' ORDER BY seq")
-      .all() as Array<{ payload: string }>;
-    const genesisIds = new Set<string>();
-    let firstGenesisId: string | undefined;
-    for (const row of genesisRows) {
-      const id = (JSON.parse(row.payload) as { id?: string }).id;
-      if (id === undefined) continue;
-      if (firstGenesisId === undefined) firstGenesisId = id;
-      genesisIds.add(id);
-    }
-    const isUnion = genesisIds.size > 1;
-    const selfId = projectId ?? firstGenesisId;
-
-    // observation id -> origin lane (null = self), taken from the event that
-    // captured it. Mirrors `laneOf`: a non-NULL `source_project_id` on the
-    // event is authoritative; a NULL one (legacy, pre-v11) is self unless this
-    // is a union log, where a foreign member's un-stamped history rides in
-    // under its own `project_id`. First event per observation id wins — the
-    // capture — so a later re-projection of the same id cannot flip the lane.
-    const eventRows = db
-      .prepare(
-        "SELECT source_project_id, project_id, payload FROM events " +
-          "WHERE type = 'observation.captured' ORDER BY seq",
-      )
-      .all() as Array<{ source_project_id: string | null; project_id: string; payload: string }>;
-    const laneByObservationId = new Map<string, string | null>();
-    for (const row of eventRows) {
-      const observationId = (JSON.parse(row.payload) as { id?: string }).id;
-      if (observationId === undefined || laneByObservationId.has(observationId)) continue;
-      const source = row.source_project_id;
-      let lane: string | null;
-      if (source != null) {
-        lane = source === selfId ? null : source;
-      } else if (!isUnion || row.project_id === selfId) {
-        lane = null;
-      } else {
-        lane = row.project_id;
-      }
-      laneByObservationId.set(observationId, lane);
-    }
-
-    // Both sinks the projection writer keeps in step: the column (what
-    // `laneWhere` filters on) and `data.sourceProjectId` (what a union read
-    // renders the origin label from). See the `insertObservation` in
-    // services/projection-store.ts, which derives the column FROM the record.
-    const updateLane = db.prepare(
-      "UPDATE observations SET source_project_id = ?, data = ? WHERE id = ?",
+    const { isUnion, selfId } = scanGenesis(db, projectId);
+    // `laneInData` is true: `insertObservation` (services/projection-store.ts)
+    // derives the column FROM the record, and the record itself carries
+    // `sourceProjectId`, so a rebuild leaves the lane in both sinks.
+    backfillEntityTableLane(
+      db,
+      "observations",
+      "observation.captured",
+      (payload) => (payload as { id?: string }).id,
+      true,
+      selfId,
+      isUnion,
     );
-    for (const row of observationRows) {
-      // A row with no matching capture event (should not occur — the log is
-      // the only writer of this table) keeps NULL: self is the pre-existing
-      // default and there is no evidence on which to move it.
-      const lane = laneByObservationId.get(row.id);
-      if (lane == null) continue;
-      const data = JSON.parse(row.data) as Record<string, unknown>;
-      data.sourceProjectId = lane;
-      updateLane.run(lane, JSON.stringify(data), row.id);
-    }
   },
   // v16 — #150: generalizes v15's backfill from `observations` alone to the
   // five v12 tables (tasks/handoffs/sessions/memories) + `search_fts`, reusing
   // the SAME mechanism (SQL backfill against this store's own event log; no
   // async `rebuildProjectProjection` call from this layer — the same layering
   // constraint v15 documents), corrected per owner review of PR #153: see
-  // `backfillEntityTableLane` for last-wins (not v15's first-wins) and
-  // cursored iteration (not `.all()`).
+  // `backfillEntityTableLane` for last-wins and cursored iteration. v15 ran
+  // its own first-wins/`.all()` copy of that mechanism until #154 pointed it
+  // at this same helper.
   //
   // Judgement (#150 body, gate ①) recorded here because it is the reason this
   // migration exists at all: verified (see the corrected v12 comment above,
