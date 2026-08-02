@@ -56,9 +56,13 @@ import globals from "globals";
 // The relative alternative tolerates interleaved no-op segments
 // (`x/../` cancels itself out under path resolution) so a specifier like
 // `../domain/../services/x.js` — which Node/TypeScript resolve to
-// `../services/x.js` — is caught the same as the direct form (#161). Each
-// `(?:(?!\.\./)[^/]+/)?\.\./` repetition consumes AT MOST ONE non-`..`
-// segment immediately followed by its own cancelling `../` — never more.
+// `../services/x.js` — is caught the same as the direct form (#161). This is
+// an approximation, not true resolved-path matching: it catches the common
+// case where a cancelling pair precedes the forbidden segment, but gets it
+// wrong when the cancellation instead consumes the forbidden segment itself
+// — see the fail-closed Known limit below. Each `(?:(?!\.\./)[^/]+/)?\.\./`
+// repetition consumes AT MOST ONE non-`..` segment immediately followed by
+// its own cancelling `../` — never more.
 // This is deliberate, not an arbitrary tightening: path resolution cancels
 // exactly one segment per `../`, so a repetition that could swallow several
 // segments before its `../` (the original `(?:[^/]+/)*\.\./` shape) would
@@ -80,6 +84,26 @@ import globals from "globals";
 // arbitrary-depth cancellation. This is fail-open (a real reach could slip
 // through), same direction as the case-insensitivity limit below; it is not
 // fail-closed like the single-segment form this fixes.
+// Known limit (#161 PR #186 review, fail-closed — the opposite direction
+// from the limit above): a FORBIDDEN layer segment that is itself cancelled
+// by a later `../` still matches as the terminus, because on a failed
+// attempt to consume it as a cancelling pair the engine backtracks to a
+// parse that instead ends the match there. Two examples for
+// DOMAIN_NOT_UPPER_LAYERS (dirs = storage|projections|services), both of
+// which resolve to `../domain/types.js` — a same-layer, legitimate import —
+// yet both are FLAGGED:
+//   `../services/../domain/types.js`
+//   `../x/../services/../domain/types.js`
+// This blocks a legitimate import rather than letting a violation through,
+// so it is fail-closed, unlike the multi-hop limit above. The minimal form
+// (`../services/../domain/types.js`) is not new: it already matched under
+// main's pre-#161 `(?:\.\./)*` shape; this PR's one-segment narrowing only
+// extends the false positive to variants with a leading cancelling pair
+// (`../x/../services/../domain/types.js`). Not fixed: excluding a cancelled
+// segment from matching as a terminus needs an atomic/possessive group (a
+// `(?=(X))\1` lookahead-capture at best), which JS regex has no native
+// support for and which #161's scope excludes adding (no new dependency, no
+// new CI step) to hold the ~1min CI budget (#47/#69).
 const layerReach = (pkg, dirs) => {
   const alt = dirs.join("|");
   return `^\\.{1,2}/(?:(?:(?!\\.\\./)[^/]+/)?\\.\\./)*(?:${alt})/|(?:^|/)packages/${pkg}/src/(?:${alt})/`;
