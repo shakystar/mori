@@ -1,6 +1,7 @@
 import { CURRENT_SCHEMA_VERSION, nowIso } from "../domain/common.js";
 import type { DomainEvent } from "../domain/events.js";
 import { TASK_APPENDABLE_FIELDS } from "../domain/entities.js";
+import { TERMINAL_CONFLICT_STATUSES } from "../domain/state-machines.js";
 import type {
   Checkpoint,
   Conflict,
@@ -662,12 +663,16 @@ export function buildMemoryIndex(state: ProjectState): MemoryIndex {
         title: decision.title,
         status: decision.status,
       })),
-    openConflicts: Object.values(state.conflicts).map((conflict) => ({
-      id: conflict.id,
-      scopeType: conflict.scopeType,
-      conflictType: conflict.conflictType,
-      status: conflict.status,
-    })),
+    // Open = not in a terminal status, mirroring `listOpenConflicts`
+    // (projection-store.ts) so the two readers can't drift apart again (#148).
+    openConflicts: Object.values(state.conflicts)
+      .filter((conflict) => !TERMINAL_CONFLICT_STATUSES.includes(conflict.status))
+      .map((conflict) => ({
+        id: conflict.id,
+        scopeType: conflict.scopeType,
+        conflictType: conflict.conflictType,
+        status: conflict.status,
+      })),
     mustReadTopics: Object.values(state.rules)
       .filter((rule) => rule.source === "imported")
       .map((rule) => ({
