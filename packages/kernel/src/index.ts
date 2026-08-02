@@ -23,9 +23,28 @@ export type { ConsolidateBoundary };
 export { isEmptyMemoryContext, renderMemoryContext } from "./services/context-render.js";
 export { SESSION_START_EMBED_TIMEOUT_MS, type MemoryContext } from "./services/context-service.js";
 
+/**
+ * Per-call options for {@link ConsolidatorLlm.complete} (#167). Same shape as
+ * {@link ConsolidateCallOptions} and for the same reason: a single optional object,
+ * added once in an extensible shape, so a future field does not change the seam's
+ * signature again — every existing implementation and test stub keeps compiling
+ * unmodified because the parameter itself is optional.
+ */
+export interface ConsolidatorLlmCallOptions {
+  /**
+   * Cancels THIS extraction request at whatever transport the implementation talks
+   * to (fetch, an SDK's own cancel). #141 only checked `signal.aborted` once, before
+   * `Consolidator.extract` was ever invoked — extraction itself ran uncancellable
+   * once started. This forwards the same signal through `Consolidator.extract` into
+   * `complete`, so a cancellation arriving WHILE the request is in flight can stop it
+   * instead of only being observed before it started.
+   */
+  signal?: AbortSignal;
+}
+
 /** LLM seam for consolidation. The harness supplies an in-process implementation. */
 export interface ConsolidatorLlm {
-  complete(prompt: string): Promise<string>;
+  complete(prompt: string, opts?: ConsolidatorLlmCallOptions): Promise<string>;
   /**
    * This model's total context window, in tokens — the hard limit the
    * extraction prompt (system + user content) and its reply must fit inside
