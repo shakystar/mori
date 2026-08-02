@@ -243,20 +243,21 @@ const EXTRACTION_SYSTEM_PROMPT = [
  * hands `boundExtractionInput`. This is a MULTIPLIER (`chars = tokens *
  * CONSERVATIVE_CHARS_PER_TOKEN`), so lower is safer — it makes the derived
  * char budget UNDER-estimate how much text a given token count buys, which is
- * the conservative direction. `2` was tried first and rejected on this PR
- * (PR #168 review): byte-level BPE tokenizers commonly split a Hangul
- * syllable (3 bytes in UTF-8) into more than one token, so this project's
- * substantially Korean observations/conversation tails can run close to, or
- * above, 1 token PER CHARACTER — the opposite of `2` chars/token. Pinned to
- * the worst case the issue asks for (Korean 1 char ≥ 1 token, so chars-per-
- * token ≤ 1): `1`. Not a tokenizer — a fixed, documented approximation, per
- * the issue's explicit non-goal of adding one. `estimateTokens` also applies
- * this same low constant to the (English) system prompt, which is safe in
- * the other direction: English is comfortably below 1 char/token in reality,
- * so this OVER-counts its tokens and reserves more budget than strictly
- * needed rather than less.
+ * the conservative direction. `2`, then `1`, were both tried and rejected on
+ * this PR (PR #168 review, two rounds): a Hangul syllable is 3 bytes in UTF-8,
+ * and a byte-level BPE tokenizer's worst case is one token PER BYTE — so one
+ * Hangul character can cost up to 3 tokens, not 1. `1` chars/token still
+ * under-reserves by up to 3x for exactly the CJK-heavy content this project's
+ * observations/conversation tails are substantially made of. The floor this
+ * worst case implies is `1/3` chars/token (1 char <= 3 tokens, inverted).
+ * Not a tokenizer — a fixed, documented approximation, per the issue's
+ * explicit non-goal of adding one. `estimateTokens` also applies this same
+ * low constant to the (English) system prompt, which is safe in the other
+ * direction: English is comfortably below 3 tokens/char in reality, so this
+ * OVER-counts its tokens and reserves more budget than strictly needed
+ * rather than less.
  */
-export const CONSERVATIVE_CHARS_PER_TOKEN = 1;
+export const CONSERVATIVE_CHARS_PER_TOKEN = 1 / 3;
 
 /**
  * #143 item② — output tokens reserved out of a declared `contextWindowTokens`

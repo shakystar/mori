@@ -1077,6 +1077,16 @@ describe("consolidate — bounded input keeps the watermark self-healing (#113)"
 // small local model's real context can be smaller than the constant assumes
 // either way. `extractionCharBudget` derives the char budget from the
 // injected LLM's declared `contextWindowTokens` instead, when it has one.
+// #143 item② (PR #168 review, round 3): CONSERVATIVE_CHARS_PER_TOKEN is 1/3,
+// and `estimateTokens` applies it to the system prompt too — so a ~2.1KB
+// system prompt alone now estimates to ceil(2132 / (1/3)) = 6,396 "tokens",
+// which already exceeds a 4,000-token window before any budget is left for
+// user content. 16,000 leaves enough headroom (~2,768 derived chars, per the
+// math below) to still exercise clipping/narrow-window/drain behavior below,
+// which is the point of these tests — a window so narrow the budget floors to
+// 0 would test nothing.
+const NARROW_CONTEXT_WINDOW_TOKENS = 16_000;
+
 describe("extractionCharBudget — model-aware extraction budget (#143)", () => {
   it("falls back to MAX_EXTRACTION_INPUT_CHARS when the LLM declares no context window", () => {
     expect(extractionCharBudget(undefined)).toBe(MAX_EXTRACTION_INPUT_CHARS);
@@ -1084,7 +1094,10 @@ describe("extractionCharBudget — model-aware extraction budget (#143)", () => 
   });
 
   it("derives a strictly smaller budget from a small declared context window", () => {
-    const budget = extractionCharBudget({ complete: async () => "[]", contextWindowTokens: 4_000 });
+    const budget = extractionCharBudget({
+      complete: async () => "[]",
+      contextWindowTokens: NARROW_CONTEXT_WINDOW_TOKENS,
+    });
     expect(budget).toBeGreaterThan(0);
     expect(budget).toBeLessThan(MAX_EXTRACTION_INPUT_CHARS);
   });
@@ -1095,7 +1108,7 @@ describe("extractionCharBudget — model-aware extraction budget (#143)", () => 
     const cjk = "가".repeat(6_000);
     await seedObservation(cjk, "decision-keyword");
 
-    const llm = fakeLlmWithContext(4_000, ["[]"]);
+    const llm = fakeLlmWithContext(NARROW_CONTEXT_WINDOW_TOKENS, ["[]"]);
     await consolidate({ projectId, actor: "test", llm });
 
     expect(llm.prompts.length).toBe(1);
@@ -1104,17 +1117,19 @@ describe("extractionCharBudget — model-aware extraction budget (#143)", () => 
     // `extractionCharBudget` used to derive the budget in the first place, so
     // the assertion moves in lockstep with that constant and stays green even
     // if it regresses back to an unsafe value. Instead, estimate worst-case
-    // tokens per script independently: Hangul syllables at 1 char/token (the
-    // floor `CONSERVATIVE_CHARS_PER_TOKEN`'s doc argues for) and everything
-    // else (the English system prompt, punctuation) at a generous 4
-    // chars/token — unrelated to the production constant, so this only
-    // passes if the render is ACTUALLY within budget, not merely consistent
-    // with itself.
+    // tokens per script independently: Hangul syllables at 3 tokens/char (the
+    // worst case `CONSERVATIVE_CHARS_PER_TOKEN`'s doc argues from, round 3 of
+    // this review) and everything else (the English system prompt,
+    // punctuation) at a generous 4 chars/token — unrelated to the production
+    // constant, so this only passes if the render is ACTUALLY within budget,
+    // not merely consistent with itself.
     const prompt = llm.prompts[0]!;
     const hangulChars = prompt.match(/[가-힣]/g)?.length ?? 0;
     const otherChars = prompt.length - hangulChars;
-    const independentEstimatedTokens = hangulChars * 1 + otherChars / 4;
-    expect(independentEstimatedTokens).toBeLessThanOrEqual(4_000 - RESERVED_OUTPUT_TOKENS);
+    const independentEstimatedTokens = hangulChars * 3 + otherChars / 4;
+    expect(independentEstimatedTokens).toBeLessThanOrEqual(
+      NARROW_CONTEXT_WINDOW_TOKENS - RESERVED_OUTPUT_TOKENS,
+    );
   });
 
   it("still guarantees at least one observation per boundary and drains the backlog under a narrow declared window", async () => {
@@ -1124,7 +1139,7 @@ describe("extractionCharBudget — model-aware extraction budget (#143)", () => 
       await seedObservation(`${bigSummary} #${i}`, "decision-keyword");
     }
 
-    const llm = fakeLlmWithContext(4_000, Array(total).fill("[]"));
+    const llm = fakeLlmWithContext(NARROW_CONTEXT_WINDOW_TOKENS, Array(total).fill("[]"));
 
     const first = await consolidate({ projectId, actor: "test", llm });
     expect(first.observationsProcessed).toBeGreaterThan(0);
