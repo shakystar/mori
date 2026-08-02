@@ -27,6 +27,7 @@ import {
   getConsolidationStatus,
   parseExtractedMemories,
   readLastConsolidateAttempt,
+  resumePointsOf,
   setConsolidateWatermark,
   shouldTriggerThresholdConsolidate,
   type Consolidator,
@@ -115,7 +116,12 @@ function fakeLlm(replies: string[]): ConsolidatorLlm & { prompts: string[] } {
   };
 }
 
-/** A `ConversationSource` that replays canned slices and records requested offsets. */
+/**
+ * A `ConversationSource` that replays canned slices and records requested
+ * offsets. The canned slices carry `resumePoints: []` — the all-or-nothing
+ * contract (#144), which is what the hold behaviour below is a property of.
+ * For a source that CAN resume mid-slice, see `fakeStreamConversation`.
+ */
 function fakeConversation(
   slices: Array<ConversationSlice | undefined>,
   id = "conv-1",
@@ -128,6 +134,41 @@ function fakeConversation(
     async read(offset: number): Promise<ConversationSlice | undefined> {
       offsets.push(offset);
       return slices[i++];
+    },
+  };
+}
+
+/**
+ * A `ConversationSource` over one fixed conversation whose offset IS a char
+ * index into it — the shape a real harness has (mori's conversation is
+ * `agent.state.messages`, an in-process append-only list), and the shape that
+ * can name resume points: every turn boundary inside the returned slice.
+ *
+ * Unlike `fakeConversation` this is not a canned script — it answers whatever
+ * offset it is handed, so a test can drive boundaries until the cursor reaches
+ * the end and see whether it ever gets there (#144).
+ */
+function fakeStreamConversation(
+  full: string,
+  id = "conv-stream",
+): ConversationSource & { offsets: number[] } {
+  const offsets: number[] = [];
+  return {
+    id,
+    offsets,
+    async read(offset: number): Promise<ConversationSlice | undefined> {
+      offsets.push(offset);
+      if (offset >= full.length) return undefined;
+      const text = full.slice(offset);
+      // Turn boundaries ("\n\n") inside the slice, as prefix lengths. The
+      // offset of a prefix is just where it ends in the whole conversation,
+      // which is exactly the value `read` would need to resume there.
+      const resumePoints: Array<{ chars: number; offset: number }> = [];
+      for (let i = text.indexOf("\n\n"); i !== -1; i = text.indexOf("\n\n", i + 1)) {
+        const chars = i + 2;
+        if (chars < text.length) resumePoints.push({ chars, offset: offset + chars });
+      }
+      return { text, newOffset: full.length, resumePoints };
     },
   };
 }
@@ -353,8 +394,12 @@ describe("consolidate — supersede hints", () => {
 describe("consolidate — conversation seam", () => {
   it("feeds the slice to the extractor, writes segments, and advances the offset", async () => {
     const conversation = fakeConversation([
-      { text: "USER: why sqlite?\n\nAGENT: because it is embedded", newOffset: 512 },
-      { text: "USER: and later?\n\nAGENT: still sqlite", newOffset: 900 },
+      {
+        text: "USER: why sqlite?\n\nAGENT: because it is embedded",
+        newOffset: 512,
+        resumePoints: [],
+      },
+      { text: "USER: and later?\n\nAGENT: still sqlite", newOffset: 900, resumePoints: [] },
     ]);
     const consolidator: Consolidator = {
       async extract(input) {
@@ -376,7 +421,9 @@ describe("consolidate — conversation seam", () => {
   });
 
   it("consolidates a conversation-only boundary that captured zero observations", async () => {
-    const conversation = fakeConversation([{ text: "USER: remember the plan", newOffset: 10 }]);
+    const conversation = fakeConversation([
+      { text: "USER: remember the plan", newOffset: 10, resumePoints: [] },
+    ]);
 
     const result = await consolidate({
       projectId,
@@ -411,7 +458,9 @@ describe("consolidate — conversation seam", () => {
 
   it("skips the raw-detail buffer when MEMORIZE_RAW_SEGMENTS=0", async () => {
     process.env.MEMORIZE_RAW_SEGMENTS = "0";
-    const conversation = fakeConversation([{ text: "USER: hello", newOffset: 4 }]);
+    const conversation = fakeConversation([
+      { text: "USER: hello", newOffset: 4, resumePoints: [] },
+    ]);
 
     const result = await consolidate({
       projectId,
@@ -925,8 +974,8 @@ describe("consolidate — never consumes a conversation slice it neither showed 
     process.env.MEMORIZE_RAW_SEGMENTS = "0";
     await seedBudgetFillingObservation();
     const conversation = fakeConversation([
-      { text: "USER: this must not vanish", newOffset: 512 },
-      { text: "USER: this must not vanish\n\nUSER: more", newOffset: 900 },
+      { text: "USER: this must not vanish", newOffset: 512, resumePoints: [] },
+      { text: "USER: this must not vanish\n\nUSER: more", newOffset: 900, resumePoints: [] },
     ]);
     const seen: Array<string | undefined> = [];
     const consolidator: Consolidator = {
@@ -949,8 +998,8 @@ describe("consolidate — never consumes a conversation slice it neither showed 
   it("advances the cursor for a dropped tail when the raw buffer captured it", async () => {
     await seedBudgetFillingObservation();
     const conversation = fakeConversation([
-      { text: "USER: stored verbatim instead", newOffset: 512 },
-      { text: "USER: next", newOffset: 900 },
+      { text: "USER: stored verbatim instead", newOffset: 512, resumePoints: [] },
+      { text: "USER: next", newOffset: 900, resumePoints: [] },
     ]);
     const consolidator: Consolidator = {
       async extract() {
@@ -1005,8 +1054,8 @@ describe("consolidate — never consumes a conversation slice it neither showed 
     const sliceText = (label: string): string =>
       Array.from({ length: 40 }, (_, i) => `USER: ${label} turn ${i} `.repeat(2)).join("\n\n");
     const conversation = fakeConversation([
-      { text: sliceText("first"), newOffset: 512 },
-      { text: sliceText("second"), newOffset: 900 },
+      { text: sliceText("first"), newOffset: 512, resumePoints: [] },
+      { text: sliceText("second"), newOffset: 900, resumePoints: [] },
     ]);
     const seen: Array<string | undefined> = [];
     const consolidator: Consolidator = {
@@ -1038,8 +1087,8 @@ describe("consolidate — never consumes a conversation slice it neither showed 
     // for it, so no allocation policy can show it whole.
     const huge = Array.from({ length: 4000 }, (_, i) => `USER: line ${i}`).join("\n\n");
     const conversation = fakeConversation([
-      { text: huge, newOffset: 512 },
-      { text: `${huge}\n\nUSER: later`, newOffset: 900 },
+      { text: huge, newOffset: 512, resumePoints: [] },
+      { text: `${huge}\n\nUSER: later`, newOffset: 900, resumePoints: [] },
     ]);
     const seen: Array<string | undefined> = [];
     const consolidator: Consolidator = {
@@ -1063,14 +1112,386 @@ describe("consolidate — never consumes a conversation slice it neither showed 
     process.env.MEMORIZE_RAW_SEGMENTS = "0";
     await seedObservation("decided x");
     const conversation = fakeConversation([
-      { text: "", newOffset: 77 },
-      { text: "", newOffset: 88 },
+      { text: "", newOffset: 77, resumePoints: [] },
+      { text: "", newOffset: 88, resumePoints: [] },
     ]);
 
     await consolidate({ projectId, actor: "test", conversation });
     await consolidate({ projectId, actor: "test", conversation });
 
     expect(conversation.offsets).toEqual([0, 77]);
+  });
+});
+
+// #144: holding the cursor (above) is right but it is not a RECOVERY. A slice
+// that cannot fit the extraction budget was re-read, unchanged and only ever
+// larger, at every later boundary — the conversation axis stopped for good.
+// `ConversationSlice.resumePoints` makes partial consumption expressible, so
+// the kernel can commit the offset of the prefix it actually showed.
+describe("consolidate — drains a slice larger than the extraction budget (#144)", () => {
+  /** A conversation several times `MAX_EXTRACTION_INPUT_CHARS`, in turns no
+   *  single one of which is oversized — so the ONLY thing that can make it
+   *  consumable is cutting it at a resume point. */
+  function oversizedConversation(): string {
+    const turns = Array.from({ length: 400 }, (_, i) => `USER: turn ${i} ${"detail ".repeat(20)}`);
+    const full = turns.join("\n\n");
+    expect(full.length).toBeGreaterThan(MAX_EXTRACTION_INPUT_CHARS * 3);
+    return full;
+  }
+
+  it("drains it across boundaries, consuming exactly what each boundary was shown", async () => {
+    process.env.MEMORIZE_RAW_SEGMENTS = "0";
+    const full = oversizedConversation();
+    const conversation = fakeStreamConversation(full);
+    const shown: string[] = [];
+    const consolidator: Consolidator = {
+      async extract(input) {
+        shown.push(input.transcriptTail ?? "");
+        return [];
+      },
+    };
+
+    // Drive boundaries until the source has been read past the end. The guard
+    // is what makes this a stall test: before #144 the cursor never moved, so
+    // the loop would exhaust it with the first offset still at 0.
+    let guard = 0;
+    while ((conversation.offsets.at(-1) ?? 0) < full.length && guard < 20) {
+      const result = await consolidate({ projectId, actor: "test", conversation, consolidator });
+      expect(result.conversationSliceHeld).toBe(false);
+      guard += 1;
+    }
+
+    // ① The offset is strictly monotone and reaches the end of the slice.
+    expect(conversation.offsets.at(-1)).toBe(full.length);
+    expect(conversation.offsets.length).toBeGreaterThan(2);
+    for (let i = 1; i < conversation.offsets.length; i++) {
+      expect(conversation.offsets[i]!).toBeGreaterThan(conversation.offsets[i - 1]!);
+    }
+
+    // ② Each boundary consumed only what it was SHOWN: the region the cursor
+    //    moved over is a substring of that boundary's extraction input, so the
+    //    cursor can never have run past the extractor.
+    const consumed = conversation.offsets
+      .slice(1)
+      .map((offset, i) => full.slice(conversation.offsets[i]!, offset));
+    expect(shown).toHaveLength(consumed.length);
+    consumed.forEach((region, i) => {
+      expect(region.length).toBeGreaterThan(0);
+      expect(shown[i]!).toContain(region);
+    });
+
+    // ③ Zero regions lost: the consumed regions tile the conversation exactly
+    //    — no gap (a skipped stretch) and no overlap (a re-consumed one). The
+    //    unshown remainder of each boundary is precisely the next one's input.
+    expect(consumed.join("")).toBe(full);
+
+    // ④ The hold this issue was opened about no longer fires, on the result or
+    //    on the attempt telemetry.
+    expect(readLastConsolidateAttempt(projectId)?.conversationSliceHeld).toBeUndefined();
+  });
+
+  it("ignores resume points that would move the cursor over unshown content", async () => {
+    process.env.MEMORIZE_RAW_SEGMENTS = "0";
+    const huge = Array.from({ length: 4000 }, (_, i) => `USER: line ${i}`).join("\n\n");
+    // Every point is invalid in a different way: past the slice's own end,
+    // backwards from the current cursor, and outside the text. A source that
+    // hands these over must not be able to consume anything.
+    const bogus = [
+      { chars: 100, offset: 999_999 },
+      { chars: 200, offset: 0 },
+      { chars: huge.length + 10, offset: 5 },
+    ];
+    const conversation = fakeConversation([
+      { text: huge, newOffset: 512, resumePoints: bogus },
+      { text: `${huge}\n\nUSER: later`, newOffset: 900, resumePoints: bogus },
+    ]);
+    const consolidator: Consolidator = {
+      async extract() {
+        return [];
+      },
+    };
+
+    const first = await consolidate({ projectId, actor: "test", conversation, consolidator });
+    expect(first.conversationSliceHeld).toBe(true);
+
+    await consolidate({ projectId, actor: "test", conversation, consolidator });
+    expect(conversation.offsets).toEqual([0, 0]);
+  });
+
+  // A source that hands over `[null, …]` is not hypothetical: `resumePoints`
+  // crosses the harness boundary, so it may arrive from JSON or untyped JS.
+  // Reading `.chars` off such an element would throw INSIDE the boundary, and
+  // `read` is contractually allowed to be unhelpful but never to fail — so one
+  // bad element must cost only itself, not the slice's ability to drain.
+  it("drains past malformed resume-point entries instead of failing the boundary", async () => {
+    process.env.MEMORIZE_RAW_SEGMENTS = "0";
+    const full = oversizedConversation();
+    const base = fakeStreamConversation(full);
+    const conversation: ConversationSource & { offsets: number[] } = {
+      id: base.id,
+      offsets: base.offsets,
+      async read(offset: number): Promise<ConversationSlice | undefined> {
+        const slice = await base.read(offset);
+        if (!slice) return slice;
+        // Poison the array around the real points, so a validator that trips
+        // on the first bad element loses the good ones behind it too.
+        return {
+          ...slice,
+          resumePoints: [
+            null,
+            undefined,
+            42,
+            "nope",
+            ...slice.resumePoints,
+            null,
+          ] as unknown as ConversationSlice["resumePoints"],
+        };
+      },
+    };
+    const consolidator: Consolidator = {
+      async extract() {
+        return [];
+      },
+    };
+
+    let guard = 0;
+    while ((conversation.offsets.at(-1) ?? 0) < full.length && guard < 20) {
+      const result = await consolidate({ projectId, actor: "test", conversation, consolidator });
+      expect(result.conversationSliceHeld).toBe(false);
+      guard += 1;
+    }
+
+    // The surviving points still drain the slice to the end, monotonically —
+    // i.e. the malformed entries were dropped individually, not fatally.
+    expect(conversation.offsets.at(-1)).toBe(full.length);
+    expect(conversation.offsets.length).toBeGreaterThan(2);
+    for (let i = 1; i < conversation.offsets.length; i++) {
+      expect(conversation.offsets[i]!).toBeGreaterThan(conversation.offsets[i - 1]!);
+    }
+  });
+
+  // The `offset === newOffset` hole: an INTERNAL point (`chars < text.length`)
+  // that declares the whole slice's cursor. It fits any budget, so it would be
+  // picked for an oversized tail, and committing it drops `text.slice(chars)`
+  // unshown and unstored. The bound has to be strict for internal points.
+  it("holds rather than consuming an internal resume point that carries the terminal offset", async () => {
+    process.env.MEMORIZE_RAW_SEGMENTS = "0";
+    const huge = Array.from({ length: 4000 }, (_, i) => `USER: line ${i}`).join("\n\n");
+    // `chars: 100` is a tiny prefix that trivially fits the budget, while the
+    // slice as a whole does not — the exact case the point would be chosen for.
+    const terminal = [{ chars: 100, offset: 512 }];
+    const conversation = fakeConversation([
+      { text: huge, newOffset: 512, resumePoints: terminal },
+      { text: huge, newOffset: 512, resumePoints: terminal },
+    ]);
+    const shown: string[] = [];
+    const consolidator: Consolidator = {
+      async extract(input) {
+        shown.push(input.transcriptTail ?? "");
+        return [];
+      },
+    };
+
+    const first = await consolidate({ projectId, actor: "test", conversation, consolidator });
+    expect(first.conversationSliceHeld).toBe(true);
+    // Nothing was consumed on the strength of that point: had it been kept,
+    // the boundary would have shown the 100-char prefix and committed 512.
+    expect(shown[0]).not.toBe(huge.slice(0, 100));
+
+    await consolidate({ projectId, actor: "test", conversation, consolidator });
+    // The cursor never moved, so the unshown suffix is back in the next
+    // boundary's input in full — held, not lost.
+    expect(conversation.offsets).toEqual([0, 0]);
+  });
+
+  // The deliberate limit of the design, pinned so it cannot drift into being
+  // an accident: with the raw buffer ON the tail is not prefix-cut, because the
+  // stored copy — not the shown prefix — is what consumes the slice, and
+  // cutting to the OLDEST turns would cost the extractor the most actionable
+  // content for a resumability that would then never be used. So a slice whose
+  // own segments are pruned back out (#139) still holds, and it is the raw
+  // buffer, not the resume points, that has to give way.
+  it("keeps showing the NEWEST turns with the raw buffer on, and still holds when its segments are pruned", async () => {
+    const full = oversizedConversation();
+    const shown: string[] = [];
+    const consolidator: Consolidator = {
+      async extract(input) {
+        shown.push(input.transcriptTail ?? "");
+        return [];
+      },
+    };
+
+    const stored = fakeStreamConversation(full, "conv-stored");
+    const withRawBuffer = await consolidate({
+      projectId,
+      actor: "test",
+      conversation: stored,
+      consolidator,
+      // Evicts all but one of this boundary's own chunks, so "stored WHOLE" is
+      // false — the only other way to consume the slice.
+      segmentRetention: { maxCount: 1 },
+    });
+    expect(withRawBuffer.segmentsWritten).toBeGreaterThan(1);
+    expect(withRawBuffer.conversationSliceHeld).toBe(true);
+    // The turns nearest the boundary, not the oldest ones.
+    expect(shown[0]!.endsWith(full.slice(full.length - 200))).toBe(true);
+
+    // Same slice, raw buffer off: now the tail is the only copy, so it is
+    // reserved — and reserved as a resumable PREFIX, which drains.
+    process.env.MEMORIZE_RAW_SEGMENTS = "0";
+    const onlyCopy = fakeStreamConversation(full, "conv-only-copy");
+    const drained = await consolidate({
+      projectId,
+      actor: "test",
+      conversation: onlyCopy,
+      consolidator,
+    });
+    expect(drained.conversationSliceHeld).toBe(false);
+    expect(shown[1]!.startsWith(full.slice(0, 200))).toBe(true);
+  });
+});
+
+describe("boundExtractionInput — resumable tail cut (#144)", () => {
+  /** 50 short turns plus the turn-boundary prefix lengths inside them. */
+  function turnsWithResumePoints(): { text: string; prefixes: number[] } {
+    const text = Array.from({ length: 50 }, (_, i) => `USER: turn ${i} ${"x".repeat(30)}`).join(
+      "\n\n",
+    );
+    const prefixes: number[] = [];
+    for (let i = text.indexOf("\n\n"); i !== -1; i = text.indexOf("\n\n", i + 1)) {
+      if (i + 2 < text.length) prefixes.push(i + 2);
+    }
+    return { text, prefixes };
+  }
+
+  it("keeps the OLDEST prefix ending on a resume point, within an injected budget", () => {
+    const { text, prefixes } = turnsWithResumePoints();
+    const maxChars = 900;
+
+    const bounded = boundExtractionInput(
+      { observations: [], existingMemories: [], transcriptTail: text },
+      { maxChars, tailResumePrefixes: prefixes },
+    );
+
+    expect(bounded.transcriptTailCoverage).toBe("prefix");
+    expect(prefixes).toContain(bounded.transcriptTailPrefixChars);
+    // The shown tail STARTS the conversation — the cut is a prefix, so what it
+    // leaves out is the newer end, which the next boundary re-reads.
+    const kept = bounded.transcriptTailPrefixChars!;
+    expect(bounded.transcriptTail!.startsWith(text.slice(0, kept))).toBe(true);
+    expect(buildExtractionUserContent(bounded).length).toBeLessThanOrEqual(maxChars);
+    // Largest fitting point: the next one up overruns the budget. Read the
+    // trim marker off the result rather than restating it, so this stays a
+    // statement about the CUT and not about the marker's wording.
+    const marker = bounded.transcriptTail!.slice(kept);
+    const next = prefixes[prefixes.indexOf(kept) + 1]!;
+    expect(
+      buildExtractionUserContent({
+        observations: [],
+        existingMemories: [],
+        transcriptTail: `${text.slice(0, next)}${marker}`,
+      }).length,
+    ).toBeGreaterThan(maxChars);
+  });
+
+  it("falls back to the newest-suffix clip when the source declares no resume points", () => {
+    const { text } = turnsWithResumePoints();
+
+    const bounded = boundExtractionInput(
+      { observations: [], existingMemories: [], transcriptTail: text },
+      { maxChars: 900 },
+    );
+
+    expect(bounded.transcriptTailCoverage).toBe("clipped");
+    expect(bounded.transcriptTailPrefixChars).toBeUndefined();
+    expect(bounded.transcriptTail!.endsWith(text.slice(text.length - 100))).toBe(true);
+  });
+
+  it("shows nothing when not even the smallest resume point fits", () => {
+    const { text, prefixes } = turnsWithResumePoints();
+
+    const bounded = boundExtractionInput(
+      { observations: [], existingMemories: [], transcriptTail: text },
+      { maxChars: 200, tailResumePrefixes: prefixes },
+    );
+
+    expect(bounded.transcriptTailCoverage).not.toBe("prefix");
+    expect(bounded.transcriptTailPrefixChars).toBeUndefined();
+  });
+});
+
+describe("resumePointsOf (#144)", () => {
+  const slice = (points: Array<{ chars: number; offset: number }>): ConversationSlice => ({
+    text: "a".repeat(100),
+    newOffset: 1000,
+    resumePoints: points,
+  });
+
+  it("keeps in-range forward points, sorted by prefix length", () => {
+    expect([
+      ...resumePointsOf(
+        slice([
+          { chars: 60, offset: 960 },
+          { chars: 20, offset: 920 },
+        ]),
+        900,
+      ),
+    ]).toEqual([
+      [20, 920],
+      [60, 960],
+    ]);
+  });
+
+  it("drops points outside the text, past the slice, or not moving forward", () => {
+    expect([
+      ...resumePointsOf(
+        slice([
+          { chars: 0, offset: 950 },
+          { chars: 100, offset: 950 },
+          { chars: 150, offset: 950 },
+          { chars: 10.5, offset: 950 },
+          { chars: 30, offset: 1001 },
+          { chars: 40, offset: 900 },
+          { chars: 50, offset: 950 },
+        ]),
+        900,
+      ),
+    ]).toEqual([[50, 950]]);
+  });
+
+  // A `ConversationSource` is harness code and may be plain JS or JSON-backed,
+  // so a malformed ELEMENT has to degrade the same way a malformed `resumePoints`
+  // does: dropped individually, never dereferenced into a thrown boundary.
+  it("drops non-object entries without throwing, keeping the valid ones", () => {
+    const points = [null, undefined, 42, "50", { chars: 50, offset: 950 }] as unknown as Array<{
+      chars: number;
+      offset: number;
+    }>;
+    expect([...resumePointsOf(slice(points), 900)]).toEqual([[50, 950]]);
+  });
+
+  // The one shape the old `offset <= newOffset` bound let through: a point
+  // INSIDE the text carrying the cursor for the WHOLE slice. Committing it
+  // would consume `text.slice(chars)` while only the prefix was ever shown —
+  // exactly the loss #136 closed.
+  it("drops an internal point that declares the slice's terminal offset", () => {
+    expect([...resumePointsOf(slice([{ chars: 50, offset: 1000 }]), 900)]).toEqual([]);
+  });
+
+  it("drops a point whose offset goes backwards relative to a shorter prefix", () => {
+    expect([
+      ...resumePointsOf(
+        slice([
+          { chars: 20, offset: 960 },
+          { chars: 60, offset: 930 },
+          { chars: 80, offset: 980 },
+        ]),
+        900,
+      ),
+    ]).toEqual([
+      [20, 960],
+      [80, 980],
+    ]);
   });
 });
 
@@ -1084,8 +1505,8 @@ describe("consolidate — atomic boundary cursor commit (#139)", () => {
   it("advances both cursors from one boundary that has both an observation and a conversation slice", async () => {
     await seedObservation("decided x");
     const conversation = fakeConversation([
-      { text: "USER: hi", newOffset: 50 },
-      { text: "USER: later", newOffset: 90 },
+      { text: "USER: hi", newOffset: 50, resumePoints: [] },
+      { text: "USER: later", newOffset: 90, resumePoints: [] },
     ]);
 
     expect(getConsolidateWatermark(projectId)).toBeUndefined();
@@ -1129,7 +1550,9 @@ describe("consolidate — atomic boundary cursor commit (#139)", () => {
   });
 
   it("does not advance the event watermark on a conversation-only boundary with zero observations", async () => {
-    const conversation = fakeConversation([{ text: "USER: remember the plan", newOffset: 10 }]);
+    const conversation = fakeConversation([
+      { text: "USER: remember the plan", newOffset: 10, resumePoints: [] },
+    ]);
 
     const result = await consolidate({
       projectId,
@@ -1145,7 +1568,10 @@ describe("consolidate — atomic boundary cursor commit (#139)", () => {
     expect(result.observationsProcessed).toBe(0);
     expect(getConsolidateWatermark(projectId)).toBeUndefined();
     // The conversation offset DID advance — resuming reads from 10, not 0.
-    const conversation2 = fakeConversation([{ text: "USER: more", newOffset: 20 }], "conv-1");
+    const conversation2 = fakeConversation(
+      [{ text: "USER: more", newOffset: 20, resumePoints: [] }],
+      "conv-1",
+    );
     await consolidate({ projectId, actor: "test", conversation: conversation2 });
     expect(conversation2.offsets).toEqual([10]);
   });
@@ -1164,8 +1590,8 @@ describe("consolidate — atomic boundary cursor commit (#139)", () => {
     // memories make room for it, so no allocation policy can show it whole.
     const huge = Array.from({ length: 4000 }, (_, i) => `USER: line ${i}`).join("\n\n");
     const conversation = fakeConversation([
-      { text: huge, newOffset: 512 },
-      { text: `${huge}\n\nUSER: later`, newOffset: 900 },
+      { text: huge, newOffset: 512, resumePoints: [] },
+      { text: `${huge}\n\nUSER: later`, newOffset: 900, resumePoints: [] },
     ]);
     const consolidator: Consolidator = {
       async extract() {
@@ -1197,8 +1623,8 @@ describe("consolidate — atomic boundary cursor commit (#139)", () => {
     // "stored WHOLE", which retention is about to falsify.
     const huge = Array.from({ length: 4000 }, (_, i) => `USER: line ${i}`).join("\n\n");
     const conversation = fakeConversation([
-      { text: huge, newOffset: 512 },
-      { text: `${huge}\n\nUSER: later`, newOffset: 900 },
+      { text: huge, newOffset: 512, resumePoints: [] },
+      { text: `${huge}\n\nUSER: later`, newOffset: 900, resumePoints: [] },
     ]);
     const consolidator: Consolidator = {
       async extract() {
@@ -1238,8 +1664,8 @@ describe("consolidate — atomic boundary cursor commit (#139)", () => {
       { id: "seg_filler_2", createdAt: "2020-01-01T00:00:00.000Z", ordinal: 1, text: "old 2" },
     ]);
     const conversation = fakeConversation([
-      { text: "USER: stored verbatim instead", newOffset: 512 },
-      { text: "USER: next", newOffset: 900 },
+      { text: "USER: stored verbatim instead", newOffset: 512, resumePoints: [] },
+      { text: "USER: next", newOffset: 900, resumePoints: [] },
     ]);
     const consolidator: Consolidator = {
       async extract() {
@@ -1262,8 +1688,8 @@ describe("consolidate — atomic boundary cursor commit (#139)", () => {
   it("rolls back the event watermark when the conversation-offset write fails, so neither cursor advances", async () => {
     await seedObservation("decided x");
     const conversation = fakeConversation([
-      { text: "USER: hi", newOffset: 50 },
-      { text: "USER: hi", newOffset: 50 },
+      { text: "USER: hi", newOffset: 50, resumePoints: [] },
+      { text: "USER: hi", newOffset: 50, resumePoints: [] },
     ]);
     const consolidator: Consolidator = {
       async extract() {
