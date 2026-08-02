@@ -5,6 +5,7 @@ import { consolidateExplicit } from "./consolidation.js";
 import {
   replBanner,
   replClearedMessage,
+  replConsolidateCancelledMessage,
   replConsolidateFailedMessage,
   replConsolidateOkMessage,
   replConsolidateSkippedMessage,
@@ -88,10 +89,26 @@ export async function runRepl(
       }
 
       if (text === CONSOLIDATE_COMMAND) {
-        const outcome = await consolidateExplicit(consolidation.kernel, consolidation.llm);
-        if (outcome.kind === "skipped") stdout(replConsolidateSkippedMessage());
-        else if (outcome.kind === "ok") stdout(replConsolidateOkMessage());
-        else stderr(replConsolidateFailedMessage(outcome.error));
+        // A boundary can run for minutes (it includes an extraction LLM call), so it needs
+        // its own cancellation path rather than relying on `agent.abort()` above, which only
+        // ever affects a running turn. This handler is added ON TOP of `stopListening` for
+        // the duration of the call and removed once it settles — Ctrl-C during `/consolidate`
+        // then fires both (agent.abort() is a harmless no-op with no turn running).
+        const controller = new AbortController();
+        const stopConsolidateInterrupt = input.onInterrupt(() => controller.abort());
+        try {
+          const outcome = await consolidateExplicit(
+            consolidation.kernel,
+            consolidation.llm,
+            controller.signal,
+          );
+          if (outcome.kind === "skipped") stdout(replConsolidateSkippedMessage());
+          else if (outcome.kind === "ok") stdout(replConsolidateOkMessage());
+          else if (outcome.kind === "cancelled") stderr(replConsolidateCancelledMessage());
+          else stderr(replConsolidateFailedMessage(outcome.error));
+        } finally {
+          stopConsolidateInterrupt();
+        }
         continue;
       }
 

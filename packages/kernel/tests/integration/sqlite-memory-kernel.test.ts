@@ -12,6 +12,7 @@ import {
   SqliteMemoryKernel,
   type ObservedToolCall,
 } from "../../src/kernel/sqlite-memory-kernel.js";
+import { readLastConsolidateAttempt } from "../../src/services/consolidate-service.js";
 import { listValidMemories, listRecentObservations } from "../../src/services/projection-store.js";
 import { closeAll } from "../../src/storage/db.js";
 import { readEvents } from "../../src/storage/event-store.js";
@@ -174,6 +175,42 @@ describe("SqliteMemoryKernel.consolidate", () => {
 
     expect(result.observationsProcessed).toBe(1);
     expect(result.extractor).toBe("llm");
+  });
+
+  describe("boundary labels (#141)", () => {
+    const llm: ConsolidatorLlm = {
+      async complete() {
+        return "[]";
+      },
+    };
+
+    it("records a different boundary label per call on the same kernel instance", async () => {
+      // No `boundary` fixed at construction — this is the shape a fixed, instance-level
+      // label could never pass: the SAME instance must be able to serve both triggers.
+      const kernel = kernelFor();
+
+      kernel.observe(observedShell({ toolName: "bash", command: "git commit -m one" }));
+      await kernel.consolidate(llm, { boundary: "session-end" });
+      expect(readLastConsolidateAttempt(projectId)?.boundary).toBe("session-end");
+
+      kernel.observe(observedShell({ toolName: "bash", command: "git commit -m two" }));
+      await kernel.consolidate(llm, { boundary: "manual" });
+      expect(readLastConsolidateAttempt(projectId)?.boundary).toBe("manual");
+    });
+
+    it("prefers the per-call boundary over the one fixed at construction", async () => {
+      // `options.boundary` is a fallback ONLY — a construction-time label must not win over
+      // a call that names its own.
+      const kernel = kernelFor({ boundary: "post-compact" });
+
+      kernel.observe(observedShell({ toolName: "bash", command: "git commit -m one" }));
+      await kernel.consolidate(llm);
+      expect(readLastConsolidateAttempt(projectId)?.boundary).toBe("post-compact");
+
+      kernel.observe(observedShell({ toolName: "bash", command: "git commit -m two" }));
+      await kernel.consolidate(llm, { boundary: "manual" });
+      expect(readLastConsolidateAttempt(projectId)?.boundary).toBe("manual");
+    });
   });
 });
 
