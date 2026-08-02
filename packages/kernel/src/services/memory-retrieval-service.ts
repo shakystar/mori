@@ -195,11 +195,11 @@ export async function retrieveSegments(
 /**
  * Reinforcement stamp for the memories that were actually injected.
  * Projection-only UPDATE — events stay append-only.
+ *
+ * Takes ids rather than `RankedMemory[]` (mori#176): the caller that actually
+ * knows injection succeeded is the harness-facing kernel seam, which only has
+ * the flattened {@link MemoryContext} shape, not the ranked retrieval pool.
  */
-export function reinforceInjectedMemories(projectId: string, memories: RankedMemory[]): void {
-  touchMemoryAccess(
-    projectId,
-    memories.map((entry) => entry.memory.id),
-    nowIso(),
-  );
+export function reinforceInjectedMemories(projectId: string, memoryIds: string[]): void {
+  touchMemoryAccess(projectId, memoryIds, nowIso());
 }

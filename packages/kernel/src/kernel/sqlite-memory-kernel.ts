@@ -34,6 +34,7 @@ import {
 } from "../services/consolidate-service.js";
 import { isEmptyMemoryContext } from "../services/context-render.js";
 import { buildMemoryContext, type MemoryContext } from "../services/context-service.js";
+import { reinforceInjectedMemories } from "../services/memory-retrieval-service.js";
 import {
   appendEvent,
   ensureProjectDirectories,
@@ -271,6 +272,23 @@ export class SqliteMemoryKernel<M, E> implements MemoryKernel<M, E> {
     } catch {
       return messages;
     }
+
+    // Reinforce AFTER render succeeded, never before (mori#176): stamping
+    // `last_accessed_at`/`injection_count` on a memory the model never saw
+    // (the render above throws for PR #175's "harness renderer throws" case)
+    // would corrupt future CLS ranking with retrieval telemetry for content
+    // that was never actually injected. Best-effort and isolated the same way
+    // — a reinforcement failure (e.g. a lock held by another process) must not
+    // undo the successful render computed above.
+    try {
+      reinforceInjectedMemories(
+        this.options.projectId,
+        context.consolidatedMemories?.map((memory) => memory.id) ?? [],
+      );
+    } catch {
+      // best-effort — see comment above.
+    }
+
     return [injected, ...messages];
   }
 

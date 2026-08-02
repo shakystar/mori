@@ -14,8 +14,9 @@ import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { CURRENT_SCHEMA_VERSION } from "../../src/domain/common.js";
 import { createProject } from "../../src/domain/entities.js";
 import {
   observedShell,
@@ -24,7 +25,11 @@ import {
 } from "../../src/kernel/sqlite-memory-kernel.js";
 import { renderMemoryContext } from "../../src/services/context-render.js";
 import { buildMemoryContext, type MemoryContext } from "../../src/services/context-service.js";
-import { rebuildProjectProjection } from "../../src/services/projection-store.js";
+import * as memoryRetrievalService from "../../src/services/memory-retrieval-service.js";
+import {
+  listValidMemories,
+  rebuildProjectProjection,
+} from "../../src/services/projection-store.js";
 import { closeAll } from "../../src/storage/db.js";
 import { appendEvent } from "../../src/storage/event-store.js";
 import { getProjectDbFile } from "../../src/storage/path-resolver.js";
@@ -64,6 +69,34 @@ function harness(options: { renderContext?: boolean; throwOnRender?: boolean } =
 async function seedObservation(kernel: SqliteMemoryKernel<string, FakeEvent>): Promise<void> {
   kernel.observe(observedShell({ toolName: "bash", command: "git commit -m 'pick zephyr'" }));
   await kernel.drain();
+}
+
+/**
+ * A consolidated memory, seeded directly (not via `observe`/`consolidate`) —
+ * only `consolidatedMemories` are reinforced (mori#176), so the reinforcement
+ * tests need this channel specifically, not the observation tail that
+ * {@link seedObservation} produces.
+ */
+async function seedMemory(id: string, text: string): Promise<void> {
+  const createdAt = "2026-01-01T00:00:00.000Z";
+  await appendEvent({
+    type: "memory.consolidated",
+    projectId,
+    scopeType: "project",
+    scopeId: projectId,
+    actor: "test",
+    payload: {
+      id,
+      schemaVersion: CURRENT_SCHEMA_VERSION,
+      createdAt,
+      updatedAt: createdAt,
+      projectId,
+      kind: "insight",
+      text,
+      salience: 5,
+      sourceObservationIds: [],
+    } as never,
+  });
 }
 
 /** Store that exists and is healthy but holds nothing retrievable. */
@@ -187,5 +220,57 @@ describe("SqliteMemoryKernel.transformContext — session-start injection", () =
     const messages = ["one", "two"];
 
     await expect(kernel.transformContext(messages)).resolves.toEqual(messages);
+  });
+
+  describe("reinforcement (mori#176)", () => {
+    it("reinforces the injected memories once the render has actually succeeded", async () => {
+      await seedEmptyStore();
+      await seedMemory("mem_a", "chose zephyr as the deploy target");
+      await rebuildProjectProjection(projectId);
+      const { kernel } = harness();
+
+      const result = await kernel.transformContext(["one"]);
+
+      expect(injectedCount(result)).toBe(1);
+      const row = listValidMemories(projectId).find((r) => r.memory.id === "mem_a");
+      expect(row?.lastAccessedAt).toBeDefined();
+    });
+
+    it("does not reinforce when the harness's renderer throws — the memory was never actually shown", async () => {
+      await seedEmptyStore();
+      await seedMemory("mem_a", "chose zephyr as the deploy target");
+      await rebuildProjectProjection(projectId);
+      const { kernel } = harness({ throwOnRender: true });
+
+      await expect(kernel.transformContext(["one"])).resolves.toEqual(["one"]);
+
+      const row = listValidMemories(projectId).find((r) => r.memory.id === "mem_a");
+      expect(row?.lastAccessedAt).toBeUndefined();
+    });
+
+    it("still returns the rendered injection when reinforcement itself fails", async () => {
+      await seedEmptyStore();
+      await seedMemory("mem_a", "chose zephyr as the deploy target");
+      await rebuildProjectProjection(projectId);
+      const { kernel } = harness();
+      const spy = vi
+        .spyOn(memoryRetrievalService, "reinforceInjectedMemories")
+        .mockImplementation(() => {
+          throw new Error("reinforcement boom — e.g. a lock held by another process");
+        });
+
+      try {
+        const result = await kernel.transformContext(["one"]);
+        // The bug this guards against (mori#176 ①): a reinforcement failure
+        // used to reject buildMemoryContext entirely, which the kernel's catch
+        // then treated as a retrieval failure — throwing away a perfectly good,
+        // already-retrieved context. Reinforcement now runs after render, on
+        // the side, so its failure must not cost the injection that already
+        // succeeded.
+        expect(injectedCount(result)).toBe(1);
+      } finally {
+        spy.mockRestore();
+      }
+    });
   });
 });
