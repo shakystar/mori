@@ -11,6 +11,7 @@ import {
   observedWrite,
   SqliteMemoryKernel,
   type ObservedToolCall,
+  type SqliteMemoryKernelOptions,
 } from "../../src/kernel/sqlite-memory-kernel.js";
 import { readLastConsolidateAttempt } from "../../src/services/consolidate-service.js";
 import { listValidMemories, listRecentObservations } from "../../src/services/projection-store.js";
@@ -40,7 +41,7 @@ function recordingEmbedder(): { embedder: Embedder; calls: string[] } {
 }
 
 function kernelFor(
-  options: Partial<ConstructorParameters<typeof SqliteMemoryKernel>[0]> = {},
+  options: Partial<SqliteMemoryKernelOptions<string, FakeEvent>> = {},
 ): SqliteMemoryKernel<string, FakeEvent> {
   return new SqliteMemoryKernel<string, FakeEvent>({
     projectId,
@@ -215,7 +216,9 @@ describe("SqliteMemoryKernel.consolidate", () => {
 });
 
 describe("SqliteMemoryKernel.transformContext", () => {
-  it("passes messages through untouched (retrieval injection is #5)", async () => {
+  it("passes messages through untouched without a `renderContext` seam", async () => {
+    // Session-start injection needs the harness to say what a message is; the
+    // rest of its contract lives in kernel-context-injection.test.ts.
     const messages = ["one", "two"];
 
     await expect(kernelFor().transformContext(messages)).resolves.toEqual(messages);

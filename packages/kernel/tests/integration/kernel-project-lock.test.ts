@@ -19,6 +19,7 @@ import {
   observedShell,
   SqliteMemoryKernel,
   type ObservedToolCall,
+  type SqliteMemoryKernelOptions,
 } from "../../src/kernel/sqlite-memory-kernel.js";
 import { listRecentObservations, listValidMemories } from "../../src/services/projection-store.js";
 import { closeAll } from "../../src/storage/db.js";
@@ -31,7 +32,7 @@ let sandbox: string;
 const projectId = "proj_kernel_lock_test";
 
 function kernelFor(
-  options: Partial<ConstructorParameters<typeof SqliteMemoryKernel>[0]> = {},
+  options: Partial<SqliteMemoryKernelOptions<string, FakeEvent>> = {},
 ): SqliteMemoryKernel<string, FakeEvent> {
   return new SqliteMemoryKernel<string, FakeEvent>({
     projectId,

@@ -9,6 +9,10 @@
  * - **Its event vocabulary.** `observe(event: E)` cannot know what `E` is, so the
  *   harness injects {@link SqliteMemoryKernelOptions.observeEvent}, mapping one
  *   loop event to an {@link ObservedToolCall} (or nothing).
+ * - **Its message vocabulary.** `transformContext(messages: M[])` cannot build an
+ *   `M` either, so session-start injection is split the same way: the kernel
+ *   decides WHAT to inject (retrieval, emptiness, once-per-session), the harness
+ *   turns it into a message through {@link SqliteMemoryKernelOptions.renderContext}.
  * - **Its configuration.** `projectId`, `actor`, and the `ConsolidatorLlm` /
  *   `Embedder` / `ConversationSource` seams arrive as parameters; nothing here
  *   reads env or config, and nothing here spawns a process.
@@ -28,7 +32,14 @@ import {
   type ConsolidateBoundary,
   type ConsolidateResult,
 } from "../services/consolidate-service.js";
-import { appendEvent, ensureProjectDirectories, hasGenesisEvent } from "../storage/event-store.js";
+import { isEmptyMemoryContext } from "../services/context-render.js";
+import { buildMemoryContext, type MemoryContext } from "../services/context-service.js";
+import {
+  appendEvent,
+  ensureProjectDirectories,
+  hasGenesisEvent,
+  projectStoreExists,
+} from "../storage/event-store.js";
 import { withProjectLock } from "../storage/project-lock.js";
 
 /**
@@ -100,7 +111,7 @@ export function observedShell(call: {
  */
 export type ToolCallObserver<E> = (event: E) => ObservedToolCall | undefined;
 
-export interface SqliteMemoryKernelOptions<E> {
+export interface SqliteMemoryKernelOptions<M, E> {
   /** Store identity — which project's event log this kernel writes to. */
   projectId: string;
   /** Provenance recorded as `actor` on every appended event. */
@@ -115,8 +126,39 @@ export interface SqliteMemoryKernelOptions<E> {
   sessionId?: string;
   /** The harness's event → capture-candidate mapping. */
   observeEvent: ToolCallObserver<E>;
+  /**
+   * The harness's retrieved-context → message mapping, symmetric with
+   * {@link observeEvent}: `transformContext` cannot build an `M`, so the harness
+   * says what one looks like. Called at most ONCE per kernel, only with a
+   * non-empty context, and never with a context this kernel has already
+   * injected. `renderMemoryContext` (services/context-render.ts) is the default
+   * body for it — a harness normally only wraps that string in its own message
+   * shape.
+   *
+   * ABSENT ⇒ no session-start injection at all, and no retrieval either: a
+   * harness that cannot represent the message must not pay for the read.
+   *
+   * Must not throw. One that does is treated exactly like a failed retrieval
+   * (the turn proceeds with the original messages), but it burns the session's
+   * single injection.
+   */
+  renderContext?: (context: MemoryContext) => M;
   /** Semantic index seam, forwarded to consolidation. Absent ⇒ FTS-only. */
   embedder?: Embedder;
+  /**
+   * Semantic index seam for SESSION-START retrieval, separate from
+   * {@link embedder} because their latency budgets are opposites: consolidation
+   * embeds whole windows and wants the full HTTP budget, session start runs
+   * before the agent's first answer and is capped by
+   * `SESSION_START_EMBED_TIMEOUT_MS` (context-service.ts), which the harness
+   * bakes into the client it builds.
+   *
+   * Deliberately NOT falling back to `embedder`: borrowing the consolidation
+   * client would put a 20s network call in front of the first turn, which is the
+   * exact failure that budget exists to prevent. Absent ⇒ this channel degrades
+   * to FTS-only, the documented "works without a key" behaviour.
+   */
+  contextEmbedder?: Embedder;
   /** Conversation seam, forwarded to consolidation. Absent ⇒ observation-only boundary. */
   conversation?: ConversationSource;
   /** Telemetry label for the boundary this kernel's `consolidate()` represents. */
@@ -130,7 +172,7 @@ export interface SqliteMemoryKernelOptions<E> {
 }
 
 export class SqliteMemoryKernel<M, E> implements MemoryKernel<M, E> {
-  private readonly options: SqliteMemoryKernelOptions<E>;
+  private readonly options: SqliteMemoryKernelOptions<M, E>;
 
   /**
    * Serialization chain for queued captures. Appends run one at a time and in
@@ -149,18 +191,87 @@ export class SqliteMemoryKernel<M, E> implements MemoryKernel<M, E> {
    */
   private genesis: Promise<void> | undefined;
 
-  constructor(options: SqliteMemoryKernelOptions<E>) {
+  /**
+   * Whether this kernel has already spent its one session-start retrieval —
+   * see {@link transformContext}. "Attempted", not "injected": a retrieval that
+   * failed or found nothing is not retried on the next turn, because retrying
+   * every turn IS turn-level retrieval (#5 2/3), not this seam.
+   */
+  private contextAttempted = false;
+
+  constructor(options: SqliteMemoryKernelOptions<M, E>) {
     this.options = options;
   }
 
   /**
-   * Passthrough, deliberately. Turn-level retrieval injection is #5's job: doing
-   * it here would put the same decision (what to inject, in which message, under
-   * what budget) in two places, and this issue's contract is only that the
-   * seam's read side exists and stays cheap.
+   * Session-start memory injection (#5 1/3).
+   *
+   * The FIRST call assembles this project's memory context and returns
+   * `[rendered, ...messages]`; every later call passes `messages` through
+   * untouched. One kernel is one session (mori builds one per CLI process), so
+   * "first call" and "session start" are the same moment. TURN-LEVEL retrieval —
+   * a fresh query per turn, driven by the conversation — is #5 2/3 and lands on
+   * this seam rather than replacing it.
+   *
+   * NEVER THROWS, for the same reason `observe` does not, only harder: this runs
+   * immediately before every LLM call (`transformContext` in pi-agent-core's
+   * agent loop, whose own contract is "must not throw or reject"). A failed
+   * retrieval degrades the answer; a thrown one kills the turn.
+   *
+   * Head position is deliberate. The memory block is background for the whole
+   * conversation, not a reply to the newest user message, and appending it last
+   * would make it the most recent thing said — the strongest position in the
+   * context — for text nobody actually typed.
    */
-  async transformContext(messages: M[]): Promise<M[]> {
-    return messages;
+  async transformContext(messages: M[], signal?: AbortSignal): Promise<M[]> {
+    const render = this.options.renderContext;
+    // No renderer ⇒ the harness cannot represent the message, so do not even
+    // read: an injection nobody can express is pure cost.
+    if (!render) return messages;
+    if (this.contextAttempted) return messages;
+    // An already-aborted turn starts nothing AND keeps the attempt: the
+    // retrieval never ran, so spending the session's one shot on a cancelled
+    // turn would cost the session its context for no work done.
+    if (signal?.aborted) return messages;
+    // Spend the attempt BEFORE the first await. The loop calls this
+    // sequentially today, but the seam promises nothing of the sort, and two
+    // overlapping calls that both got past the check above would each inject.
+    this.contextAttempted = true;
+
+    // Reading MUST NOT create the store. mori's disk contract is that a session
+    // which only reads files leaves no trace on disk (`createMoriKernel`), and
+    // this read happens in exactly that session, before any capture — opening
+    // the database here would create it for every run.
+    if (!projectStoreExists(this.options.projectId)) return messages;
+
+    let context: MemoryContext;
+    try {
+      // No `taskTitle` (#149 scope): the kernel has no path to one yet, and
+      // both channels are designed to degrade to FTS-only without it. Deriving
+      // a query from the conversation is 2/3's job.
+      context = await buildMemoryContext(this.options.projectId, {
+        ...(this.options.contextEmbedder ? { embedder: this.options.contextEmbedder } : {}),
+      });
+    } catch {
+      // Silent, deliberately: the only sink this seam has is `onCaptureError`,
+      // which harnesses render as a CAPTURE failure (mori prints exactly that),
+      // and mislabelling a retrieval failure is worse than staying quiet. The
+      // `memory.injected` event that gives injection its own observability
+      // arrives with 2/3.
+      return messages;
+    }
+
+    // Nothing retrieved ⇒ inject nothing. A bare header would spend tokens and
+    // context position telling the model that memory is empty.
+    if (isEmptyMemoryContext(context)) return messages;
+
+    let injected: M;
+    try {
+      injected = render(context);
+    } catch {
+      return messages;
+    }
+    return [injected, ...messages];
   }
 
   /**
