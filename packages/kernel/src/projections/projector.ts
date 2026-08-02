@@ -155,6 +155,41 @@ export function laneOf(
   return event.projectId;
 }
 
+/**
+ * SQL form of `laneOf(event, selfProjectId, isUnion) === SELF_LANE`, for a
+ * caller that wants the self/foreign classification as a WHERE fragment over
+ * the raw `events` table (columns `project_id`, `source_project_id`) instead
+ * of reading rows into JS just to classify them (#143 item①: `getConsolidationStatus`
+ * counting the ever-growing foreign backlog of a workspace union on every
+ * status call). Mirrors `laneOf`'s two branches exactly:
+ *
+ * - a stamped `source_project_id` is authoritative regardless of `isUnion` —
+ *   self iff it equals `selfProjectId`;
+ * - a NULL `source_project_id` (legacy, pre-provenance) is self in a
+ *   single-identity log (`!isUnion`) unconditionally, or, in a union log,
+ *   only when the event's own `project_id` is this store's.
+ *
+ * Lives next to `laneOf` so the two can never read differently for the same
+ * row — a hand-duplicated predicate elsewhere is exactly the drift #113 item②
+ * was written to prevent. `selfProjectId` is always bound as a parameter,
+ * never concatenated, even though callers only ever pass an internally
+ * generated id.
+ */
+export function laneWhereSql(
+  selfProjectId: string,
+  isUnion: boolean,
+): { sql: string; params: [string] | [string, string] } {
+  return isUnion
+    ? {
+        sql: "(source_project_id = ? OR (source_project_id IS NULL AND project_id = ?))",
+        params: [selfProjectId, selfProjectId],
+      }
+    : {
+        sql: "(source_project_id = ? OR source_project_id IS NULL)",
+        params: [selfProjectId],
+      };
+}
+
 /** A project visible in this store's union — self or a workspace member
  *  whose genesis arrived via whole-DB sync (SoT-040). The local roster that
  *  `workspace sources` and `--to` resolution read; no Hub call involved. */

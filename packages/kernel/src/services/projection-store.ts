@@ -80,6 +80,17 @@ export type ProjectionLane = "self" | "union";
  * caller can group by lane and render them as a labelled shared channel. The
  * result is a constant SQL boolean over a real column — no bound params, no
  * user input, safe to concatenate.
+ *
+ * Does NOT need `laneOf`/`laneWhereSql` (#143) to derive this: a projection
+ * row's `source_project_id` is written by the SAME code that computes
+ * `eventLane = laneOf(...)` for that row (see `reduceProjectState`'s
+ * per-entity-type cases) and is stored as NULL precisely when that lane is
+ * `SELF_LANE`, non-NULL otherwise. So `source_project_id IS NULL` here and
+ * `laneOf(...) === SELF_LANE` there cannot disagree — the column IS the
+ * classification's output, already materialized once at projection time, not
+ * a second, independently-derived self test on the raw
+ * `project_id`/`source_project_id` pair the way `laneWhereSql` is for the
+ * (unprojected) `events` table.
  */
 export function laneWhere(lane: ProjectionLane = "self"): string {
   return lane === "self" ? "source_project_id IS NULL" : "1 = 1";

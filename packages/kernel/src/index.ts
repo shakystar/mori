@@ -19,6 +19,25 @@ export type { ConsolidateBoundary };
 /** LLM seam for consolidation. The harness supplies an in-process implementation. */
 export interface ConsolidatorLlm {
   complete(prompt: string): Promise<string>;
+  /**
+   * This model's total context window, in tokens — the hard limit the
+   * extraction prompt (system + user content) and its reply must fit inside
+   * together. Optional (#143 item②): a client that cannot state it (unknown
+   * model, a router) leaves this undefined and `consolidate-service` falls
+   * back to a fixed, conservative character budget that assumes nothing about
+   * the model behind this seam. Declaring it lets the kernel size the prompt
+   * to the ACTUAL model instead of that one-size-fits-all default, which a
+   * small local model (or a CJK-heavy prompt, whose tokenizer runs far more
+   * tokens per character than English) can otherwise overflow.
+   *
+   * Typed `| undefined` explicitly, not just `?:` — under this package's
+   * `exactOptionalPropertyTypes`, a bare `?:` only permits OMITTING the key,
+   * not a present key holding `undefined`. The production implementation
+   * (`PiConsolidatorLlm`) resolves this from a live model lookup that itself
+   * returns `T | undefined` (unknown provider/model id), so the property must
+   * accept an explicit `undefined` value, not just absence.
+   */
+  readonly contextWindowTokens?: number | undefined;
 }
 
 /**

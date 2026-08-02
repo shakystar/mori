@@ -19,6 +19,26 @@ export class PiConsolidatorLlm implements ConsolidatorLlm {
   ) {}
 
   /**
+   * #143 item② — the extraction prompt's char budget (`extractionCharBudget`
+   * in `@mori/kernel`'s consolidate-service) is sized off this. pi-ai's
+   * `Model.contextWindow` is the model's declared total context window in
+   * tokens (verified against `packages/mori/node_modules/@earendil-works/pi-ai/dist/types.d.ts`,
+   * `Model<TApi>.contextWindow: number` — every registered model has one, it
+   * is not optional there). A getter, not a field cached at construction: the
+   * only way to resolve a model here is `models.getModel`, which `complete()`
+   * already re-calls on every invocation for its own "unknown model" error
+   * path, so this stays consistent with that instead of caching a snapshot
+   * that could disagree with it. Undefined only when the configured
+   * provider/model is not registered at all, matching `complete()`'s own
+   * unknown-model condition — the kernel then falls back to its fixed
+   * conservative budget, same as it does for a `ConsolidatorLlm` that never
+   * declares this field.
+   */
+  get contextWindowTokens(): number | undefined {
+    return this.models.getModel(this.providerId, this.modelId)?.contextWindow;
+  }
+
+  /**
    * Throws on failure. Unlike `Embedder` (never throws — search falls back to
    * FTS5), consolidation has no such fallback: the kernel's
    * `consolidate-service` needs "LLM failed" distinguishable from "nothing to

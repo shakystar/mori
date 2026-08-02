@@ -58,4 +58,22 @@ describe("PiConsolidatorLlm", () => {
 
     await expect(llm.complete("prompt")).rejects.toThrow(/알 수 없는 consolidator 모델/);
   });
+
+  it("declares contextWindowTokens from the resolved model's contextWindow (#143 item②)", () => {
+    const faux = fauxProvider({ models: [{ id: "small-model", contextWindow: 32_000 }] });
+    const models = createModels();
+    models.setProvider(faux.provider);
+
+    const llm = new PiConsolidatorLlm(models, faux.provider.id, "small-model");
+
+    expect(llm.contextWindowTokens).toBe(32_000);
+  });
+
+  it("leaves contextWindowTokens undefined when the provider/model is not registered", () => {
+    const models = createModels();
+
+    const llm = new PiConsolidatorLlm(models, "nope", "nope");
+
+    expect(llm.contextWindowTokens).toBeUndefined();
+  });
 });

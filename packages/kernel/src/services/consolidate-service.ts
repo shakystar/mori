@@ -10,7 +10,7 @@ import {
 } from "../domain/entities.js";
 import type { DomainEvent } from "../domain/events.js";
 import type { ConsolidatorLlm, ConversationSlice, ConversationSource, Embedder } from "../index.js";
-import { laneOf, SELF_LANE } from "../projections/projector.js";
+import { laneOf, laneWhereSql, SELF_LANE } from "../projections/projector.js";
 import { getDb } from "../storage/db.js";
 import {
   appendEvents,
@@ -236,6 +236,65 @@ const EXTRACTION_SYSTEM_PROMPT = [
   "tags = 1-3 lowercase topic words.",
   "Return [] if there is no durable item.",
 ].join(" ");
+
+/**
+ * #143 item② — chars-per-token used to translate a `ConsolidatorLlm`'s
+ * declared `contextWindowTokens` into the character budget `run()` actually
+ * hands `boundExtractionInput`. This is a MULTIPLIER (`chars = tokens *
+ * CONSERVATIVE_CHARS_PER_TOKEN`), so lower is safer — it makes the derived
+ * char budget UNDER-estimate how much text a given token count buys, which is
+ * the conservative direction. `2`, then `1`, were both tried and rejected on
+ * this PR (PR #168 review, two rounds): a Hangul syllable is 3 bytes in UTF-8,
+ * and a byte-level BPE tokenizer's worst case is one token PER BYTE — so one
+ * Hangul character can cost up to 3 tokens, not 1. `1` chars/token still
+ * under-reserves by up to 3x for exactly the CJK-heavy content this project's
+ * observations/conversation tails are substantially made of. The floor this
+ * worst case implies is `1/3` chars/token (1 char <= 3 tokens, inverted).
+ * Not a tokenizer — a fixed, documented approximation, per the issue's
+ * explicit non-goal of adding one. `estimateTokens` also applies this same
+ * low constant to the (English) system prompt, which is safe in the other
+ * direction: English is comfortably below 3 tokens/char in reality, so this
+ * OVER-counts its tokens and reserves more budget than strictly needed
+ * rather than less.
+ */
+export const CONSERVATIVE_CHARS_PER_TOKEN = 1 / 3;
+
+/**
+ * #143 item② — output tokens reserved out of a declared `contextWindowTokens`
+ * before any of it is offered to the input budget, so the model's own JSON
+ * reply never has to compete with the prompt for the declared window.
+ * `MAX_MEMORIES_PER_BOUNDARY` (12) short one-sentence items renders to
+ * roughly 2,000-2,500 output chars (see `MAX_EXTRACTION_INPUT_CHARS`'s doc);
+ * divided by `CONSERVATIVE_CHARS_PER_TOKEN` and rounded up generously.
+ * Exported so tests can check the render against it directly instead of
+ * duplicating the number.
+ */
+export const RESERVED_OUTPUT_TOKENS = 1_300;
+
+/** Chars → estimated tokens, using the same conservative constant throughout
+ *  so a budget derived from it and a later check against it never disagree. */
+function estimateTokens(chars: number): number {
+  return Math.ceil(chars / CONSERVATIVE_CHARS_PER_TOKEN);
+}
+
+/**
+ * #143 item② — the character budget `run()` hands `boundExtractionInput`,
+ * derived from the injected LLM's declared `contextWindowTokens` when it has
+ * one. The system prompt (fixed, measured exactly, not estimated) and
+ * {@link RESERVED_OUTPUT_TOKENS} come off the top FIRST, so
+ * `boundExtractionInput`'s postcondition — the extraction prompt never fails
+ * purely from input size — holds for the model actually running, not just for
+ * whatever `MAX_EXTRACTION_INPUT_CHARS` assumed. No declared
+ * `contextWindowTokens` (unset LLM field, rule-based fallback, or no LLM at
+ * all) keeps today's fixed constant unchanged.
+ */
+export function extractionCharBudget(llm: ConsolidatorLlm | undefined): number {
+  const contextWindowTokens = llm?.contextWindowTokens;
+  if (contextWindowTokens === undefined) return MAX_EXTRACTION_INPUT_CHARS;
+  const systemPromptTokens = estimateTokens(EXTRACTION_SYSTEM_PROMPT.length);
+  const availableTokens = contextWindowTokens - systemPromptTokens - RESERVED_OUTPUT_TOKENS;
+  return Math.max(0, Math.floor(availableTokens * CONSERVATIVE_CHARS_PER_TOKEN));
+}
 
 /** Exported for tests (#113) — lets a test assert the RENDERED prompt for a
  *  `boundExtractionInput` result stays within `MAX_EXTRACTION_INPUT_CHARS`,
@@ -1047,47 +1106,34 @@ export function getConsolidationStatus(projectId: string): ConsolidationStatus {
       { seq: number } | undefined;
     if (row) sinceSeq = row.seq;
   }
-  // #113 item②: the backlog this reports is the one a boundary would consume,
-  // so it applies the SAME `laneOf` self/foreign test `run()` does — a COUNT(*)
-  // over the type alone let a foreign-only backlog cross the local threshold in
+  // #113 item②/#143 item①: the backlog this reports is the one a boundary
+  // would consume, so it applies the SAME `laneOf` self/foreign test `run()`
+  // does — via `laneWhereSql`, the SQL form of that exact test kept next to
+  // `laneOf` so the two can never classify a row differently. A COUNT(*) over
+  // the type alone let a foreign-only backlog cross the local threshold in
   // `shouldTriggerThresholdConsolidate` and fire a boundary that then found
-  // nothing of its own to do (Codex P2 on PR #136). Classifying needs the
-  // provenance columns rather than a count, but reads only those two plus
-  // `created_at`, and only for events past the watermark.
+  // nothing of its own to do (Codex P2 on PR #136); reading every pending row
+  // into JS just to apply that filter then made the fix itself unbounded — a
+  // workspace union's foreign rows never advance THIS store's watermark (they
+  // are never self), so that backlog only grows, and every status call
+  // materialized all of it (Codex P2 on PR #136 follow-up). The aggregate
+  // below counts and finds the oldest inside SQLite; nothing past the
+  // watermark is ever read into JS.
   const isUnion = isUnionLog(projectId);
-  const pending = (
-    db
-      .prepare(
-        "SELECT project_id, source_project_id, created_at FROM events " +
-          "WHERE type = 'observation.captured' AND seq > ? ORDER BY seq",
-      )
-      .all(sinceSeq) as {
-      project_id: string;
-      source_project_id: string | null;
-      created_at: string;
-    }[]
-  ).filter(
-    (row) =>
-      laneOf(
-        {
-          projectId: row.project_id,
-          ...(row.source_project_id !== null ? { sourceProjectId: row.source_project_id } : {}),
-        },
-        projectId,
-        isUnion,
-      ) === SELF_LANE,
-  );
-  // Oldest by `created_at`, not by `seq`: the two agree for locally appended
-  // events but a synced block arrives at whatever seq it lands on, so keep the
-  // MIN semantics the previous SQL had.
-  const oldestPendingAt = pending.reduce<string | undefined>(
-    (oldest, row) => (oldest === undefined || row.created_at < oldest ? row.created_at : oldest),
-    undefined,
-  );
+  const { sql: laneSql, params: laneParams } = laneWhereSql(projectId, isUnion);
+  const row = db
+    .prepare(
+      "SELECT COUNT(*) AS pendingObservations, MIN(created_at) AS oldestPendingAt FROM events " +
+        `WHERE type = 'observation.captured' AND seq > ? AND ${laneSql}`,
+    )
+    .get(sinceSeq, ...laneParams) as {
+    pendingObservations: number;
+    oldestPendingAt: string | null;
+  };
   const lastAttempt = readLastConsolidateAttempt(projectId);
   return {
-    pendingObservations: pending.length,
-    ...(oldestPendingAt !== undefined ? { oldestPendingAt } : {}),
+    pendingObservations: row.pendingObservations,
+    ...(row.oldestPendingAt !== null ? { oldestPendingAt: row.oldestPendingAt } : {}),
     ...(lastAttempt ? { lastAttempt } : {}),
   };
 }
@@ -1523,8 +1569,13 @@ export async function consolidate(params: ConsolidateParams): Promise<Consolidat
       // that then fails (or is later pruned back out, #139) is caught by the
       // `sliceFullyStored` check at the cursor-advance site, which uses the
       // actual outcome.
+      //
+      // #143 item②: maxChars comes from the injected LLM's declared
+      // `contextWindowTokens` when it has one, not unconditionally from
+      // `MAX_EXTRACTION_INPUT_CHARS` — see `extractionCharBudget`.
       {
         tailPersistedElsewhere: process.env.MEMORIZE_RAW_SEGMENTS !== "0",
+        maxChars: extractionCharBudget(params.llm),
         // #144: ascending by construction (`resumePointsOf` inserts sorted).
         ...(resumePoints && resumePoints.size > 0
           ? { tailResumePrefixes: [...resumePoints.keys()] }
