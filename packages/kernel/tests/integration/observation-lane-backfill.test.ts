@@ -75,6 +75,41 @@ function createObservationsTable(db: Database.Database, withLaneColumn: boolean)
   `);
 }
 
+/**
+ * The v12 tables #150's v16 migration also touches, empty. Every fixture in
+ * this suite pins a version >= 13 (v12 already applied/skipped), so these
+ * must already carry the v12 `source_project_id` column — otherwise v16
+ * (which unconditionally reads/writes it, including on `search_fts`) fails
+ * with "no such table"/"no such column" even though this suite is only
+ * exercising the `observations`-specific v14/v15 path.
+ */
+function createV12ProjectionTables(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE tasks (
+      id TEXT PRIMARY KEY, status TEXT, workstream_id TEXT,
+      created_at TEXT, updated_at TEXT, source_project_id TEXT, data TEXT NOT NULL
+    );
+    CREATE TABLE handoffs (id TEXT PRIMARY KEY, source_project_id TEXT, data TEXT NOT NULL);
+    CREATE TABLE sessions (
+      id TEXT PRIMARY KEY, status TEXT, source_project_id TEXT, data TEXT NOT NULL
+    );
+    CREATE TABLE memories (
+      id TEXT PRIMARY KEY, kind TEXT, salience INTEGER, created_at TEXT,
+      invalid_at TEXT, superseded_by TEXT, last_accessed_at TEXT,
+      deduped_by TEXT, injection_count INTEGER NOT NULL DEFAULT 0,
+      source_project_id TEXT, data TEXT NOT NULL
+    );
+    CREATE TABLE segments (
+      id TEXT PRIMARY KEY, session_id TEXT, created_at TEXT NOT NULL,
+      ordinal INTEGER, source TEXT, source_project_id TEXT, text TEXT NOT NULL
+    );
+    CREATE VIRTUAL TABLE search_fts USING fts5(
+      entity_id UNINDEXED, kind UNINDEXED, text, source_project_id UNINDEXED,
+      tokenize='unicode61'
+    );
+  `);
+}
+
 function insertEvent(
   db: Database.Database,
   row: {
@@ -157,6 +192,7 @@ function seedUnionStore(projectId: string, foreignId: string, userVersion: numbe
   const seed = new Database(dbFile);
   createEventsTable(seed);
   createObservationsTable(seed, userVersion >= 14);
+  createV12ProjectionTables(seed);
 
   insertGenesis(seed, projectId, "Self");
 
@@ -267,6 +303,7 @@ describe("observations lane backfill (#120)", () => {
     const seed = new Database(dbFile);
     createEventsTable(seed);
     createObservationsTable(seed, false);
+    createV12ProjectionTables(seed);
 
     insertGenesis(seed, projectId, "Solo");
     const obs = observationPayload("obs_only", projectId, "sess_1");
@@ -311,6 +348,7 @@ describe("observations lane backfill (#120)", () => {
     const seed = new Database(dbFile);
     createEventsTable(seed);
     createObservationsTable(seed, false);
+    createV12ProjectionTables(seed);
 
     insertGenesis(seed, projectId, "Self");
     // Projected row with no `observation.captured` event behind it. Should not

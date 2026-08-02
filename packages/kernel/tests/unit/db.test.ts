@@ -376,17 +376,50 @@ describe("db v11 provenance columns", () => {
     const dbFile = path.join(tmp, "memorize.db");
     try {
       // A store fully migrated through v12 — no task_requests table. v13 only
-      // CREATEs a new table, so it needs no other seeded tables; v14 also runs
-      // from this pin (pre-v13) and ALTERs observations (#74), so that table
-      // must exist here too, same shape as the v6 DDL.
+      // CREATEs a new table, so it needs no other seeded tables on its own;
+      // v14 also runs from this pin (pre-v13) and ALTERs observations (#74),
+      // and v16 (#150) reads `events` + backfills tasks/handoffs/sessions/
+      // memories, so all of those must exist here too — pinned at v12, so
+      // (unlike `seedPreV12ProjectionTables`, which seeds the PRE-v12 shape
+      // for the OTHER test above) they must already carry the v12
+      // `source_project_id` column, same as `search_fts`. All left empty —
+      // nothing exercises their content in this test.
       const seed = new Database(dbFile);
       seed.exec(`
+        CREATE TABLE events (
+          seq INTEGER PRIMARY KEY, id TEXT NOT NULL UNIQUE, schema_version TEXT NOT NULL,
+          created_at TEXT NOT NULL, updated_at TEXT NOT NULL, type TEXT NOT NULL,
+          project_id TEXT NOT NULL, scope_type TEXT NOT NULL, scope_id TEXT NOT NULL,
+          actor TEXT NOT NULL, writer TEXT, source_project_id TEXT, payload TEXT NOT NULL
+        );
         CREATE TABLE observations (
           id TEXT PRIMARY KEY, session_id TEXT, signal TEXT,
           created_at TEXT, data TEXT NOT NULL
         );
+        CREATE TABLE tasks (
+          id TEXT PRIMARY KEY, status TEXT, workstream_id TEXT,
+          created_at TEXT, updated_at TEXT, source_project_id TEXT, data TEXT NOT NULL
+        );
+        CREATE TABLE handoffs (id TEXT PRIMARY KEY, source_project_id TEXT, data TEXT NOT NULL);
+        CREATE TABLE sessions (
+          id TEXT PRIMARY KEY, status TEXT, source_project_id TEXT, data TEXT NOT NULL
+        );
+        CREATE TABLE memories (
+          id TEXT PRIMARY KEY, kind TEXT, salience INTEGER, created_at TEXT,
+          invalid_at TEXT, superseded_by TEXT, last_accessed_at TEXT,
+          deduped_by TEXT, injection_count INTEGER NOT NULL DEFAULT 0,
+          source_project_id TEXT, data TEXT NOT NULL
+        );
+        CREATE TABLE segments (
+          id TEXT PRIMARY KEY, session_id TEXT, created_at TEXT NOT NULL,
+          ordinal INTEGER, source TEXT, source_project_id TEXT, text TEXT NOT NULL
+        );
+        CREATE VIRTUAL TABLE search_fts USING fts5(
+          entity_id UNINDEXED, kind UNINDEXED, text, source_project_id UNINDEXED,
+          tokenize='unicode61'
+        );
       `);
-      seed.pragma("user_version = 12"); // pre-v13; only v13 runs on open
+      seed.pragma("user_version = 12"); // pre-v13; v13..v16 run on open
       seed.close();
 
       const db = openDbAt(dbFile);
