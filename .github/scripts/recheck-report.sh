@@ -22,6 +22,9 @@
 #   NO_RESULT_DETAIL
 #                  판정 파일이 없을 때 본문에 적을 원인 (기본: 재검증 잡이 결과를 남기지 못함).
 #                  discover 실패 폴백 경로가 자기 원인으로 덮어쓴다.
+#   AUTHORITATIVE  이 보고가 실제로 검증을 시도한 잡의 것인가 (기본 1).
+#                  discover 실패 폴백 경로만 0을 준다 — 그 잡은 어떤 head·base를 검증할지조차
+#                  정하지 못한 채 돌기 때문이다 (#152, is_decided 참조).
 #   RUN_URL        워크플로 실행 URL
 #   BOT_LOGIN      게이트 코멘트의 작성자로 인정할 로그인 (기본 github-actions[bot])
 set -euo pipefail
@@ -35,11 +38,17 @@ UNVERIFIED="${UNVERIFIED:-[]}"
 BASE_SHA="${BASE_SHA:-}"
 BASE_REF="${BASE_REF:-main}"
 NO_RESULT_DETAIL="${NO_RESULT_DETAIL:-재검증 잡이 결과를 남기지 못했습니다 (잡 실패·취소 또는 아티팩트 누락).}"
+AUTHORITATIVE="${AUTHORITATIVE:-1}"
 # 게이트로 인정할 코멘트의 작성자. 마커는 워크플로 파일에 평문으로 있고 이 리포에는
 # 에이전트가 CI 코멘트를 인용하는 관례가 있다 — 작성자를 확인하지 않으면 인용 코멘트가
 # 게이트를 영구히 가로챈다 (#112 항목 2).
 BOT_LOGIN="${BOT_LOGIN:-github-actions[bot]}"
 MARKER='<!-- recheck-open-prs -->'
+# 게이트가 아닌 알림 코멘트의 마커. 폴백 보고가 확정 판정을 덮지 않으면서도 침묵하지 않기 위해
+# 쓴다 (#152). **이 문자열은 MARKER를 부분문자열로 포함하지 않는다** — `<!-- recheck-open-prs`
+# 뒤가 `-notice -->`라 `<!-- recheck-open-prs -->`와 겹치지 않는다. 겹치면 find_existing이 이
+# 알림을 게이트 코멘트로 오인하므로(#112 항목 2와 같은 고장), 이 마커를 고칠 때 함께 확인한다.
+NOTICE_MARKER='<!-- recheck-open-prs-notice -->'
 
 log() {
   echo "$1"
@@ -51,13 +60,71 @@ log() {
 # 마커를 포함하고 **봇이 작성한** 코멘트만 고른다. 봇 코멘트는 한 번 만든 뒤 PATCH로만
 # 갱신되어 위치가 고정되므로 가장 이른 것(first)을 대상으로 삼는다 — 예전 코드의 `last`는
 # "나중에 달린 아무 일치 코멘트가 항상 이긴다"는 뜻이었다.
+#
+# 출력은 `<코멘트 id><TAB><판정 종류>` 한 줄이고, 없으면 아무것도 출력하지 않는다.
+# 판정 종류를 읽는 순서 (#152 — 폴백이 확정 판정을 덮지 않으려면 이 값이 필요하다):
+#   1. 본문의 `<!-- recheck-verdict:<종류> -->` 마커 (build_body가 심는다)
+#   2. 그 마커가 없는 옛 코멘트는 **헤드라인의 이모지**로 읽는다. 헤드라인 = 게이트 마커 줄의
+#      나머지, 비어 있으면 그 다음의 첫 비주석·비공백 줄. 본문 전체를 훑지 않는 이유는 레드
+#      본문이 체크 출력 마지막 3000바이트를 그대로 싣기 때문이다 — 로그에 섞인 이모지가
+#      판정으로 읽히면 안 된다.
+#   3. 둘 다 실패하면 `unknown`. 확정 판정일 수 있으므로 덮지 않는 쪽으로 다룬다(is_decided).
 find_existing() {
-  local pr="$1"
+  local pr="$1" marker="$2"
   gh api --paginate "repos/${REPO}/issues/${pr}/comments?per_page=100" |
-    jq -s -r --arg m "$MARKER" --arg bot "$BOT_LOGIN" \
-      '(add // [])
-       | map(select(((.user.login // "") == $bot) and ((.body // "") | contains($m))))
-       | first | .id // empty'
+    jq -s -r --arg m "$marker" --arg bot "$BOT_LOGIN" '
+      def trim: sub("^\\s+"; "") | sub("\\s+$"; "");
+      def headline($b):
+        ($b | split("\n")) as $ls
+        | ([$ls | to_entries[] | select(.value | contains($m))] | first) as $mk
+        | if $mk == null then ""
+          else
+            (($mk.value | split($m) | .[1] // "") | trim) as $rest
+            | if $rest != "" then $rest
+              else
+                ([$ls[($mk.key + 1):][] | select((trim != "") and (trim | startswith("<!--") | not))]
+                 | first // "")
+              end
+          end;
+      def verdict_of($b):
+        ([$b | scan("<!-- recheck-verdict:([a-z]+) -->")] | first) as $tag
+        | if $tag != null then $tag[0]
+          else
+            (headline($b)) as $h
+            | if ($h | contains("🟢")) then "green"
+              elif ($h | contains("🔴")) then "red"
+              elif ($h | contains("⚠️")) then "conflict"
+              elif ($h | contains("⛔")) then "stale"
+              else "unknown"
+              end
+          end;
+      (add // [])
+      | map(select(((.user.login // "") == $bot) and ((.body // "") | contains($m))))
+      | first
+      | if . == null then empty
+        else [(.id | tostring), verdict_of(.body // "")] | @tsv
+        end'
+}
+
+# 확정 판정인가 — 그린·레드·충돌은 "판정한 잡이 남긴 결과"다. stale·error는 그 자체가
+# 판정 불가이므로 폴백이 갱신해도 잃는 것이 없다. unknown(판독 실패)은 확정 판정일 수
+# 있으므로 확정 쪽으로 다룬다 — 덮지 않는 편이 보수적이고, 알림 코멘트가 남으므로
+# 침묵하지도 않는다.
+is_decided() {
+  case "$1" in
+    green | red | conflict | unknown) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+verdict_label() {
+  case "$1" in
+    green) echo "🟢 그린" ;;
+    red) echo "🔴 레드" ;;
+    conflict) echo "⚠️ 충돌" ;;
+    unknown) echo "판독하지 못함 (확정 판정일 수 있어 그대로 두었습니다)" ;;
+    *) echo "확인하지 못함 (기존 코멘트 조회 실패)" ;;
+  esac
 }
 
 # 이 판정이 **지금의** PR head 기준인지 확인한다. main push 스윕(github.ref=refs/heads/main)과
@@ -112,10 +179,19 @@ post_new() {
 
 build_body() {
   local verdict="$1" detail="$2" failed="$3" merge_sha="$4" head_sha="$5" logfile="$6"
+  local kind
+
+  # 판정 종류를 기계적으로 읽을 수 있게 마커로 심는다 (#152). 아래 case와 갈리지 않도록
+  # 알 수 없는 값은 여기서도 error로 모은다 — case의 `*` 분기가 쓰는 이름과 같다.
+  case "$verdict" in
+    green | red | conflict | stale) kind="$verdict" ;;
+    *) kind="error" ;;
+  esac
 
   echo "🤖 [ci]"
   echo
   echo "$MARKER"
+  echo "<!-- recheck-verdict:${kind} -->"
   case "$verdict" in
     green)
       echo "🟢 이 PR은 현재 main 기준으로 그린입니다."
@@ -184,6 +260,68 @@ build_body() {
   echo "- 실행 로그: ${RUN_URL}"
 }
 
+# 폴백 보고(AUTHORITATIVE=0)가 확정 판정을 덮지 않을 때 남기는 알림. 게이트 마커를 심지
+# 않으므로 판정 신호는 마커 코멘트 하나로 유지되고(CONTRIBUTING.md "낡은 그린 체크 재검증"),
+# 동시에 discover 실패가 "코멘트 없음"으로 끝나지도 않는다 (#125 항목 3).
+build_notice_body() {
+  local kept="$1" detail="$2"
+
+  echo "🤖 [ci]"
+  echo
+  echo "$NOTICE_MARKER"
+  echo "⚠️ **재검증 대상 선정(\`discover\`) 잡이 실패해 이번 실행은 이 PR을 판정하지 못했습니다.**"
+  echo
+  echo "이 실행은 어떤 PR head·base로 검증할지조차 정하지 못했으므로 **판정하지 않았습니다.**"
+  echo "그래서 이 PR의 재검증 게이트 코멘트를 덮지 않았습니다 (기존 판정: ${kept}) —"
+  echo "판정하지 않은 실행이 판정한 실행의 결과를 지우지 않게 하기 위함입니다."
+  echo
+  echo "**읽는 법:** 머지 판단의 근거는 여전히 재검증 게이트 코멘트 하나입니다. 이 코멘트는"
+  echo "판정이 아니며 그린도 레드도 아닙니다 — 게이트 코멘트의 판정이 **이 실행보다 앞선"
+  echo "실행에서 나온 것**임을 알릴 뿐입니다. 게이트 코멘트가 레드·판정 불가면 종전대로"
+  echo "머지하지 마세요. 게이트 코멘트가 그린이더라도 그것은 이 실행이 확인한 그린이 아니므로,"
+  echo "머지 전에 재검증을 다시 돌리거나 PR head를 갱신해 최신 판정을 받으세요."
+  echo
+  if [ -n "$detail" ]; then
+    echo "- 원인: ${detail}"
+  fi
+  echo "- 실행 로그: ${RUN_URL}"
+}
+
+# 게이트 코멘트를 건드리지 않았음을 알린다. 알림 자체도 upsert라 실행마다 쌓이지 않는다.
+notify_not_authoritative() {
+  local pr="$1" existing="$2" existing_class="$3" detail="$4"
+  local body="${TMPDIR:-/tmp}/recheck-notice-${pr}.md"
+  local nline="" nid=""
+
+  if [ -n "$existing" ]; then
+    log "- #${pr}: 판정하지 않은 폴백 보고이므로 기존 확정 판정 코멘트 ${existing}(${existing_class})를 덮지 않았습니다"
+  else
+    log "- #${pr}: 판정하지 않은 폴백 보고인데 기존 코멘트를 확인하지 못해 게이트 코멘트를 건드리지 않았습니다"
+  fi
+
+  if ! build_notice_body "$(verdict_label "$existing_class")" "$detail" >"$body"; then
+    log "- #${pr}: 알림 코멘트 본문 생성 실패"
+    return 1
+  fi
+
+  # 알림 코멘트 조회에 실패하면 중복을 감수하고 새로 남긴다 — 침묵이 더 나쁘다.
+  if ! nline=$(find_existing "$pr" "$NOTICE_MARKER"); then
+    nline=""
+  fi
+  IFS=$'\t' read -r nid _ <<<"$nline" || true
+
+  if [ -n "$nid" ]; then
+    if gh api --silent --method PATCH "repos/${REPO}/issues/comments/${nid}" -F "body=@${body}"; then
+      log "- #${pr}: 알림 코멘트 ${nid} 갱신"
+      return 0
+    fi
+    log "- #${pr}: 알림 코멘트 ${nid} 갱신 실패 — 새 코멘트로 폴백합니다"
+  fi
+
+  post_new "$pr" "$body"
+  return $?
+}
+
 # 실패를 반환코드로만 알리지 않는다 — 이 함수는 `if !`로 호출되므로 본문에서 errexit이
 # 꺼진다(recheck-select.sh의 classify와 같은 이유). 모든 실패를 명시적으로 검사한다.
 report_one() {
@@ -218,13 +356,31 @@ report_one() {
     fi
   fi
 
-  local existing
-  if ! existing=$(find_existing "$pr"); then
+  local existing_line existing existing_class
+  if ! existing_line=$(find_existing "$pr" "$MARKER"); then
     # 조회에 실패하면 기존 코멘트 유무를 알 수 없다. 보고가 사라지는 쪽보다 중복되는 쪽이
     # 안전하다 — "코멘트 없음"은 CONTRIBUTING.md 기준으로 통과이기 때문이다.
     log "- #${pr}: 기존 코멘트 조회 실패 — 새 코멘트로 남깁니다"
-    existing=""
+    existing_line=""
     force_new=1
+  fi
+  # find_existing은 id와 판정 종류를 탭으로 붙여 한 줄로 준다. 코멘트가 없으면 빈 줄이라
+  # 둘 다 빈 값이 되고, 있으면 판정 종류는 절대 비지 않는다(최소 `unknown`) — 빈 필드가
+  # 접혀 값이 밀리는 문제(report_one 위쪽 @tsv 주석 참조)가 생기지 않는다.
+  IFS=$'\t' read -r existing existing_class <<<"$existing_line" || true
+
+  # 이 보고가 **판정한 잡의 것인가.** discover 실패 폴백(AUTHORITATIVE=0)은 어떤 head·base로
+  # 검증할지조차 정하지 못한 채 도는 잡이다. 그 잡의 "판정 불가"가 겹친 다른 실행(push 스윕과
+  # pull_request 실행은 concurrency 그룹이 갈려 서로를 취소하지 못한다)이 방금 남긴 확정
+  # 판정을 덮으면, 판정하지 않은 잡이 판정한 잡의 결과를 지우는 것이 된다 (#152):
+  #   T1 push 스윕이 PR N을 검증 → 🔴로 마커 PATCH
+  #   T2 PR N에 synchronize → 그 실행의 discover가 죽는다
+  #   T3 폴백이 같은 마커를 ⛔ 판정 불가로 PATCH   ← 여기를 막는다
+  # 대신 침묵하지 않는다 — 게이트 마커가 없는 별도 알림 코멘트를 남긴다 (#125 항목 3).
+  # 기존 코멘트가 없거나 이미 판정 불가면 폴백도 종전대로 마커 코멘트에 보고한다.
+  if [ "$AUTHORITATIVE" != "1" ] && { [ "$force_new" -eq 1 ] || is_decided "$existing_class"; }; then
+    notify_not_authoritative "$pr" "$existing" "$existing_class" "$detail"
+    return $?
   fi
 
   # 판정을 쓰기 전에 "이 판정이 최신 head 기준인가"를 확인한다. 세 갈래로 나뉜다:
