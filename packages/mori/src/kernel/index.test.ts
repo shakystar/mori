@@ -1,4 +1,14 @@
-import { mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentEvent, StreamFn } from "@earendil-works/pi-agent-core";
@@ -19,6 +29,7 @@ import {
   createAgentEventObserver,
   createMoriKernel,
   moriProjectId,
+  moriStoreExists,
   renderContextMessage,
   toolCaptureVerdict,
 } from "./index.js";
@@ -126,6 +137,106 @@ describe("moriProjectId", () => {
     expect(moriProjectId("/repos/mori")).not.toBe(moriProjectId("/repos/other"));
     // It is also a directory name, so it must satisfy the kernel's id pattern.
     expect(moriProjectId("/repos/mori")).toMatch(/^[a-z][a-z0-9]*(?:_[a-z0-9]+)+$/);
+  });
+
+  it("a committed .mori/project.json makes two different roots resolve to the same id (#217)", () => {
+    const rootA = realpathSync(mkdtempSync(join(tmpdir(), "mori-identity-a-")));
+    const rootB = realpathSync(mkdtempSync(join(tmpdir(), "mori-identity-b-")));
+    try {
+      for (const root of [rootA, rootB]) {
+        mkdirSync(join(root, ".mori"));
+        writeFileSync(
+          join(root, ".mori", "project.json"),
+          JSON.stringify({ id: "proj_shared0000" }),
+        );
+      }
+
+      expect(moriProjectId(rootA)).toBe("proj_shared0000");
+      expect(moriProjectId(rootA)).toBe(moriProjectId(rootB));
+    } finally {
+      rmSync(rootA, { recursive: true, force: true });
+      rmSync(rootB, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("createMoriKernel — project identity file (#217)", () => {
+  let root: string;
+  let store: string;
+
+  beforeEach(() => {
+    root = realpathSync(mkdtempSync(join(tmpdir(), "mori-identity-kernel-root-")));
+    store = realpathSync(mkdtempSync(join(tmpdir(), "mori-identity-kernel-store-")));
+    process.env.MEMORIZE_ROOT = store;
+  });
+
+  afterEach(() => {
+    delete process.env.MEMORIZE_ROOT;
+    // The unwritable-root test strips the owner write bit off `root` itself;
+    // restore it first or the recursive removal below fails partway through.
+    chmodSync(root, 0o700);
+    rmSync(root, { recursive: true, force: true });
+    rmSync(store, { recursive: true, force: true });
+  });
+
+  function identityFile(): string {
+    return join(root, ".mori", "project.json");
+  }
+
+  it("adopts an existing checkout unchanged: writes today's path-hash id, and a later read gets that same id back", () => {
+    const beforeFile = moriProjectId(root);
+
+    createMoriKernel({ root, env: {} });
+
+    const persisted = JSON.parse(readFileSync(identityFile(), "utf8"));
+    expect(persisted.id).toBe(beforeFile);
+    // The store path this checkout already has on disk never moves.
+    expect(moriProjectId(root)).toBe(beforeFile);
+  });
+
+  it("falls back to the path hash for a broken identity file and leaves it exactly as committed", () => {
+    // The path hash this root resolves to absent any (usable) file — captured
+    // before either broken file below exists, so it is the baseline both
+    // fallbacks are compared against.
+    const pathHashId = moriProjectId(root);
+
+    mkdirSync(join(root, ".mori"));
+    const brokenJson = "{ not valid json";
+    writeFileSync(identityFile(), brokenJson);
+    const warnings: string[] = [];
+
+    expect(moriProjectId(root)).toBe(pathHashId);
+    createMoriKernel({ root, env: {}, warn: (message) => warnings.push(message) });
+    expect(readFileSync(identityFile(), "utf8")).toBe(brokenJson);
+    expect(warnings).toHaveLength(1);
+
+    // Same treatment for a well-formed file whose id fails the kernel's ID_PATTERN.
+    writeFileSync(identityFile(), JSON.stringify({ id: "not a valid id!" }));
+    warnings.length = 0;
+    expect(moriProjectId(root)).toBe(pathHashId);
+    createMoriKernel({ root, env: {}, warn: (message) => warnings.push(message) });
+    expect(JSON.parse(readFileSync(identityFile(), "utf8"))).toEqual({ id: "not a valid id!" });
+    expect(warnings).toHaveLength(1);
+  });
+
+  it("does not throw when the root is unwritable — reproduced with a real chmod, not a mock", () => {
+    chmodSync(root, 0o500); // read+execute only: mkdir/write inside `root` now fails with EACCES
+    const warnings: string[] = [];
+
+    expect(() =>
+      createMoriKernel({ root, env: {}, warn: (message) => warnings.push(message) }),
+    ).not.toThrow();
+
+    expect(warnings).toHaveLength(1);
+    expect(existsSync(identityFile())).toBe(false);
+  });
+
+  it("moriProjectId and moriStoreExists never create the identity file — only createMoriKernel writes", () => {
+    moriProjectId(root);
+    moriProjectId(root);
+    moriStoreExists(root);
+
+    expect(existsSync(join(root, ".mori"))).toBe(false);
   });
 });
 

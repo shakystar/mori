@@ -9,10 +9,12 @@
  */
 
 import path from "node:path";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
+import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import type { AgentEvent, AgentMessage } from "@earendil-works/pi-agent-core";
 import {
   createId,
+  isValidId,
   observedShell,
   observedWrite,
   projectStoreExists,
@@ -194,17 +196,82 @@ export function renderContextMessage(context: MemoryContext): AgentMessage {
   return { role: "user", content: renderMemoryContext(context), timestamp: Date.now() };
 }
 
+/** Where a project's committed identity lives, relative to its working root (#217). */
+const IDENTITY_DIR_NAME = ".mori";
+const IDENTITY_FILE_NAME = "project.json";
+
+function identityFilePath(root: string): string {
+  return path.join(root, IDENTITY_DIR_NAME, IDENTITY_FILE_NAME);
+}
+
+/**
+ * What reading `.mori/project.json` found — distinguished so a caller can tell
+ * "no file, mint a path hash" apart from "a file exists but is not usable,"
+ * which `createMoriKernel` has to treat differently (the latter must never be
+ * overwritten; see `persistProjectIdentity`).
+ */
+type IdentityFileState = { kind: "valid"; id: string } | { kind: "missing" | "invalid" };
+
+function readIdentityFile(root: string): IdentityFileState {
+  let raw: string;
+  try {
+    raw = readFileSync(identityFilePath(root), "utf8");
+  } catch {
+    return { kind: "missing" };
+  }
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    const id =
+      typeof parsed === "object" && parsed !== null ? (parsed as { id?: unknown }).id : undefined;
+    if (typeof id === "string" && isValidId(id)) return { kind: "valid", id };
+  } catch {
+    // Malformed JSON falls through to "invalid" below, same as a well-formed
+    // file whose id fails the kernel's ID_PATTERN.
+  }
+  return { kind: "invalid" };
+}
+
+/**
+ * The id `moriProjectId` minted before #217: a hash of the resolved path.
+ *
+ * Still the fallback for every root without a (usable) identity file, and
+ * still what gets written into a fresh one — this is the "adopt" side of the
+ * migration-free rule (#217): an existing checkout's store path never moves,
+ * the file only pins the value down for next time.
+ *
+ * A hash rather than the path itself because the id is also a directory name
+ * and has to satisfy the kernel's `ID_PATTERN`.
+ */
+function pathHashProjectId(root: string): string {
+  const digest = createHash("sha256").update(root).digest("hex");
+  return `proj_${digest.slice(0, 16)}`;
+}
+
+interface ResolvedProjectIdentity {
+  id: string;
+  fileState: IdentityFileState["kind"];
+}
+
+function resolveProjectIdentity(root: string): ResolvedProjectIdentity {
+  const state = readIdentityFile(root);
+  return state.kind === "valid"
+    ? { id: state.id, fileState: "valid" }
+    : { id: pathHashProjectId(root), fileState: state.kind };
+}
+
 /**
  * Store id for a working root: stable across runs (same checkout ⇒ same memory)
  * and distinct across checkouts (two repos never share a store).
  *
- * A hash rather than the path itself because the id is also a directory name and
- * has to satisfy the kernel's `ID_PATTERN`. Deriving it here and not in the
- * kernel is the seam discipline — "which project am I" is a harness question.
+ * Deriving it here and not in the kernel is the seam discipline — "which
+ * project am I" is a harness question (#217, unchanged from the original
+ * hash-only version). Read-only: a committed `.mori/project.json` (see
+ * `readIdentityFile`) takes precedence when its id is usable, otherwise this
+ * falls back to `pathHashProjectId` — the same value this function always
+ * returned. It never writes; only `createMoriKernel` does that.
  */
 export function moriProjectId(root: string): string {
-  const digest = createHash("sha256").update(path.resolve(root)).digest("hex");
-  return `proj_${digest.slice(0, 16)}`;
+  return resolveProjectIdentity(path.resolve(root)).id;
 }
 
 /**
@@ -247,6 +314,48 @@ export interface CreateMoriKernelOptions {
 }
 
 /**
+ * Commits a freshly minted (path-hash) id to `.mori/project.json` so the NEXT
+ * run adopts it via `readIdentityFile` instead of re-hashing the path — the
+ * "adopt" half of #217: this only ever writes the value the root would have
+ * resolved to anyway, so it never mints a new id and never moves a store.
+ *
+ * Written via a temp file + `rename`, not a direct truncating write: two
+ * `mori` sessions can start concurrently in the same fresh checkout (two
+ * terminals, same repo), and both resolve the identical id, but a direct
+ * write lets one process's crash mid-write leave the file torn for the
+ * other — which `readIdentityFile` would then read as "invalid" and refuse
+ * to touch forever (it treats any on-disk file as possibly human-committed).
+ * `rename` within one directory is a single filesystem operation, so a
+ * concurrent or interrupted write only ever loses a race, never corrupts.
+ *
+ * Silent on failure (read-only root, no permission): the caller already has
+ * a usable id (the path hash), so a write that cannot land degrades to "try
+ * again next run," not a broken session — the discipline #217 set for every
+ * failure mode here.
+ */
+function persistProjectIdentity(root: string, id: string, warn?: (message: string) => void): void {
+  const targetPath = identityFilePath(root);
+  const tempPath = path.join(
+    path.dirname(targetPath),
+    `.project.json.${randomBytes(6).toString("hex")}.mori-tmp`,
+  );
+  try {
+    mkdirSync(path.join(root, IDENTITY_DIR_NAME), { recursive: true });
+    writeFileSync(tempPath, `${JSON.stringify({ id }, null, 2)}\n`, "utf8");
+    renameSync(tempPath, targetPath);
+  } catch (error) {
+    try {
+      unlinkSync(tempPath);
+    } catch {
+      // best-effort cleanup; the write/rename failure above is what matters
+    }
+    warn?.(
+      `mori: .mori/project.json 기록 실패 — 다음 실행에서 다시 시도합니다: ${errorText(error)}\n`,
+    );
+  }
+}
+
+/**
  * The kernel mori runs. Nothing here is lazy about configuration but everything
  * is lazy about disk: the store's directory and database are created by the
  * first observation that passes the capture filter, so a session that only reads
@@ -255,6 +364,14 @@ export interface CreateMoriKernelOptions {
  * The store lives under the kernel's own root (`~/.mori`, or `MEMORIZE_ROOT`) —
  * resolved inside the kernel's path-resolver from `process.env`, which is why
  * tests that exercise this must set that variable rather than pass an env object.
+ *
+ * This is also the one point that writes `.mori/project.json` (#217):
+ * `moriProjectId`/`moriStoreExists` stay read-only, so the file is only ever
+ * touched by the session that actually opens a store. A missing file gets the
+ * path hash persisted into it (adopt, see `persistProjectIdentity`); a file
+ * that exists but is unusable (parse failure or an id `assertValidId` would
+ * reject) is left exactly as a person committed it — this only warns and
+ * falls back to the path hash, it never overwrites.
  */
 export function createMoriKernel(
   options: CreateMoriKernelOptions = {},
@@ -262,6 +379,15 @@ export function createMoriKernel(
   const root = path.resolve(options.root ?? process.cwd());
   const warn = options.warn;
   let warned = false;
+
+  const identity = resolveProjectIdentity(root);
+  if (identity.fileState === "missing") {
+    persistProjectIdentity(root, identity.id, warn);
+  } else if (identity.fileState === "invalid") {
+    warn?.(
+      `mori: .mori/project.json을 읽을 수 없어 경로 해시로 대체합니다 — 파일은 그대로 둡니다.\n`,
+    );
+  }
 
   // The one construction point for the `Embedder` seam (external/embeddings) —
   // the kernel never builds one and never reads this config.
@@ -275,7 +401,7 @@ export function createMoriKernel(
   const contextEmbedder = options.embedder ?? getEmbedder(sessionStartEmbeddingsConfig(config));
 
   return new SqliteMemoryKernel<AgentMessage, AgentEvent>({
-    projectId: moriProjectId(root),
+    projectId: identity.id,
     actor: MORI_ACTOR,
     project: { title: path.basename(root) || root, rootPath: root },
     sessionId: options.sessionId ?? createId("session"),
