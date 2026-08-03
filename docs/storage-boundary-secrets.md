@@ -44,15 +44,28 @@ verdict). `observedShell`에 넘기기 **직전** `maskSecrets`를 통과시킨�
 
 적용 지점: kernel 내부, LLM이 주입되지 않았을 때의 폴백 추출기(`RuleBasedConsolidator`).
 
-**이 구조적 보장은 `RuleBasedConsolidator`에 한정된다 — `LlmConsolidator`
-경로에는 없다.** `MORI_CONSOLIDATE_MODEL`이 설정돼 있거나 커스텀 consolidator가
-주입되면 `LlmConsolidator.extract`가 대신 쓰이는데, 그 프롬프트를 만드는
-`buildExtractionUserContent`(`consolidate-service.ts`)는 관찰의 `summary`를
-가공 없이 그대로 프롬프트에 넣고, 돌아온 `text`는 `parseExtractedMemories`가
-페이로드 필터링 없이 그대로 받는다. 즉 `EXTRACTION_SYSTEM_PROMPT`는 모델에게
-그러지 말라고 지시할 뿐 구조적으로 막지는 않는다 — 값을 읽어 에코하는 추출을
-막는 것은 코드가 아니라 프롬프트 준수 여부다. 이 문서가 "카테고리 2가
-구조적으로 막는다"고 말하는 것은 오직 `RuleBasedConsolidator` 경로에서다.
+**이 구조적 보장은 세 추출기 경로 중 `RuleBasedConsolidator`에만 적용된다**
+(`consolidate-service.ts`의 `consolidate()`가 `params.consolidator` →
+`params.llm` → 기본값 순으로 고른다):
+
+- **`RuleBasedConsolidator`** (`params.consolidator`도 `params.llm`/
+  `MORI_CONSOLIDATE_MODEL`도 없을 때의 기본 폴백): 위에서 설명한 구조적
+  보장이 있다 — 값 자체를 읽지 않는다.
+- **`LlmConsolidator`** (`params.llm` 지정 또는 `MORI_CONSOLIDATE_MODEL`
+  설정): 프롬프트를 만드는 `buildExtractionUserContent`가 관찰의 `summary`를
+  가공 없이 그대로 프롬프트에 넣고, 돌아온 `text`는 `parseExtractedMemories`가
+  페이로드 필터링 없이 그대로 받는다. `EXTRACTION_SYSTEM_PROMPT`는 모델에게
+  그러지 말라고 지시할 뿐 구조적으로 막지는 않는다 — 준수는 프롬프트 순응
+  여부에 달려 있다.
+- **커스텀 consolidator** (`params.consolidator` 주입): `consolidate()`가
+  주입된 구현을 **직접** 호출한다 — `LlmConsolidator`도, 그 프롬프트
+  (`buildExtractionUserContent`)도 파서(`parseExtractedMemories`)도 거치지
+  않는다. `EXTRACTION_SYSTEM_PROMPT`의 지시조차 없는, 세 경로 중 가장 보호가
+  없는 경로다. 무엇을 읽고 무엇을 반환하는지는 전적으로 주입된 구현에
+  달려 있고, 이 문서가 보장할 수 있는 것이 없다.
+
+이 문서가 "카테고리 2가 구조적으로 막는다"고 말하는 것은 오직
+`RuleBasedConsolidator` 경로에서다.
 
 해당 이슈: **#113** (`Edited N file(s): <path 목록>` 형태로 파일 경로/내용이
 메모리 본문에 직접 노출됨).
