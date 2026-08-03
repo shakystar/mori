@@ -1,6 +1,6 @@
 import { contentText, type Models } from "@earendil-works/pi-ai";
 import {
-  RESERVED_OUTPUT_TOKENS,
+  reservedOutputTokensFor,
   type ConsolidatorLlm,
   type ConsolidatorLlmCallOptions,
 } from "@mori/kernel";
@@ -53,13 +53,16 @@ export class PiConsolidatorLlm implements ConsolidatorLlm {
    * which the kernel's memory parser would then silently accept as complete,
    * permanently advancing the consolidation watermark past dropped memories.
    *
-   * The request itself is capped at `RESERVED_OUTPUT_TOKENS` (#169) — the same
-   * output budget `@mori/kernel`'s `extractionCharBudget` already reserves out
-   * of the model's declared context window when sizing the INPUT side. Without
-   * this, nothing generation-time stops the model from running past that
-   * reservation; the only enforcement left would be `parseExtractedMemories`'s
-   * post-hoc slice, which only ever sees a reply that already finished (or hit
-   * `"length"` and been thrown above).
+   * The request itself is capped at `reservedOutputTokensFor(contextWindowTokens)`
+   * (#169) — the same output budget `@mori/kernel`'s `extractionCharBudget`
+   * already reserves out of the model's declared context window when sizing
+   * the INPUT side, clamped to this model's own window (PR #197 review,
+   * 2026-08-03) so a narrow-window model is never asked for a completion
+   * bigger than the window it declared. Without the cap, nothing
+   * generation-time stops the model from running past that reservation; the
+   * only enforcement left would be `parseExtractedMemories`'s post-hoc slice,
+   * which only ever sees a reply that already finished (or hit `"length"`
+   * and been thrown above).
    *
    * `opts.signal` (#167) is forwarded into `completeSimple`'s own `signal` —
    * pi-ai's `StreamOptions.signal` — so a cancellation arriving while THIS
@@ -83,7 +86,10 @@ export class PiConsolidatorLlm implements ConsolidatorLlm {
     const result = await this.models.completeSimple(
       model,
       { messages: [{ role: "user", content: prompt, timestamp: Date.now() }] },
-      { maxTokens: RESERVED_OUTPUT_TOKENS, ...(opts?.signal ? { signal: opts.signal } : {}) },
+      {
+        maxTokens: reservedOutputTokensFor(this.contextWindowTokens),
+        ...(opts?.signal ? { signal: opts.signal } : {}),
+      },
     );
     if (result.stopReason !== "stop") {
       if (result.stopReason === "aborted") {

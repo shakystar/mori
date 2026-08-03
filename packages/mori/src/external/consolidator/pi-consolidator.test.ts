@@ -1,5 +1,5 @@
 import { createModels, fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai";
-import { RESERVED_OUTPUT_TOKENS } from "@mori/kernel";
+import { RESERVED_OUTPUT_TOKENS, reservedOutputTokensFor } from "@mori/kernel";
 import { describe, expect, it } from "vitest";
 
 import { PiConsolidatorLlm } from "./pi-consolidator.js";
@@ -69,6 +69,34 @@ describe("PiConsolidatorLlm", () => {
     await llm.complete("prompt");
 
     expect(seenMaxTokens).toBe(RESERVED_OUTPUT_TOKENS);
+  });
+
+  // PR #197 review (2026-08-03, owner decision): requesting the unclamped
+  // RESERVED_OUTPUT_TOKENS unconditionally is itself a regression this PR
+  // introduced — a model whose declared contextWindow is below that ceiling
+  // would be asked for a physically impossible completion (Codex P1,
+  // pi-consolidator.ts:86). The adapter must clamp to the resolved model's
+  // own window via the same `reservedOutputTokensFor` the kernel's input
+  // budget already uses, not the raw constant.
+  it("clamps completeSimple's maxTokens to the resolved model's own narrow context window (#169 x #174)", async () => {
+    const faux = fauxProvider({ models: [{ id: "narrow-model", contextWindow: 4_000 }] });
+    const models = createModels();
+    models.setProvider(faux.provider);
+
+    let seenMaxTokens: number | undefined;
+    faux.setResponses([
+      (_context, options) => {
+        seenMaxTokens = options?.maxTokens;
+        return fauxAssistantMessage("distilled summary");
+      },
+    ]);
+
+    const llm = new PiConsolidatorLlm(models, faux.provider.id, "narrow-model");
+    await llm.complete("prompt");
+
+    expect(seenMaxTokens).toBe(reservedOutputTokensFor(4_000));
+    expect(seenMaxTokens).toBeLessThan(RESERVED_OUTPUT_TOKENS);
+    expect(seenMaxTokens).toBeLessThan(4_000);
   });
 
   it("forwards opts.signal into the request and throws an AbortError when it aborts mid-flight (#167)", async () => {

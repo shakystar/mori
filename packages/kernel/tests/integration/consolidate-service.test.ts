@@ -34,6 +34,7 @@ import {
   getConsolidationStatus,
   parseExtractedMemories,
   readLastConsolidateAttempt,
+  reservedOutputTokensFor,
   resumePointsOf,
   setConsolidateWatermark,
   shouldTriggerThresholdConsolidate,
@@ -272,6 +273,35 @@ describe("RESERVED_OUTPUT_TOKENS — generation cap stays consistent with the al
     expect(RESERVED_OUTPUT_TOKENS).toBeGreaterThanOrEqual(
       estimateTokens(EXPECTED_MAX_OUTPUT_CHARS),
     );
+  });
+});
+
+// Owner decision 2026-08-03 (PR #197 review, #169 x #174 interaction): raising
+// RESERVED_OUTPUT_TOKENS from 1,300 to 7,500 (above) reintroduced #174's
+// regression on the OUTPUT axis — on a 4k-8k declared window, the unclamped
+// reservation alone could exceed the window, flooring extractionCharBudget's
+// input side to 0 again. `reservedOutputTokensFor` arbitrates: it clamps the
+// reservation to half of what's left after the (fixed) system prompt, so
+// input and output both get a share instead of one starving the other.
+describe("reservedOutputTokensFor — output reservation stays within the declared window (#169 x #174)", () => {
+  it("falls back to the unclamped RESERVED_OUTPUT_TOKENS when no context window is declared", () => {
+    expect(reservedOutputTokensFor(undefined)).toBe(RESERVED_OUTPUT_TOKENS);
+  });
+
+  it("matches the unclamped RESERVED_OUTPUT_TOKENS for a wide declared context window (no behavior change)", () => {
+    expect(reservedOutputTokensFor(128_000)).toBe(RESERVED_OUTPUT_TOKENS);
+  });
+
+  it("clamps below RESERVED_OUTPUT_TOKENS for a narrow declared context window, leaving room for input", () => {
+    const reserved = reservedOutputTokensFor(4_000);
+    expect(reserved).toBeLessThan(RESERVED_OUTPUT_TOKENS);
+    expect(reserved).toBeGreaterThan(0);
+    expect(reserved).toBeLessThan(4_000);
+  });
+
+  it("never exceeds the declared context window itself, however narrow", () => {
+    expect(reservedOutputTokensFor(500)).toBeLessThanOrEqual(500);
+    expect(reservedOutputTokensFor(0)).toBe(0);
   });
 });
 

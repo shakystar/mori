@@ -347,29 +347,64 @@ const SYSTEM_PROMPT_CHARS_PER_TOKEN = 3;
  */
 export const RESERVED_OUTPUT_TOKENS = estimateTokens(EXPECTED_MAX_OUTPUT_CHARS);
 
+// #174 — the system prompt is fixed English text, not CJK-heavy user
+// content, so it gets its own (still conservative) chars-per-token ratio
+// instead of `CONSERVATIVE_CHARS_PER_TOKEN`'s CJK worst case. See
+// `SYSTEM_PROMPT_CHARS_PER_TOKEN`'s doc for why that constant doesn't apply
+// to it.
+function systemPromptTokens(): number {
+  return Math.ceil(EXTRACTION_SYSTEM_PROMPT.length / SYSTEM_PROMPT_CHARS_PER_TOKEN);
+}
+
+/**
+ * Share of the window left over after the (fixed) system prompt that the
+ * output reservation is allowed to claim. #169 (this PR, owner decision
+ * 2026-08-03) — `RESERVED_OUTPUT_TOKENS` (7,500, the "worst case" a full
+ * 12-item CJK-heavy reply needs) and the input budget below it both want a
+ * slice of the SAME declared `contextWindowTokens`, and on a narrow window
+ * (4k-8k) their unclamped sum exceeds it, flooring the input side to 0 (#174's
+ * regression guard). Neither side is wrong on its own — nobody owned the
+ * arbitration between them. `1/2` gives each side an equal claim on what's
+ * left after the system prompt, so a narrow window degrades gracefully
+ * instead of starving one side to 0.
+ */
+const OUTPUT_WINDOW_SHARE = 1 / 2;
+
+/**
+ * #169 (owner decision 2026-08-03, PR #197 review) — the output-token
+ * reservation actually usable for a given declared `contextWindowTokens`.
+ * `RESERVED_OUTPUT_TOKENS` is the reservation's ceiling ("as much as a full
+ * reply could need"), not a fixed demand — this clamps it to
+ * {@link OUTPUT_WINDOW_SHARE} of what's left after the system prompt, so it
+ * can never by itself consume the whole window (or push the input budget
+ * negative) the way the unclamped constant could on a narrow window. No
+ * declared window (undefined) keeps today's unclamped ceiling, same as
+ * `extractionCharBudget`'s existing fallback. Exported so an adapter's
+ * `ConsolidatorLlm.complete` can cap its OWN provider call at the exact same
+ * number `extractionCharBudget` reserved for it — see `pi-consolidator.ts`.
+ */
+export function reservedOutputTokensFor(contextWindowTokens: number | undefined): number {
+  if (contextWindowTokens === undefined) return RESERVED_OUTPUT_TOKENS;
+  const available = Math.max(0, contextWindowTokens - systemPromptTokens());
+  return Math.min(RESERVED_OUTPUT_TOKENS, Math.floor(available * OUTPUT_WINDOW_SHARE));
+}
+
 /**
  * #143 item② — the character budget `run()` hands `boundExtractionInput`,
  * derived from the injected LLM's declared `contextWindowTokens` when it has
- * one. The system prompt (fixed, measured exactly, not estimated) and
- * {@link RESERVED_OUTPUT_TOKENS} come off the top FIRST, so
- * `boundExtractionInput`'s postcondition — the extraction prompt never fails
- * purely from input size — holds for the model actually running, not just for
- * whatever `MAX_EXTRACTION_INPUT_CHARS` assumed. No declared
+ * one. The system prompt (fixed, measured exactly, not estimated) and the
+ * output reservation ({@link reservedOutputTokensFor}) come off the top
+ * FIRST, so `boundExtractionInput`'s postcondition — the extraction prompt
+ * never fails purely from input size — holds for the model actually running,
+ * not just for whatever `MAX_EXTRACTION_INPUT_CHARS` assumed. No declared
  * `contextWindowTokens` (unset LLM field, rule-based fallback, or no LLM at
  * all) keeps today's fixed constant unchanged.
  */
 export function extractionCharBudget(llm: ConsolidatorLlm | undefined): number {
   const contextWindowTokens = llm?.contextWindowTokens;
   if (contextWindowTokens === undefined) return MAX_EXTRACTION_INPUT_CHARS;
-  // #174 — the system prompt is fixed English text, not CJK-heavy user
-  // content, so it gets its own (still conservative) chars-per-token ratio
-  // instead of `CONSERVATIVE_CHARS_PER_TOKEN`'s CJK worst case. See
-  // `SYSTEM_PROMPT_CHARS_PER_TOKEN`'s doc for why that constant doesn't apply
-  // to it.
-  const systemPromptTokens = Math.ceil(
-    EXTRACTION_SYSTEM_PROMPT.length / SYSTEM_PROMPT_CHARS_PER_TOKEN,
-  );
-  const availableTokens = contextWindowTokens - systemPromptTokens - RESERVED_OUTPUT_TOKENS;
+  const availableTokens =
+    contextWindowTokens - systemPromptTokens() - reservedOutputTokensFor(contextWindowTokens);
   return Math.max(0, Math.floor(availableTokens * CONSERVATIVE_CHARS_PER_TOKEN));
 }
 
