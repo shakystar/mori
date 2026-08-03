@@ -2,6 +2,11 @@
   "name": "@shakystar/mori",
   "version": "0.0.0",
   "type": "module",
+  "scripts": {
+    "build": "tsc -b",
+    "test": "vitest run",
+    "typecheck:test": "tsc -p tsconfig.test.json"
+  },
   "bin": {
     "mori": "./dist/index.js"
   },
