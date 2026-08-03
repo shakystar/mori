@@ -128,3 +128,7 @@ PR 게이트 워크플로(`.github/workflows/ci.yml`의 `build-and-test`) 전체
 테스트(`packages/mori/src/bin-entrypoint.test.ts`)가 이 계약에 기대고 있으므로, 그런 테스트를
 새로 쓸 때 `dist`를 손으로 만들어 둘 필요는 없다. 다만 **vitest를 직접 부르면**(`pnpm exec
 vitest run …`) 이 보장이 없다 — 그때는 `pnpm build`를 먼저 돌려야 한다.
+
+**좁혀 돌 때의 경로는 `pnpm exec vitest run <파일>`이다** (`pnpm test -- <파일>`이 아니다).
+`pnpm test`는 `turbo run test`라, `--` 뒤의 인자는 vitest가 아니라 turbo가 먼저 해석한다.
+`--watch`·파일 필터처럼 vitest에 넘기고 싶은 것은 전부 vitest를 직접 불러서 준다.
