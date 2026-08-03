@@ -1,5 +1,5 @@
 import { contentText, type Models } from "@earendil-works/pi-ai";
-import type { ConsolidatorLlm } from "@mori/kernel";
+import type { ConsolidatorLlm, ConsolidatorLlmCallOptions } from "@mori/kernel";
 
 /**
  * The harness implementation of the kernel's `ConsolidatorLlm` seam
@@ -48,8 +48,19 @@ export class PiConsolidatorLlm implements ConsolidatorLlm {
    * a `"length"` truncation can still end on syntactically valid partial JSON,
    * which the kernel's memory parser would then silently accept as complete,
    * permanently advancing the consolidation watermark past dropped memories.
+   *
+   * `opts.signal` (#167) is forwarded into `completeSimple`'s own `signal` —
+   * pi-ai's `StreamOptions.signal` — so a cancellation arriving while THIS
+   * request is in flight actually stops it, not just one that arrived before
+   * `complete` was called. pi-ai never rejects on abort; the stream instead
+   * resolves with `stopReason: "aborted"` (`streamWithDeltas`, `faux.js`), so
+   * that case is thrown here explicitly, with `name` set to the
+   * `AbortController`/`fetch` convention (`"AbortError"`) — the same
+   * convention `ConsolidateAbortedError` uses for the preflight case — so
+   * `classifyConsolidateError`/`consolidateExplicit` recognize it identically
+   * regardless of which of the two points caught the cancellation.
    */
-  async complete(prompt: string): Promise<string> {
+  async complete(prompt: string, opts?: ConsolidatorLlmCallOptions): Promise<string> {
     const model = this.models.getModel(this.providerId, this.modelId);
     if (!model) {
       throw new Error(
@@ -57,10 +68,17 @@ export class PiConsolidatorLlm implements ConsolidatorLlm {
       );
     }
 
-    const result = await this.models.completeSimple(model, {
-      messages: [{ role: "user", content: prompt, timestamp: Date.now() }],
-    });
+    const result = await this.models.completeSimple(
+      model,
+      { messages: [{ role: "user", content: prompt, timestamp: Date.now() }] },
+      opts?.signal ? { signal: opts.signal } : undefined,
+    );
     if (result.stopReason !== "stop") {
+      if (result.stopReason === "aborted") {
+        const error = new Error(result.errorMessage ?? "consolidator LLM request aborted");
+        error.name = "AbortError";
+        throw error;
+      }
       throw new Error(result.errorMessage ?? `consolidator LLM stream ended: ${result.stopReason}`);
     }
     return contentText(result.content);
