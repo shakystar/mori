@@ -1,0 +1,131 @@
+name: Refresh armed PRs
+
+# required status check(`build-and-test`)는 PR head 커밋에 붙은 check-run의 결론으로 평가된다.
+# `main`이 앞서 나가도 PR head SHA는 그대로이므로 그 SHA에 박힌 `failure`도 그대로 남고,
+# `ci.yml`은 base가 움직이는 것을 트리거로 삼지 않으며, 브랜치 보호가 head를 갱신해 주지도
+# 않는다. 그래서 **PR 자기 diff와 무관한 이유로 레드가 박힌 PR**은 스스로 할 수 있는 일이
+# 없고 armed된 auto-merge가 영원히 대기한다 (#195 — #190이 이 상태를 7건 동시에 만들었다).
+# 이 워크플로는 `main` push마다 그런 PR의 head를 현재 `main`으로 갱신해 `synchronize`를 일으키고,
+# 기존 `ci.yml`이 현재 `main`을 포함한 head에서 새 `build-and-test`를 남기게 한다.
+# required check의 생산 주체는 `ci.yml` 하나로 유지된다.
+#
+# `recheck-open-prs.yml`과 다루는 것이 다르다: 그쪽은 낡은 **그린**(검증 없이 통과할 위험)을
+# 코멘트로 알리고, 이쪽은 낡은 **레드**(통과할 수 없이 박힌 상태)를 재평가시킨다. 두 판정
+# 경로는 서로 건드리지 않는다.
+#
+# 토큰 — 기본 `GITHUB_TOKEN`으로는 성립하지 않는다. GITHUB_TOKEN이 만든 `pull_request`
+# `synchronize` run은 approval-required 상태로 생성돼 사람이 "Approve and run"을 누를 때까지
+# 시작하지 않는다(GitHub 공식 문서 · #195 실측 3 · #99/PR #104에서 이미 부딪힌 벽). 그래서
+# 이 리포 한정으로 설치한 GitHub App의 설치 토큰을 쓴다. 시크릿이 없으면 조용히 no-op이 아니라
+# **이유를 남기고** no-op한다.
+on:
+  push:
+    branches: [main]
+  # 시크릿을 등록한 뒤 main push를 기다리지 않고 한 번 돌려 확인하기 위한 수동 트리거다
+  # (#195 완료 조건의 실측 확인). 단, 이 이벤트의 "Use workflow from"은 **임의 브랜치를 고를 수
+  # 있고** 그때 github.sha는 그 브랜치의 head이지 main이 아니다 — 아래 두 잡이 그 경우를 막는다.
+  workflow_dispatch:
+
+# 연속 push에서는 앞선 실행이 이미 낡은 base를 보고 있다. 중간에 취소돼 일부 PR만 갱신돼도
+# 다음 실행이 남은 PR을 다시 계산한다 — 갱신 판정은 "현재 main을 포함했는가"라서 수렴한다.
+concurrency:
+  group: refresh-armed-prs-${{ github.ref }}
+  cancel-in-progress: true
+
+# 워크플로 기본은 읽기 전용으로 둔다. 아래 잡이 쓰는 쓰기 권한은 `GITHUB_TOKEN`이 아니라
+# App 설치 토큰에 있다(App 권한: contents: write + pull_requests: write). 이 잡의
+# `GITHUB_TOKEN`에는 스크립트를 받아오는 데 필요한 읽기만 준다.
+permissions:
+  contents: read
+
+jobs:
+  # 비-main dispatch를 조용히 스킵시키지 않는다. `if:`로 걸러진 잡은 화면에 회색으로만 남고
+  # 실행 전체는 초록으로 보이므로, 실측 확인을 하려던 사람이 "돌았는데 아무 일도 안 났다"로
+  # 읽는다. 이 잡이 이유를 남기고 실행을 레드로 만든다. PR 코드를 받아오지 않으며 토큰도 쥐지
+  # 않는다.
+  reject-non-main:
+    name: Reject a dispatch from a non-main ref
+    if: github.ref != 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Explain why nothing was refreshed
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          echo "::error::이 워크플로는 main에서만 돕니다. 실행 ref가 '${REF}'라 armed PR을 하나도 갱신하지 않았습니다."
+          {
+            echo "## armed PR head 갱신 — 실행되지 않음"
+            echo ""
+            echo "실행 ref가 \`${REF}\`입니다. 이 워크플로는 \`refs/heads/main\`에서만 돕니다 —"
+            echo "다른 ref에서는 \`github.sha\`가 main의 head가 아니어서 (1) 실행할 스크립트를"
+            echo "신뢰할 수 없는 ref에서 가져오게 되고 (2) 뒤처짐을 엉뚱한 base로 재게 됩니다 (#195)."
+            echo ""
+            echo "수동 확인을 하려면 \"Use workflow from\"에서 \`main\`을 고르세요."
+          } >>"$GITHUB_STEP_SUMMARY"
+          exit 1
+
+  refresh:
+    name: Refresh armed PRs behind main
+    # main 고정 — 아래 체크아웃 ref와 BASE_SHA가 둘 다 github.sha이고, 그 둘이 main의 head라는
+    # 것이 이 잡의 신뢰 가정 전부다. push 트리거는 branches: [main]이라 항상 성립하지만
+    # workflow_dispatch는 그렇지 않다.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    # 이 잡은 PR 코드를 체크아웃하지도 실행하지도 않는다 — API 호출만 한다. `recheck-open-prs.yml`이
+    # 쓰기 토큰을 report 잡에만 준 이유(#112 항목 5)가 그대로 적용되는 자리다. 편의를 위해서라도
+    # PR 워크스페이스를 체크아웃하지 마라: 이 잡은 브랜치 쓰기 권한이 있는 토큰을 쥔다.
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout scripts from the pushed commit
+        uses: actions/checkout@v4
+        with:
+          # 이 잡은 main에 고정돼 있으므로(잡 레벨 `if:`) github.sha는 main의 head다 —
+          # 신뢰 ref이고, 아래 스크립트는 여기서만 온다.
+          ref: ${{ github.sha }}
+          sparse-checkout: .github/scripts
+
+      # secrets 컨텍스트는 스텝의 `if:`에서 쓸 수 없다. 그래서 존재 여부를 env로 받아 여기서
+      # 판정한다. 시크릿이 아직 등록되지 않은 동안 이 워크플로는 no-op이어야 하고,
+      # create-github-app-token은 빈 app-id에서 그냥 실패하므로 그 앞에서 가른다.
+      - name: Check for the App credentials
+        id: creds
+        env:
+          APP_ID: ${{ secrets.MERGE_REFRESH_APP_ID }}
+          APP_KEY: ${{ secrets.MERGE_REFRESH_APP_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${APP_ID}" ] || [ -z "${APP_KEY}" ]; then
+            echo "present=0" >>"$GITHUB_OUTPUT"
+            echo "::warning::MERGE_REFRESH_APP_ID / MERGE_REFRESH_APP_PRIVATE_KEY가 없어 armed PR head 갱신을 건너뜁니다 (no-op)."
+            {
+              echo "## armed PR head 갱신 — 건너뜀"
+              echo ""
+              echo "App 시크릿(\`MERGE_REFRESH_APP_ID\` / \`MERGE_REFRESH_APP_PRIVATE_KEY\`)이 등록되지 않아"
+              echo "이번 실행은 아무 브랜치도 갱신하지 않았습니다. 등록되면 이 잡이 그대로 동작합니다 (#195)."
+            } >>"$GITHUB_STEP_SUMMARY"
+          else
+            echo "present=1" >>"$GITHUB_OUTPUT"
+          fi
+
+      - name: Mint an installation token
+        id: token
+        if: steps.creds.outputs.present == '1'
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.MERGE_REFRESH_APP_ID }}
+          private-key: ${{ secrets.MERGE_REFRESH_APP_PRIVATE_KEY }}
+
+      - name: Update the armed PR branches
+        if: steps.creds.outputs.present == '1'
+        env:
+          # 기본 GITHUB_TOKEN이 아니다 — 위 주석의 approval-required 문제 때문이다.
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          REPO: ${{ github.repository }}
+          # 잡이 main에 고정돼 있으므로 main의 head다. 스크립트도 이 값이 정말 main에 포함된
+          # 커밋인지 API로 한 번 더 확인한다 — 모양만 SHA인 값이 흘러들면 뒤처짐 판정이
+          # 통째로 뒤집히기 때문이다 (#195 리뷰).
+          BASE_SHA: ${{ github.sha }}
+        run: bash .github/scripts/refresh-armed-prs.sh
