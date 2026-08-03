@@ -263,13 +263,30 @@ const EXTRACTION_SYSTEM_PROMPT = [
  * observations/conversation tails are substantially made of. The floor this
  * worst case implies is `1/3` chars/token (1 char <= 3 tokens, inverted).
  * Not a tokenizer — a fixed, documented approximation, per the issue's
- * explicit non-goal of adding one. `estimateTokens` also applies this same
- * low constant to the (English) system prompt, which is safe in the other
- * direction: English is comfortably below 3 tokens/char in reality, so this
- * OVER-counts its tokens and reserves more budget than strictly needed
- * rather than less.
+ * explicit non-goal of adding one. Applies to USER content only — the fixed
+ * English system prompt uses {@link SYSTEM_PROMPT_CHARS_PER_TOKEN} instead
+ * (#174: reusing this CJK worst-case constant for it over-reserved so much
+ * that small declared context windows derived a budget of 0).
  */
 export const CONSERVATIVE_CHARS_PER_TOKEN = 1 / 3;
+
+/**
+ * #174 (PR #168 follow-up) — chars-per-token used ONLY to translate the fixed
+ * {@link EXTRACTION_SYSTEM_PROMPT}'s length into a token deduction inside
+ * {@link extractionCharBudget}. Unlike user content (CJK-heavy, unbounded,
+ * needs `CONSERVATIVE_CHARS_PER_TOKEN`'s 1-char-per-3-tokens worst case), the
+ * system prompt is a FIXED, MEASURED, ASCII/English-only string — assuming
+ * CJK worst-case token density for it was the bug this issue fixes: it
+ * inflated a ~2.1KB prompt to ~6,400 "tokens" (vs. an actual ~530 for English
+ * text at the standard ~4 chars/token rule of thumb), eating the entire
+ * budget on any context window below ~7,400 tokens before a single character
+ * of user content was considered. `3` chars/token keeps a deliberate margin
+ * below that ~4 chars/token reality (over-counting real English tokens by
+ * roughly 33%) so the deduction stays conservative — safe if the prompt grows
+ * or the true ratio drifts a bit — without re-imposing the ~12x CJK-worst-case
+ * penalty that doesn't apply to this string.
+ */
+const SYSTEM_PROMPT_CHARS_PER_TOKEN = 3;
 
 /**
  * #143 item② — output tokens reserved out of a declared `contextWindowTokens`
@@ -282,12 +299,6 @@ export const CONSERVATIVE_CHARS_PER_TOKEN = 1 / 3;
  * duplicating the number.
  */
 export const RESERVED_OUTPUT_TOKENS = 1_300;
-
-/** Chars → estimated tokens, using the same conservative constant throughout
- *  so a budget derived from it and a later check against it never disagree. */
-function estimateTokens(chars: number): number {
-  return Math.ceil(chars / CONSERVATIVE_CHARS_PER_TOKEN);
-}
 
 /**
  * #143 item② — the character budget `run()` hands `boundExtractionInput`,
@@ -303,7 +314,14 @@ function estimateTokens(chars: number): number {
 export function extractionCharBudget(llm: ConsolidatorLlm | undefined): number {
   const contextWindowTokens = llm?.contextWindowTokens;
   if (contextWindowTokens === undefined) return MAX_EXTRACTION_INPUT_CHARS;
-  const systemPromptTokens = estimateTokens(EXTRACTION_SYSTEM_PROMPT.length);
+  // #174 — the system prompt is fixed English text, not CJK-heavy user
+  // content, so it gets its own (still conservative) chars-per-token ratio
+  // instead of `CONSERVATIVE_CHARS_PER_TOKEN`'s CJK worst case. See
+  // `SYSTEM_PROMPT_CHARS_PER_TOKEN`'s doc for why that constant doesn't apply
+  // to it.
+  const systemPromptTokens = Math.ceil(
+    EXTRACTION_SYSTEM_PROMPT.length / SYSTEM_PROMPT_CHARS_PER_TOKEN,
+  );
   const availableTokens = contextWindowTokens - systemPromptTokens - RESERVED_OUTPUT_TOKENS;
   return Math.max(0, Math.floor(availableTokens * CONSERVATIVE_CHARS_PER_TOKEN));
 }
