@@ -112,7 +112,7 @@ describe("buildMemoryContext", () => {
     expect(await buildMemoryContext(projectId)).toEqual({});
   });
 
-  it("assembles consolidatedMemories ranked by the retrieval pool and reinforces them", async () => {
+  it("assembles consolidatedMemories ranked by the retrieval pool", async () => {
     await seedMemory("mem_hot", "chose zephyr as the deploy target", 9, NOW);
     await seedMemory("mem_cold", "old low-salience memory", 1, "2020-01-01T00:00:00.000Z");
     await rebuildProjectProjection(projectId);
@@ -120,10 +120,13 @@ describe("buildMemoryContext", () => {
     const ctx = await buildMemoryContext(projectId, { taskTitle: "zephyr deploy" });
     expect(ctx.consolidatedMemories?.map((m) => m.id)).toEqual(["mem_hot", "mem_cold"]);
 
-    // reinforceInjectedMemories side effect: both were injected, so both are stamped.
+    // mori#176: buildMemoryContext is retrieval-only now — it does not stamp
+    // last_accessed_at itself. Reinforcement only happens once a caller (the
+    // kernel) confirms the context was actually injected; see
+    // kernel-context-injection.test.ts for that contract.
     const rows = new Map(listValidMemories(projectId).map((r) => [r.memory.id, r]));
-    expect(rows.get("mem_hot")!.lastAccessedAt).toBeDefined();
-    expect(rows.get("mem_cold")!.lastAccessedAt).toBeDefined();
+    expect(rows.get("mem_hot")!.lastAccessedAt).toBeUndefined();
+    expect(rows.get("mem_cold")!.lastAccessedAt).toBeUndefined();
   });
 
   it("includes recentObservations within the tail window", async () => {
