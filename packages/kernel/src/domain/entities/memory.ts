@@ -203,3 +203,19 @@ export interface MemoryRetractedPayload {
    */
   writerRole?: "owner" | "member";
 }
+
+/**
+ * Self-observation for session-start injection (#5 2/3-a, mori#214). Appended
+ * the moment `SqliteMemoryKernel.transformContext` has ACTUALLY shown a memory
+ * context to the model — the same condition `reinforceInjectedMemories` uses
+ * (mori#176): a render that never ran, or one that threw, gets neither the
+ * event nor the reinforcement, because the model never saw the content either
+ * way. Carries only the ids of the injected memories, not their text — the
+ * text already lives in `memory.consolidated`, and copying it here would give
+ * the same content two sources that can drift apart as the original is edited
+ * or superseded.
+ */
+export interface MemoryInjectedPayload {
+  /** ids of the consolidated memories included in the injected context. */
+  memoryIds: EntityId[];
+}
