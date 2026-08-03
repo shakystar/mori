@@ -1,4 +1,5 @@
 import { createModels, fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai";
+import { RESERVED_OUTPUT_TOKENS, reservedOutputTokensFor } from "@mori/kernel";
 import { describe, expect, it } from "vitest";
 
 import { PiConsolidatorLlm } from "./pi-consolidator.js";
@@ -49,6 +50,84 @@ describe("PiConsolidatorLlm", () => {
     const llm = new PiConsolidatorLlm(models, faux.provider.id, faux.getModel().id);
 
     await expect(llm.complete("prompt")).rejects.toThrow(/length/);
+  });
+
+  it("caps completeSimple's maxTokens at the kernel's RESERVED_OUTPUT_TOKENS (#169)", async () => {
+    const faux = fauxProvider();
+    const models = createModels();
+    models.setProvider(faux.provider);
+
+    let seenMaxTokens: number | undefined;
+    faux.setResponses([
+      (_context, options) => {
+        seenMaxTokens = options?.maxTokens;
+        return fauxAssistantMessage("distilled summary");
+      },
+    ]);
+
+    const llm = new PiConsolidatorLlm(models, faux.provider.id, faux.getModel().id);
+    await llm.complete("prompt");
+
+    expect(seenMaxTokens).toBe(RESERVED_OUTPUT_TOKENS);
+  });
+
+  // PR #197 review (2026-08-03, owner decision): requesting the unclamped
+  // RESERVED_OUTPUT_TOKENS unconditionally is itself a regression this PR
+  // introduced — a model whose declared contextWindow is below that ceiling
+  // would be asked for a physically impossible completion (Codex P1,
+  // pi-consolidator.ts:86). The adapter must clamp to the resolved model's
+  // own window via the same `reservedOutputTokensFor` the kernel's input
+  // budget already uses, not the raw constant.
+  it("clamps completeSimple's maxTokens to the resolved model's own narrow context window (#169 x #174)", async () => {
+    const faux = fauxProvider({ models: [{ id: "narrow-model", contextWindow: 4_000 }] });
+    const models = createModels();
+    models.setProvider(faux.provider);
+
+    let seenMaxTokens: number | undefined;
+    faux.setResponses([
+      (_context, options) => {
+        seenMaxTokens = options?.maxTokens;
+        return fauxAssistantMessage("distilled summary");
+      },
+    ]);
+
+    const llm = new PiConsolidatorLlm(models, faux.provider.id, "narrow-model");
+    await llm.complete("prompt");
+
+    expect(seenMaxTokens).toBe(reservedOutputTokensFor(4_000));
+    expect(seenMaxTokens).toBeLessThan(RESERVED_OUTPUT_TOKENS);
+    expect(seenMaxTokens).toBeLessThan(4_000);
+  });
+
+  // PR #197 review (2026-08-03, second content pass): a wide context window
+  // does not imply a wide per-request output ceiling — the common real-world
+  // shape is a 128k window with a 4k/8k max completion. reservedOutputTokensFor
+  // only clamps against the context window, so it would still request more
+  // than the provider's own declared maxTokens allows (Codex P1,
+  // pi-consolidator.ts:90).
+  it("clamps completeSimple's maxTokens to the resolved model's own output ceiling even with a wide context window (#169 Codex follow-up)", async () => {
+    const faux = fauxProvider({
+      models: [{ id: "wide-window-low-ceiling", contextWindow: 128_000, maxTokens: 4_000 }],
+    });
+    const models = createModels();
+    models.setProvider(faux.provider);
+
+    let seenMaxTokens: number | undefined;
+    faux.setResponses([
+      (_context, options) => {
+        seenMaxTokens = options?.maxTokens;
+        return fauxAssistantMessage("distilled summary");
+      },
+    ]);
+
+    const llm = new PiConsolidatorLlm(models, faux.provider.id, "wide-window-low-ceiling");
+    await llm.complete("prompt");
+
+    // reservedOutputTokensFor(128_000) would return RESERVED_OUTPUT_TOKENS
+    // unclamped (see the wide-window regression guard in consolidate-service.test.ts) —
+    // the model's own maxTokens (4_000) must win.
+    expect(seenMaxTokens).toBe(4_000);
+    expect(seenMaxTokens).toBeLessThan(RESERVED_OUTPUT_TOKENS);
   });
 
   it("forwards opts.signal into the request and throws an AbortError when it aborts mid-flight (#167)", async () => {

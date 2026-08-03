@@ -18,18 +18,23 @@ import type {
   Embedder,
 } from "../../src/index.js";
 import {
+  EXPECTED_MAX_OUTPUT_CHARS,
+  EXTRACTION_SYSTEM_PROMPT,
   ExtractionParseError,
   MAX_EXTRACTION_INPUT_CHARS,
+  MAX_MEMORIES_PER_BOUNDARY,
   RESERVED_OUTPUT_TOKENS,
   boundExtractionInput,
   buildExtractionUserContent,
   chunkConversation,
   consolidate,
+  estimateTokens,
   extractionCharBudget,
   getConsolidateWatermark,
   getConsolidationStatus,
   parseExtractedMemories,
   readLastConsolidateAttempt,
+  reservedOutputTokensFor,
   resumePointsOf,
   setConsolidateWatermark,
   shouldTriggerThresholdConsolidate,
@@ -241,6 +246,62 @@ describe("parseExtractedMemories", () => {
     expect(() => parseExtractedMemories("I could not comply.")).toThrow(ExtractionParseError);
     expect(() => parseExtractedMemories("[not json]")).toThrow(ExtractionParseError);
     expect(() => parseExtractedMemories('{"kind":"decision"}')).toThrow(ExtractionParseError);
+  });
+});
+
+describe("EXTRACTION_SYSTEM_PROMPT — count cap stated at generation time (#169)", () => {
+  it("states MAX_MEMORIES_PER_BOUNDARY, not a hardcoded number", () => {
+    const occurrences =
+      EXTRACTION_SYSTEM_PROMPT.split(String(MAX_MEMORIES_PER_BOUNDARY)).length - 1;
+    // The prompt must actually reference the cap (not just happen to avoid
+    // the number some other way) — bumping MAX_MEMORIES_PER_BOUNDARY changes
+    // this rendered prompt, which is the point: the two can never drift apart.
+    expect(occurrences).toBeGreaterThan(0);
+  });
+});
+
+// PR #197 review (#169): the provider-side generation cap and the prompt's
+// own item/size allowance had drifted apart — RESERVED_OUTPUT_TOKENS (1,300)
+// was far smaller than what a full MAX_MEMORIES_PER_BOUNDARY-item CJK-heavy
+// reply is allowed to render to, so an otherwise valid reply could still hit
+// `stopReason: "length"`. This pins the invariant the fix relies on: the cap
+// must be AT LEAST the token estimate for the worst-case output size, using
+// this file's own conversion (`estimateTokens`) — not a hand-picked number
+// that can silently fall out of step with it again.
+describe("RESERVED_OUTPUT_TOKENS — generation cap stays consistent with the allowed output size (#169)", () => {
+  it("is at least estimateTokens(EXPECTED_MAX_OUTPUT_CHARS)", () => {
+    expect(RESERVED_OUTPUT_TOKENS).toBeGreaterThanOrEqual(
+      estimateTokens(EXPECTED_MAX_OUTPUT_CHARS),
+    );
+  });
+});
+
+// Owner decision 2026-08-03 (PR #197 review, #169 x #174 interaction): raising
+// RESERVED_OUTPUT_TOKENS from 1,300 to 7,500 (above) reintroduced #174's
+// regression on the OUTPUT axis — on a 4k-8k declared window, the unclamped
+// reservation alone could exceed the window, flooring extractionCharBudget's
+// input side to 0 again. `reservedOutputTokensFor` arbitrates: it clamps the
+// reservation to half of what's left after the (fixed) system prompt, so
+// input and output both get a share instead of one starving the other.
+describe("reservedOutputTokensFor — output reservation stays within the declared window (#169 x #174)", () => {
+  it("falls back to the unclamped RESERVED_OUTPUT_TOKENS when no context window is declared", () => {
+    expect(reservedOutputTokensFor(undefined)).toBe(RESERVED_OUTPUT_TOKENS);
+  });
+
+  it("matches the unclamped RESERVED_OUTPUT_TOKENS for a wide declared context window (no behavior change)", () => {
+    expect(reservedOutputTokensFor(128_000)).toBe(RESERVED_OUTPUT_TOKENS);
+  });
+
+  it("clamps below RESERVED_OUTPUT_TOKENS for a narrow declared context window, leaving room for input", () => {
+    const reserved = reservedOutputTokensFor(4_000);
+    expect(reserved).toBeLessThan(RESERVED_OUTPUT_TOKENS);
+    expect(reserved).toBeGreaterThan(0);
+    expect(reserved).toBeLessThan(4_000);
+  });
+
+  it("never exceeds the declared context window itself, however narrow", () => {
+    expect(reservedOutputTokensFor(500)).toBeLessThanOrEqual(500);
+    expect(reservedOutputTokensFor(0)).toBe(0);
   });
 });
 

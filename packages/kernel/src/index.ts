@@ -15,6 +15,21 @@ export * from "./domain/index.js";
 export * from "./kernel/sqlite-memory-kernel.js";
 export { projectStoreExists } from "./storage/event-store.js";
 export type { ConsolidateBoundary };
+/**
+ * #169 — the output-token budget the kernel already reserves for the
+ * extraction reply (`extractionCharBudget`'s input-side accounting). Exported
+ * so an adapter's `ConsolidatorLlm` implementation can cap its OWN provider
+ * call at the same number instead of declaring a second, unrelated literal
+ * that could silently drift from the one the input budget was sized against.
+ *
+ * `reservedOutputTokensFor` is the one an adapter should actually call: it
+ * clamps `RESERVED_OUTPUT_TOKENS` to the declared model's own context window
+ * (owner decision 2026-08-03, PR #197) so a narrow-window model is never
+ * asked for a completion bigger than its own window allows.
+ * `RESERVED_OUTPUT_TOKENS` itself stays exported for the no-declared-window
+ * fallback and for tests that check the unclamped ceiling directly.
+ */
+export { RESERVED_OUTPUT_TOKENS, reservedOutputTokensFor } from "./services/consolidate-service.js";
 // Session-start injection (#5 1/3). The harness needs three things to fill the
 // `renderContext` seam: the context type, the default text rendering of it, and
 // the embed budget it must bake into the client it hands over as

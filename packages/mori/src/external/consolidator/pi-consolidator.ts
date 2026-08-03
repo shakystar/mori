@@ -1,5 +1,9 @@
 import { contentText, type Models } from "@earendil-works/pi-ai";
-import type { ConsolidatorLlm, ConsolidatorLlmCallOptions } from "@mori/kernel";
+import {
+  reservedOutputTokensFor,
+  type ConsolidatorLlm,
+  type ConsolidatorLlmCallOptions,
+} from "@mori/kernel";
 
 /**
  * The harness implementation of the kernel's `ConsolidatorLlm` seam
@@ -49,6 +53,30 @@ export class PiConsolidatorLlm implements ConsolidatorLlm {
    * which the kernel's memory parser would then silently accept as complete,
    * permanently advancing the consolidation watermark past dropped memories.
    *
+   * The request itself is capped at `reservedOutputTokensFor(contextWindowTokens)`
+   * (#169) — the same output budget `@mori/kernel`'s `extractionCharBudget`
+   * already reserves out of the model's declared context window when sizing
+   * the INPUT side, clamped to this model's own window (PR #197 review,
+   * 2026-08-03) so a narrow-window model is never asked for a completion
+   * bigger than the window it declared. That clamp alone still misses a wide
+   * window paired with a low per-request output ceiling (128k context, 4k/8k
+   * max completion — a common real-world shape, not a narrow-context edge
+   * case): `reservedOutputTokensFor` never sees that ceiling, so it would ask
+   * for more than the provider allows and the provider rejects the request
+   * before generation starts (Codex P1, PR #197 review, 2026-08-03). It is
+   * further clamped to `model.maxTokens` — pi-ai's declared per-request
+   * output ceiling for this model (verified in
+   * `packages/mori/node_modules/@earendil-works/pi-ai/dist/types.d.ts`,
+   * `Model<TApi>.maxTokens: number` — required, not optional, on every
+   * registered model, so no undefined case to fall back from). The kernel
+   * owns "how much did we reserve"; the adapter owns "how much may this
+   * model actually be asked for" — `reservedOutputTokensFor`'s signature
+   * stays context-window-only, this ceiling is read here instead. Without
+   * either cap, nothing generation-time stops the model from running past
+   * the reservation; the only enforcement left would be
+   * `parseExtractedMemories`'s post-hoc slice, which only ever sees a reply
+   * that already finished (or hit `"length"` and been thrown above).
+   *
    * `opts.signal` (#167) is forwarded into `completeSimple`'s own `signal` —
    * pi-ai's `StreamOptions.signal` — so a cancellation arriving while THIS
    * request is in flight actually stops it, not just one that arrived before
@@ -71,7 +99,10 @@ export class PiConsolidatorLlm implements ConsolidatorLlm {
     const result = await this.models.completeSimple(
       model,
       { messages: [{ role: "user", content: prompt, timestamp: Date.now() }] },
-      opts?.signal ? { signal: opts.signal } : undefined,
+      {
+        maxTokens: Math.min(reservedOutputTokensFor(this.contextWindowTokens), model.maxTokens),
+        ...(opts?.signal ? { signal: opts.signal } : {}),
+      },
     );
     if (result.stopReason !== "stop") {
       if (result.stopReason === "aborted") {
