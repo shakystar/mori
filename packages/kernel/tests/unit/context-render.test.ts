@@ -88,6 +88,38 @@ describe("renderMemoryContext", () => {
     expect(text).toContain("```\nUSER: why zephyr?\n\nAGENT: cheapest region\n```");
   });
 
+  it("widens the fence so a segment's own ``` code block cannot close the wrapper early", () => {
+    const body = "before\n```js\nconsole.log('hi')\n```\nafter";
+    const text = renderMemoryContext({ rawSegments: [{ id: "seg_1", text: body }] });
+
+    // The whole segment, including its interior fence, must stay inside one
+    // block: the opener and closer are a longer run than any run in `body`.
+    expect(text).toContain(["````", body, "````"].join("\n"));
+    // Nothing from the segment leaked out as if it were top-level content.
+    expect(text.split("````")).toHaveLength(3);
+  });
+
+  it("widens the fence past a longer backtick run (4+ backticks) inside a segment", () => {
+    const body = "outer\n````\nnested fence\n````\nend";
+    const text = renderMemoryContext({ rawSegments: [{ id: "seg_1", text: body }] });
+
+    expect(text).toContain(["`````", body, "`````"].join("\n"));
+  });
+
+  it("sizes each segment's fence independently when segments differ", () => {
+    const plain = "USER: hi\n\nAGENT: hello";
+    const fenced = "```\nconsole.log(1)\n```";
+    const text = renderMemoryContext({
+      rawSegments: [
+        { id: "seg_1", text: plain },
+        { id: "seg_2", text: fenced },
+      ],
+    });
+
+    expect(text).toContain(["```", plain, "```"].join("\n"));
+    expect(text).toContain(["````", fenced, "````"].join("\n"));
+  });
+
   it("omits the channels retrieval found nothing for", () => {
     const text = renderMemoryContext({ consolidatedMemories: [MEMORY] });
 
