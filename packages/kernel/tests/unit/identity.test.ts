@@ -61,4 +61,14 @@ describe("personal-store id family", () => {
       expect(accountOfPersonalStore(getPersonalStoreId(account))).toBe(account);
     }
   });
+
+  it("accountOfPersonalStore rejects the noncanonical spelling that would alias the default account's store (#155)", () => {
+    // getPersonalStoreId never mints "personal_local_default" — the default
+    // account's only valid id is the legacy "personal_self" — but the id is
+    // syntactically valid and isPersonalStoreId accepts it. Left unchecked,
+    // both ids strip down to DEFAULT_ACCOUNT_ID and would resolve to the SAME
+    // on-disk store while callers still treat them as distinct identities.
+    expect(() => accountOfPersonalStore(`personal_${DEFAULT_ACCOUNT_ID}`)).toThrow();
+    expect(accountOfPersonalStore(PERSONAL_STORE_ID)).toBe(DEFAULT_ACCOUNT_ID);
+  });
 });

@@ -9,7 +9,13 @@ import {
   type Project,
 } from "../domain/entities.js";
 import type { DomainEvent } from "../domain/events.js";
-import type { ConsolidatorLlm, ConversationSlice, ConversationSource, Embedder } from "../index.js";
+import type {
+  ConsolidatorLlm,
+  ConsolidatorLlmCallOptions,
+  ConversationSlice,
+  ConversationSource,
+  Embedder,
+} from "../index.js";
 import { laneOf, laneWhereSql, SELF_LANE } from "../projections/projector.js";
 import { getDb } from "../storage/db.js";
 import {
@@ -18,6 +24,7 @@ import {
   readGenesisEventsSync,
   type AppendEventInput,
 } from "../storage/event-store.js";
+import { throwIfDispossessed } from "../storage/project-lock.js";
 import { detectContradictions, makeLlmJudge } from "./contradiction-service.js";
 import { ensureEmbeddings, ensureSegmentEmbeddings } from "./embeddings-service.js";
 import { listValidMemories, rebuildProjectProjection } from "./projection-store.js";
@@ -140,7 +147,13 @@ export interface ConsolidationInput {
  * builds — any provider, any local model).
  */
 export interface Consolidator {
-  extract(input: ConsolidationInput): Promise<ExtractedMemory[]>;
+  /**
+   * `opts` (#167) carries the same `signal` `run()` already checked once before
+   * calling this — forwarded here so an LLM-backed extractor can cancel the
+   * request itself instead of the cancellation only being observable before
+   * extraction started.
+   */
+  extract(input: ConsolidationInput, opts?: ConsolidatorLlmCallOptions): Promise<ExtractedMemory[]>;
 }
 
 // --- rule-based degraded extractor -------------------------------------------
@@ -251,13 +264,30 @@ const EXTRACTION_SYSTEM_PROMPT = [
  * observations/conversation tails are substantially made of. The floor this
  * worst case implies is `1/3` chars/token (1 char <= 3 tokens, inverted).
  * Not a tokenizer — a fixed, documented approximation, per the issue's
- * explicit non-goal of adding one. `estimateTokens` also applies this same
- * low constant to the (English) system prompt, which is safe in the other
- * direction: English is comfortably below 3 tokens/char in reality, so this
- * OVER-counts its tokens and reserves more budget than strictly needed
- * rather than less.
+ * explicit non-goal of adding one. Applies to USER content only — the fixed
+ * English system prompt uses {@link SYSTEM_PROMPT_CHARS_PER_TOKEN} instead
+ * (#174: reusing this CJK worst-case constant for it over-reserved so much
+ * that small declared context windows derived a budget of 0).
  */
 export const CONSERVATIVE_CHARS_PER_TOKEN = 1 / 3;
+
+/**
+ * #174 (PR #168 follow-up) — chars-per-token used ONLY to translate the fixed
+ * {@link EXTRACTION_SYSTEM_PROMPT}'s length into a token deduction inside
+ * {@link extractionCharBudget}. Unlike user content (CJK-heavy, unbounded,
+ * needs `CONSERVATIVE_CHARS_PER_TOKEN`'s 1-char-per-3-tokens worst case), the
+ * system prompt is a FIXED, MEASURED, ASCII/English-only string — assuming
+ * CJK worst-case token density for it was the bug this issue fixes: it
+ * inflated a ~2.1KB prompt to ~6,400 "tokens" (vs. an actual ~530 for English
+ * text at the standard ~4 chars/token rule of thumb), eating the entire
+ * budget on any context window below ~7,400 tokens before a single character
+ * of user content was considered. `3` chars/token keeps a deliberate margin
+ * below that ~4 chars/token reality (over-counting real English tokens by
+ * roughly 33%) so the deduction stays conservative — safe if the prompt grows
+ * or the true ratio drifts a bit — without re-imposing the ~12x CJK-worst-case
+ * penalty that doesn't apply to this string.
+ */
+const SYSTEM_PROMPT_CHARS_PER_TOKEN = 3;
 
 /**
  * #143 item② — output tokens reserved out of a declared `contextWindowTokens`
@@ -270,12 +300,6 @@ export const CONSERVATIVE_CHARS_PER_TOKEN = 1 / 3;
  * duplicating the number.
  */
 export const RESERVED_OUTPUT_TOKENS = 1_300;
-
-/** Chars → estimated tokens, using the same conservative constant throughout
- *  so a budget derived from it and a later check against it never disagree. */
-function estimateTokens(chars: number): number {
-  return Math.ceil(chars / CONSERVATIVE_CHARS_PER_TOKEN);
-}
 
 /**
  * #143 item② — the character budget `run()` hands `boundExtractionInput`,
@@ -291,7 +315,14 @@ function estimateTokens(chars: number): number {
 export function extractionCharBudget(llm: ConsolidatorLlm | undefined): number {
   const contextWindowTokens = llm?.contextWindowTokens;
   if (contextWindowTokens === undefined) return MAX_EXTRACTION_INPUT_CHARS;
-  const systemPromptTokens = estimateTokens(EXTRACTION_SYSTEM_PROMPT.length);
+  // #174 — the system prompt is fixed English text, not CJK-heavy user
+  // content, so it gets its own (still conservative) chars-per-token ratio
+  // instead of `CONSERVATIVE_CHARS_PER_TOKEN`'s CJK worst case. See
+  // `SYSTEM_PROMPT_CHARS_PER_TOKEN`'s doc for why that constant doesn't apply
+  // to it.
+  const systemPromptTokens = Math.ceil(
+    EXTRACTION_SYSTEM_PROMPT.length / SYSTEM_PROMPT_CHARS_PER_TOKEN,
+  );
   const availableTokens = contextWindowTokens - systemPromptTokens - RESERVED_OUTPUT_TOKENS;
   return Math.max(0, Math.floor(availableTokens * CONSERVATIVE_CHARS_PER_TOKEN));
 }
@@ -711,9 +742,12 @@ function prefixClippedTo(tail: string, n: number): string {
 export class LlmConsolidator implements Consolidator {
   constructor(private readonly llm: ConsolidatorLlm) {}
 
-  async extract(input: ConsolidationInput): Promise<ExtractedMemory[]> {
+  async extract(
+    input: ConsolidationInput,
+    opts?: ConsolidatorLlmCallOptions,
+  ): Promise<ExtractedMemory[]> {
     const prompt = `${EXTRACTION_SYSTEM_PROMPT}\n\n${buildExtractionUserContent(input)}`;
-    return parseExtractedMemories(await this.llm.complete(prompt));
+    return parseExtractedMemories(await this.llm.complete(prompt, opts));
   }
 }
 
@@ -1045,17 +1079,53 @@ const ATTEMPT_ERROR_MAX_CHARS = 300;
  * `ConsolidatorLlm`, so the match stays on the shape of the error (a
  * `TimeoutError`, a "HTTP <code>" message) rather than on any client this
  * package owns.
+ *
+ * `signal` (#167) is this attempt's OWN cancellation signal, not a generic
+ * parameter — passed so an `AbortError`-named rejection is only classified
+ * `"aborted"` when THIS call's signal actually fired. Once #167 forwards the
+ * signal into the extraction request, a provider's own transport-level abort
+ * (a timeout, a connection reset) can surface with the same `name` without the
+ * user ever cancelling anything; matching on the name alone would misreport
+ * that failure as a clean cancellation and hide it (PR #166 Codex P2, absorbed
+ * into this issue's acceptance criteria).
  */
-export function classifyConsolidateError(error: unknown): ConsolidateAttemptOutcome {
+export function classifyConsolidateError(
+  error: unknown,
+  signal?: AbortSignal,
+): ConsolidateAttemptOutcome {
   if (error instanceof ExtractionParseError) return "parse-error";
   if (error instanceof ConsolidateAbortedError) return "aborted";
   const message = error instanceof Error ? error.message : String(error);
   const name = error instanceof Error ? error.name : "";
+  if (name === "AbortError" && signal?.aborted) return "aborted";
   // AbortSignal.timeout rejects with name 'TimeoutError'; a client that reports
   // its own deadline in prose is caught by the message probe.
   if (name === "TimeoutError" || /timed out/i.test(message)) return "timeout";
   if (/HTTP \d/.test(message)) return "http-error";
   return "error";
+}
+
+/**
+ * OR two optional cancellation sources into the one signal `extract` takes
+ * (#158 over #167's seam).
+ *
+ * Returns the sole present signal UNCHANGED when there is only one, which is
+ * the property that keeps "cancellation not firing changes nothing" true by
+ * construction: a caller passing neither reaches `extract` with `undefined`
+ * exactly as before, and one passing only `params.signal` passes that very
+ * object — so `classifyConsolidateError(error, params.signal)` still compares
+ * against the same signal the request was made with. Only when BOTH exist is a
+ * derived signal built, via the node built-in (no new dependency — `#158`), and
+ * `AbortSignal.any` drops its listeners once the composite is garbage, so a
+ * long-lived caller signal does not accumulate them across boundaries.
+ */
+function combineSignals(
+  callerSignal: AbortSignal | undefined,
+  lockSignal: AbortSignal | undefined,
+): AbortSignal | undefined {
+  if (!callerSignal) return lockSignal;
+  if (!lockSignal) return callerSignal;
+  return AbortSignal.any([callerSignal, lockSignal]);
 }
 
 export function readLastConsolidateAttempt(projectId: string): ConsolidateAttempt | undefined {
@@ -1419,6 +1489,32 @@ export interface ConsolidateParams {
    */
   signal?: AbortSignal;
   /**
+   * #158: the SECOND cancellation source, and a different one — the
+   * dispossession signal `withProjectLock` hands its `fn`, meaning "this
+   * boundary's lock now belongs to someone else". Absent ⇒ no lock
+   * cancellation, which is every caller that is not holding a project lock.
+   *
+   * The two signals are combined by OR — either one aborting stops the
+   * boundary — but they are kept as separate parameters rather than merged into
+   * one, because they must not reject with the same error:
+   *
+   * - `signal` (the caller's, #141) means "the user asked to stop", and rejects
+   *   with {@link ConsolidateAbortedError}.
+   * - `lockSignal` means "the store under you is no longer yours", and rejects
+   *   with `ProjectLockCompromisedError`, exactly as `withProjectLock` itself
+   *   would have once `fn` settled.
+   *
+   * Where both have fired, `lockSignal` wins: a user cancel is an intent that
+   * was going to be honoured anyway, while a lost lock is a fact about the
+   * store's safety and is the one of the two that must not be swallowed.
+   *
+   * Their REACH differs too, and deliberately. `signal` is checked only at the
+   * extraction-call edge (#141's scope, unchanged here); `lockSignal` is
+   * checked at every point where this boundary is about to commit — see the
+   * call sites in `run()`.
+   */
+  lockSignal?: AbortSignal;
+  /**
    * Override the raw-segment retention policy (tests only — production
    * always uses `pruneSegments`'s defaults). Exists so a test can force
    * `pruneSegments` to bite within a single boundary's own writes, to
@@ -1531,6 +1627,11 @@ export async function consolidate(params: ConsolidateParams): Promise<Consolidat
     // consumed observation window so it is not rescanned every boundary.
     if (observations.length === 0 && !transcriptTail) {
       if (rawObservationEvents.length > 0) {
+        // #158 check point ①. On disk from this boundary so far: nothing — the
+        // whole run to here is reads. The commit below is small but it is still
+        // a commit (a watermark this holder no longer has the right to move),
+        // so it gets the same guard as the big ones.
+        throwIfDispossessed(params.lockSignal);
         commitBoundaryCursors(params.projectId, {
           watermarkEventId: rawObservationEvents[rawObservationEvents.length - 1]!.id,
         });
@@ -1583,12 +1684,20 @@ export async function consolidate(params: ConsolidateParams): Promise<Consolidat
       },
     );
 
+    // #158 check point ②, and the one that pays for this issue. On disk from
+    // this boundary so far: still nothing. Checked BEFORE #141's caller signal
+    // for the precedence reason given on `ConsolidateParams.lockSignal`, and
+    // placed here because the call it guards is the long one — a dispossessed
+    // holder that skips it stops overlapping the new owner in milliseconds
+    // instead of after however many minutes an extraction takes.
+    throwIfDispossessed(params.lockSignal);
+
     // #141: the extraction-call edge is the one cancellation point this module
-    // recognizes. Checked here — after the noop short-circuit above (nothing
-    // was going to be extracted anyway) and immediately before the call it
-    // guards — so an already-aborted signal skips the extractor exactly like a
-    // transport failure would: propagate, leave the watermark alone, let the
-    // next boundary retry this same window.
+    // recognizes for the CALLER's signal. Checked here — after the noop
+    // short-circuit above (nothing was going to be extracted anyway) and
+    // immediately before the call it guards — so an already-aborted signal
+    // skips the extractor exactly like a transport failure would: propagate,
+    // leave the watermark alone, let the next boundary retry this same window.
     if (params.signal?.aborted) {
       throw new ConsolidateAbortedError();
     }
@@ -1596,11 +1705,38 @@ export async function consolidate(params: ConsolidateParams): Promise<Consolidat
     // Extractor failure (LLM timeout, transport error, unparseable reply)
     // intentionally propagates WITHOUT advancing the watermark — the next
     // boundary retries the same window. Callers at boundaries catch and degrade.
-    const extracted = await consolidator.extract({
-      observations: bounded.observations,
-      ...(bounded.transcriptTail ? { transcriptTail: bounded.transcriptTail } : {}),
-      existingMemories: bounded.existingMemories,
-    });
+    // #167: `params.signal` is forwarded past the preflight check above so a
+    // cancellation arriving mid-extraction can stop the in-flight request too,
+    // not just one arriving before it started. #158 rides that same seam with
+    // the lock's signal, so a lock lost DURING the extraction cancels the
+    // request rather than waiting it out — the difference the issue exists for.
+    // `combineSignals` returns the sole signal unchanged when only one is
+    // present, so a caller passing neither, or only `params.signal`, reaches
+    // `extract` with byte-identical arguments to before.
+    const extractionSignal = combineSignals(params.signal, params.lockSignal);
+    let extracted: ExtractedMemory[];
+    try {
+      extracted = await consolidator.extract(
+        {
+          observations: bounded.observations,
+          ...(bounded.transcriptTail ? { transcriptTail: bounded.transcriptTail } : {}),
+          existingMemories: bounded.existingMemories,
+        },
+        extractionSignal ? { signal: extractionSignal } : undefined,
+      );
+    } catch (error) {
+      // A request the lock's signal killed rejects with whatever the transport
+      // raises for an abort — typically a bare `AbortError`, which says nothing
+      // about WHY it stopped. Re-checking here replaces it with the lock's own
+      // verdict, keeping the promise that every abort-shaped exit from a
+      // dispossessed section reaches the caller as the same error.
+      //
+      // `params.signal`'s path is left exactly as #141/#167 left it: no
+      // rewriting, so a caller cancel still surfaces as the extractor's own
+      // rejection and `classifyConsolidateError` still decides what it was.
+      throwIfDispossessed(params.lockSignal);
+      throw error;
+    }
 
     // Supersede only what the extractor was actually SHOWN — `bounded`, not the
     // full `existing` list. Budget-trimmed memories are valid but invisible to
@@ -1673,6 +1809,13 @@ export async function consolidate(params: ConsolidateParams): Promise<Consolidat
     // and self-healing. Writing events first would trade it for the opposite
     // failure mode — memories durably recorded while a later insertSegments
     // failure silently drops their raw detail — for no correctness gain.
+    // #158 check point ③. On disk from this boundary so far: STILL NOTHING —
+    // extraction is a network call, not a write. Placed before the segment
+    // insert rather than only before the append below so that a lock lost
+    // during a long extraction does not even grow the derived buffer, which is
+    // work the next boundary would have to redo (and prune) anyway.
+    throwIfDispossessed(params.lockSignal);
+
     let segmentsWritten = 0;
     // #139: ids of the rows THIS boundary just inserted, so the offset-advance
     // check below can tell "wrote N segments" apart from "this slice's own
@@ -1699,6 +1842,23 @@ export async function consolidate(params: ConsolidateParams): Promise<Consolidat
         // Derived buffer must never fail the consolidation boundary.
       }
     }
+
+    // #158 check point ④ — the one the issue names, and the last one that can
+    // still matter. On disk from this boundary at this instant: the raw
+    // conversation SEGMENTS written just above, if the buffer is on, and
+    // nothing else. That is the whole exposure, and it is the bounded,
+    // self-healing kind already documented for the #103 ordering right above:
+    // segments are a derived, prunable buffer whose duplicates the next
+    // boundary's `pruneSegments` caps. No `memory.consolidated` event exists,
+    // and neither cursor has moved — `commitBoundaryCursors` is at the very end
+    // of this function, so the watermark stays exactly where `run()` found it
+    // and the next boundary re-processes this same window, which is the
+    // property the issue's acceptance criteria ask for.
+    //
+    // Continuing past here is what this issue exists to prevent: appending
+    // `memory.consolidated` for a window that now belongs to another process
+    // leaves the duplicate distillation #132 set out to remove.
+    throwIfDispossessed(params.lockSignal);
 
     if (inputs.length > 0) {
       await appendEvents(params.projectId, inputs);
@@ -1879,7 +2039,7 @@ export async function consolidate(params: ConsolidateParams): Promise<Consolidat
     result = await run();
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    recordAttempt(classifyConsolidateError(error), {
+    recordAttempt(classifyConsolidateError(error, params.signal), {
       error: message.slice(0, ATTEMPT_ERROR_MAX_CHARS),
     });
     throw error;

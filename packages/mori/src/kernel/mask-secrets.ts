@@ -76,9 +76,12 @@ export const SECRET_MASK_PATTERNS: readonly SecretMaskPattern[] = [
   },
   {
     id: "long-flag-value",
-    description: "--token/--password/--secret/--api-key/--access-key style flag (= or space form)",
+    description:
+      "--token/--password/--secret/--api-key/--access-key style flag (= form, or space form " +
+      "separated by one or more spaces/tabs — but not a newline, so the next line's first " +
+      "token in a multi-line command is never swallowed as the value)",
     pattern: new RegExp(
-      `(--(?:token|password|passwd|secret|api-key|apikey|access-key|access-token|auth-token))([= ])(${VALUE_TOKEN})`,
+      `(--(?:token|password|passwd|secret|api-key|apikey|access-key|access-token|auth-token))(=|[ \\t]+)(${VALUE_TOKEN})`,
       "gi",
     ),
     replacement: (_match: string, flag: string, sep: string, value: string) =>
@@ -108,16 +111,22 @@ export const SECRET_MASK_PATTERNS: readonly SecretMaskPattern[] = [
   {
     id: "secret-env-assignment",
     description:
-      "environment variable assignment whose name looks like a secret " +
-      "(…secret…, …api_key…, …token…, …password…), matched case-insensitively " +
-      "since shell env var names are case-sensitive but may legally be lowercase. " +
-      "Known false positive from case-insensitivity: text-substitution commands " +
-      "whose argument merely contains one of these words as a literal, e.g. " +
-      "`sed 's/password=old/password=new/'`, now match and get partially redacted " +
-      "even though nothing there is a credential — accepted, since over-redacting " +
-      "a non-secret is cheaper than leaking one.",
+      "environment variable assignment whose name *contains* a secret keyword " +
+      "(…secret…, …api_key…, …token…, …password…) anywhere inside a valid shell " +
+      "identifier — not just as an underscore-delimited segment, so `PGPASSWORD=`/ " +
+      "`MYPASSWORD=` (no separating underscore) match same as `DB_PASSWORD=` does. " +
+      "Matched case-insensitively since shell env var names are case-sensitive but " +
+      "may legally be lowercase. Known false positive from case-insensitivity: " +
+      "text-substitution commands whose argument merely contains one of these words " +
+      "as a literal, e.g. `sed 's/password=old/password=new/'`, now match and get " +
+      "partially redacted even though nothing there is a credential — accepted, " +
+      "since over-redacting a non-secret is cheaper than leaking one. Widened further " +
+      "by dropping the underscore requirement: identifiers where a keyword merely " +
+      "appears as a substring flanked by other identifier characters, e.g. a " +
+      "hypothetical `PASSWORDLESS=1`, now also match and get redacted — same " +
+      "over-redact-over-leak tradeoff.",
     pattern: new RegExp(
-      `(\\b(?:[A-Z0-9]+_)*(?:SECRET|API_KEY|APIKEY|TOKEN|PASSWORD|PASSWD)(?:_[A-Z0-9]+)*=)(${VALUE_TOKEN})`,
+      `(\\b[A-Z0-9_]*(?:SECRET|API_KEY|APIKEY|TOKEN|PASSWORD|PASSWD)[A-Z0-9_]*=)(${VALUE_TOKEN})`,
       "gi",
     ),
     replacement: (_match: string, prefix: string, value: string) =>
