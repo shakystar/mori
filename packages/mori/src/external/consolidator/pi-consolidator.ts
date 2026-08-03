@@ -58,11 +58,24 @@ export class PiConsolidatorLlm implements ConsolidatorLlm {
    * already reserves out of the model's declared context window when sizing
    * the INPUT side, clamped to this model's own window (PR #197 review,
    * 2026-08-03) so a narrow-window model is never asked for a completion
-   * bigger than the window it declared. Without the cap, nothing
-   * generation-time stops the model from running past that reservation; the
-   * only enforcement left would be `parseExtractedMemories`'s post-hoc slice,
-   * which only ever sees a reply that already finished (or hit `"length"`
-   * and been thrown above).
+   * bigger than the window it declared. That clamp alone still misses a wide
+   * window paired with a low per-request output ceiling (128k context, 4k/8k
+   * max completion — a common real-world shape, not a narrow-context edge
+   * case): `reservedOutputTokensFor` never sees that ceiling, so it would ask
+   * for more than the provider allows and the provider rejects the request
+   * before generation starts (Codex P1, PR #197 review, 2026-08-03). It is
+   * further clamped to `model.maxTokens` — pi-ai's declared per-request
+   * output ceiling for this model (verified in
+   * `packages/mori/node_modules/@earendil-works/pi-ai/dist/types.d.ts`,
+   * `Model<TApi>.maxTokens: number` — required, not optional, on every
+   * registered model, so no undefined case to fall back from). The kernel
+   * owns "how much did we reserve"; the adapter owns "how much may this
+   * model actually be asked for" — `reservedOutputTokensFor`'s signature
+   * stays context-window-only, this ceiling is read here instead. Without
+   * either cap, nothing generation-time stops the model from running past
+   * the reservation; the only enforcement left would be
+   * `parseExtractedMemories`'s post-hoc slice, which only ever sees a reply
+   * that already finished (or hit `"length"` and been thrown above).
    *
    * `opts.signal` (#167) is forwarded into `completeSimple`'s own `signal` —
    * pi-ai's `StreamOptions.signal` — so a cancellation arriving while THIS
@@ -87,7 +100,7 @@ export class PiConsolidatorLlm implements ConsolidatorLlm {
       model,
       { messages: [{ role: "user", content: prompt, timestamp: Date.now() }] },
       {
-        maxTokens: reservedOutputTokensFor(this.contextWindowTokens),
+        maxTokens: Math.min(reservedOutputTokensFor(this.contextWindowTokens), model.maxTokens),
         ...(opts?.signal ? { signal: opts.signal } : {}),
       },
     );

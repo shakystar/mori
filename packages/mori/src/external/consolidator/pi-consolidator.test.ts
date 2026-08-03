@@ -99,6 +99,37 @@ describe("PiConsolidatorLlm", () => {
     expect(seenMaxTokens).toBeLessThan(4_000);
   });
 
+  // PR #197 review (2026-08-03, second content pass): a wide context window
+  // does not imply a wide per-request output ceiling — the common real-world
+  // shape is a 128k window with a 4k/8k max completion. reservedOutputTokensFor
+  // only clamps against the context window, so it would still request more
+  // than the provider's own declared maxTokens allows (Codex P1,
+  // pi-consolidator.ts:90).
+  it("clamps completeSimple's maxTokens to the resolved model's own output ceiling even with a wide context window (#169 Codex follow-up)", async () => {
+    const faux = fauxProvider({
+      models: [{ id: "wide-window-low-ceiling", contextWindow: 128_000, maxTokens: 4_000 }],
+    });
+    const models = createModels();
+    models.setProvider(faux.provider);
+
+    let seenMaxTokens: number | undefined;
+    faux.setResponses([
+      (_context, options) => {
+        seenMaxTokens = options?.maxTokens;
+        return fauxAssistantMessage("distilled summary");
+      },
+    ]);
+
+    const llm = new PiConsolidatorLlm(models, faux.provider.id, "wide-window-low-ceiling");
+    await llm.complete("prompt");
+
+    // reservedOutputTokensFor(128_000) would return RESERVED_OUTPUT_TOKENS
+    // unclamped (see the wide-window regression guard in consolidate-service.test.ts) —
+    // the model's own maxTokens (4_000) must win.
+    expect(seenMaxTokens).toBe(4_000);
+    expect(seenMaxTokens).toBeLessThan(RESERVED_OUTPUT_TOKENS);
+  });
+
   it("forwards opts.signal into the request and throws an AbortError when it aborts mid-flight (#167)", async () => {
     const faux = fauxProvider();
     const models = createModels();
