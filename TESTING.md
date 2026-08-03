@@ -115,3 +115,10 @@ PR 게이트 워크플로(`.github/workflows/ci.yml`의 `build-and-test`) 전체
   파일 전부 + `tsconfig.base.json` 등 전역 의존이라, 테스트 파일 한 줄만 고쳐도 다시 돈다.
   패키지 **밖**에 새 입력(공유 픽스처 디렉터리 등)을 두면 이 키에 안 잡혀 stale 캐시가
   false-green을 만든다 — 그런 것이 필요하면 `turbo.json`의 `globalDependencies`에 함께 넣는다.
+
+`pnpm test`는 **자기충족이다** — 깨끗한 체크아웃에서 이것만 불러도 통과한다. `test` 태스크가
+`dependsOn: ["^build", "build"]`로 의존 패키지와 **자기 패키지**의 빌드를 먼저 돌리기 때문이다
+(핫 캐시에서는 둘 다 캐시 히트라 추가 비용이 없다). 빌드 산출물을 실제로 실행해서 검증하는
+테스트(`packages/mori/src/bin-entrypoint.test.ts`)가 이 계약에 기대고 있으므로, 그런 테스트를
+새로 쓸 때 `dist`를 손으로 만들어 둘 필요는 없다. 다만 **vitest를 직접 부르면**(`pnpm exec
+vitest run …`) 이 보장이 없다 — 그때는 `pnpm build`를 먼저 돌려야 한다.
