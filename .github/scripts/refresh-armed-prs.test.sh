@@ -167,6 +167,26 @@ fail_calls_matching "pulls/8"
 run_refresh
 assert_eq "[7]|[8]" "$(output_of refreshed)|$(output_of unresolved)"
 
+it "분류가 끝내 실패한 PR이 있으면 종료코드가 0이 아니고 그 PR이 unresolved에 담긴다"
+# #205: unresolved도 failed와 같은 취급이다 — 분류 실패로 갱신되지 않은 PR을 초록으로 넘기지 않는다.
+reset_scenario
+route "pulls?state=open" '[{"number":7}]'
+route "compare/" "$(compare_json 1 diverged)"
+fail_calls_matching "pulls/7"
+run_refresh
+assert_eq "[7]|1" "$(output_of unresolved)|${REFRESH_STATUS}"
+
+it "mergeability-unknown만 있는 실행은 그대로 그린이다 — 회귀 방지"
+# skip:mergeability-unknown은 GitHub이 머지 가능성을 계산 중인 정상 상태이고 unresolved가
+# 아니다. #205가 unresolved를 레드로 만들어도 이 구분이 무너지면 GitHub 지연마다 CI가
+# 빨개진다.
+reset_scenario
+route "pulls?state=open" '[{"number":7}]'
+route "compare/" "$(compare_json 1 diverged)"
+route_pr 7 "$(pr_json true false unknown "$HEAD7")"
+run_refresh
+assert_eq "[]|[7]|0" "$(output_of unresolved)|$(output_of skipped)|${REFRESH_STATUS}"
+
 it "열린 PR이 0건이면 갱신 대상도 0건이다"
 reset_scenario
 route "pulls?state=open" '[]'
