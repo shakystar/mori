@@ -22,8 +22,8 @@ on:
   push:
     branches: [main]
   # 시크릿을 등록한 뒤 main push를 기다리지 않고 한 번 돌려 확인하기 위한 수동 트리거다
-  # (#195 완료 조건의 실측 확인). 판정 로직은 push 경로와 같다 — 이 이벤트에서도
-  # github.sha는 워크플로를 띄운 브랜치(main)의 head다.
+  # (#195 완료 조건의 실측 확인). 단, 이 이벤트의 "Use workflow from"은 **임의 브랜치를 고를 수
+  # 있고** 그때 github.sha는 그 브랜치의 head이지 main이 아니다 — 아래 두 잡이 그 경우를 막는다.
   workflow_dispatch:
 
 # 연속 push에서는 앞선 실행이 이미 낡은 base를 보고 있다. 중간에 취소돼 일부 PR만 갱신돼도
@@ -39,8 +39,39 @@ permissions:
   contents: read
 
 jobs:
+  # 비-main dispatch를 조용히 스킵시키지 않는다. `if:`로 걸러진 잡은 화면에 회색으로만 남고
+  # 실행 전체는 초록으로 보이므로, 실측 확인을 하려던 사람이 "돌았는데 아무 일도 안 났다"로
+  # 읽는다. 이 잡이 이유를 남기고 실행을 레드로 만든다. PR 코드를 받아오지 않으며 토큰도 쥐지
+  # 않는다.
+  reject-non-main:
+    name: Reject a dispatch from a non-main ref
+    if: github.ref != 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Explain why nothing was refreshed
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          echo "::error::이 워크플로는 main에서만 돕니다. 실행 ref가 '${REF}'라 armed PR을 하나도 갱신하지 않았습니다."
+          {
+            echo "## armed PR head 갱신 — 실행되지 않음"
+            echo ""
+            echo "실행 ref가 \`${REF}\`입니다. 이 워크플로는 \`refs/heads/main\`에서만 돕니다 —"
+            echo "다른 ref에서는 \`github.sha\`가 main의 head가 아니어서 (1) 실행할 스크립트를"
+            echo "신뢰할 수 없는 ref에서 가져오게 되고 (2) 뒤처짐을 엉뚱한 base로 재게 됩니다 (#195)."
+            echo ""
+            echo "수동 확인을 하려면 \"Use workflow from\"에서 \`main\`을 고르세요."
+          } >>"$GITHUB_STEP_SUMMARY"
+          exit 1
+
   refresh:
     name: Refresh armed PRs behind main
+    # main 고정 — 아래 체크아웃 ref와 BASE_SHA가 둘 다 github.sha이고, 그 둘이 main의 head라는
+    # 것이 이 잡의 신뢰 가정 전부다. push 트리거는 branches: [main]이라 항상 성립하지만
+    # workflow_dispatch는 그렇지 않다.
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     # 이 잡은 PR 코드를 체크아웃하지도 실행하지도 않는다 — API 호출만 한다. `recheck-open-prs.yml`이
     # 쓰기 토큰을 report 잡에만 준 이유(#112 항목 5)가 그대로 적용되는 자리다. 편의를 위해서라도
@@ -51,8 +82,8 @@ jobs:
       - name: Checkout scripts from the pushed commit
         uses: actions/checkout@v4
         with:
-          # push 이벤트의 github.sha는 곧 main의 head다 — 신뢰 ref이고, 아래 스크립트는
-          # 여기서만 온다.
+          # 이 잡은 main에 고정돼 있으므로(잡 레벨 `if:`) github.sha는 main의 head다 —
+          # 신뢰 ref이고, 아래 스크립트는 여기서만 온다.
           ref: ${{ github.sha }}
           sparse-checkout: .github/scripts
 
@@ -93,5 +124,8 @@ jobs:
           # 기본 GITHUB_TOKEN이 아니다 — 위 주석의 approval-required 문제 때문이다.
           GH_TOKEN: ${{ steps.token.outputs.token }}
           REPO: ${{ github.repository }}
+          # 잡이 main에 고정돼 있으므로 main의 head다. 스크립트도 이 값이 정말 main에 포함된
+          # 커밋인지 API로 한 번 더 확인한다 — 모양만 SHA인 값이 흘러들면 뒤처짐 판정이
+          # 통째로 뒤집히기 때문이다 (#195 리뷰).
           BASE_SHA: ${{ github.sha }}
         run: bash .github/scripts/refresh-armed-prs.sh

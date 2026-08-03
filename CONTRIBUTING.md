@@ -158,6 +158,11 @@ approval-required 상태로 생성돼 사람이 "Approve and run"을 눌러야 �
 시크릿(`MERGE_REFRESH_APP_ID` / `MERGE_REFRESH_APP_PRIVATE_KEY`)이 없으면 이 잡은 이유를
 잡 요약에 남기고 **no-op**한다 — 그때는 종전대로 owner가 수동으로 head를 갱신하거나 머지한다.
 
+수동 실행(`workflow_dispatch`)도 되지만 **"Use workflow from"에서 반드시 `main`을 고른다.**
+다른 ref에서는 `github.sha`가 main의 head가 아니라 (1) 실행할 스크립트를 신뢰할 수 없는 ref에서
+가져오고 (2) 뒤처짐을 엉뚱한 base로 재게 된다. 잡이 `main`에 고정돼 있어 그 실행은 갱신을
+하지 않고 이유를 남기며 레드가 된다.
+
 ## 사람이 개입하는 지점
 
 플릿은 기본적으로 자율 동작한다. 다음 세 가지만 사람 몫이다.
