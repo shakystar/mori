@@ -407,6 +407,31 @@ function seedUnionStore(userVersion: number): string {
   return dbFile;
 }
 
+/**
+ * Snapshot every fts5 shadow table backing `search_fts` (`search_fts_data`,
+ * `search_fts_idx`, `search_fts_docsize`, `search_fts_config` — discovered via
+ * `sqlite_master` rather than hardcoded, since which shadow tables exist is an
+ * fts5 implementation detail). Blob columns are hex-encoded so the snapshot is
+ * a plain JSON-comparable value; `expect(...).toEqual` is not blob-aware.
+ */
+function snapshotFtsShadowTables(db: Database.Database): Record<string, string[]> {
+  const tables = db
+    .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'search_fts_%'")
+    .all() as Array<{ name: string }>;
+  const snapshot: Record<string, string[]> = {};
+  for (const { name } of tables.sort((a, b) => a.name.localeCompare(b.name))) {
+    const rows = db.prepare(`SELECT * FROM ${name}`).all() as Array<Record<string, unknown>>;
+    snapshot[name] = rows.map((row) =>
+      JSON.stringify(
+        Object.fromEntries(
+          Object.entries(row).map(([k, v]) => [k, Buffer.isBuffer(v) ? v.toString("hex") : v]),
+        ),
+      ),
+    );
+  }
+  return snapshot;
+}
+
 describe("v12 entity-table + search_fts lane backfill (#150)", () => {
   it("repairs a store already past v12 (column exists, left NULL) with no write", () => {
     seedUnionStore(15);
@@ -700,5 +725,87 @@ describe("v12 entity-table + search_fts lane backfill (#150)", () => {
       .prepare("SELECT entity_id AS id, source_project_id AS lane FROM search_fts")
       .all() as Array<{ id: string; lane: string | null }>;
     expect(ftsRows).toEqual([{ id: "seg_1", lane: null }]);
+  });
+
+  it("search_fts's fts5 shadow tables are byte-identical across the v16 upgrade on a self-only store (#179)", () => {
+    // #150 already proved (judgement ①) that no real store can hold a foreign
+    // row here, so v16's search_fts backfill is a provable no-op on every real
+    // store — but `backfillSearchFtsLane`'s UPDATE touched every row of every
+    // kind regardless of whether the value changed, and fts5 rewrites a row's
+    // term index on ANY UPDATE that touches it (even an UNINDEXED column),
+    // treating it as delete+insert. So the "no-op" was only true at the
+    // logical-value level; physically it re-wrote the entire content index on
+    // every upgrade. This pins the physical claim down directly, at the
+    // shadow-table level, rather than only asserting the logical column value.
+    getDb(SELF);
+    closeAll();
+
+    const dbFile = getProjectDbFile(SELF);
+    const seed = new Database(dbFile);
+    insertGenesis(seed, SELF, "Self");
+
+    const task = taskPayload("task_only", SELF);
+    insertEvent(seed, {
+      id: "evt_task_only",
+      type: "task.created",
+      projectId: SELF,
+      scopeType: "task",
+      scopeId: task.id,
+      sourceProjectId: SELF,
+      payload: task,
+    });
+    seed
+      .prepare(
+        "INSERT INTO tasks (id, status, created_at, updated_at, source_project_id, data) " +
+          "VALUES (?, ?, ?, ?, NULL, ?)",
+      )
+      .run(task.id, task.status, task.createdAt, task.updatedAt, JSON.stringify(task));
+
+    const memory = memoryPayload("memory_only", SELF);
+    insertEvent(seed, {
+      id: "evt_memory_only",
+      type: "memory.consolidated",
+      projectId: SELF,
+      scopeType: "project",
+      scopeId: SELF,
+      sourceProjectId: SELF,
+      payload: memory,
+    });
+    seed
+      .prepare(
+        "INSERT INTO memories (id, kind, salience, created_at, source_project_id, data) " +
+          "VALUES (?, ?, ?, ?, NULL, ?)",
+      )
+      .run(memory.id, memory.kind, memory.salience, memory.createdAt, JSON.stringify(memory));
+
+    // Lanes already correct (NULL = self) — exactly what a real, already-
+    // upgraded-through-v15 store looks like; v16 has nothing true to fix here.
+    seed
+      .prepare(
+        "INSERT INTO search_fts (entity_id, kind, text, source_project_id) VALUES (?, 'task', ?, NULL)",
+      )
+      .run(task.id, task.title);
+    seed
+      .prepare(
+        "INSERT INTO search_fts (entity_id, kind, text, source_project_id) VALUES (?, 'memory', ?, NULL)",
+      )
+      .run(memory.id, memory.text);
+
+    seed.pragma("user_version = 15");
+    seed.close();
+
+    const before = new Database(dbFile);
+    const beforeSnapshot = snapshotFtsShadowTables(before);
+    before.close();
+
+    const db = getDb(SELF);
+    expect(db.pragma("user_version", { simple: true })).toBeGreaterThanOrEqual(16);
+    closeAll();
+
+    const after = new Database(dbFile);
+    const afterSnapshot = snapshotFtsShadowTables(after);
+    after.close();
+
+    expect(afterSnapshot).toEqual(beforeSnapshot);
   });
 });

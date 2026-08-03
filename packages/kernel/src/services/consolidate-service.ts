@@ -9,7 +9,13 @@ import {
   type Project,
 } from "../domain/entities.js";
 import type { DomainEvent } from "../domain/events.js";
-import type { ConsolidatorLlm, ConversationSlice, ConversationSource, Embedder } from "../index.js";
+import type {
+  ConsolidatorLlm,
+  ConsolidatorLlmCallOptions,
+  ConversationSlice,
+  ConversationSource,
+  Embedder,
+} from "../index.js";
 import { laneOf, laneWhereSql, SELF_LANE } from "../projections/projector.js";
 import { getDb } from "../storage/db.js";
 import {
@@ -140,7 +146,13 @@ export interface ConsolidationInput {
  * builds — any provider, any local model).
  */
 export interface Consolidator {
-  extract(input: ConsolidationInput): Promise<ExtractedMemory[]>;
+  /**
+   * `opts` (#167) carries the same `signal` `run()` already checked once before
+   * calling this — forwarded here so an LLM-backed extractor can cancel the
+   * request itself instead of the cancellation only being observable before
+   * extraction started.
+   */
+  extract(input: ConsolidationInput, opts?: ConsolidatorLlmCallOptions): Promise<ExtractedMemory[]>;
 }
 
 // --- rule-based degraded extractor -------------------------------------------
@@ -251,13 +263,30 @@ const EXTRACTION_SYSTEM_PROMPT = [
  * observations/conversation tails are substantially made of. The floor this
  * worst case implies is `1/3` chars/token (1 char <= 3 tokens, inverted).
  * Not a tokenizer — a fixed, documented approximation, per the issue's
- * explicit non-goal of adding one. `estimateTokens` also applies this same
- * low constant to the (English) system prompt, which is safe in the other
- * direction: English is comfortably below 3 tokens/char in reality, so this
- * OVER-counts its tokens and reserves more budget than strictly needed
- * rather than less.
+ * explicit non-goal of adding one. Applies to USER content only — the fixed
+ * English system prompt uses {@link SYSTEM_PROMPT_CHARS_PER_TOKEN} instead
+ * (#174: reusing this CJK worst-case constant for it over-reserved so much
+ * that small declared context windows derived a budget of 0).
  */
 export const CONSERVATIVE_CHARS_PER_TOKEN = 1 / 3;
+
+/**
+ * #174 (PR #168 follow-up) — chars-per-token used ONLY to translate the fixed
+ * {@link EXTRACTION_SYSTEM_PROMPT}'s length into a token deduction inside
+ * {@link extractionCharBudget}. Unlike user content (CJK-heavy, unbounded,
+ * needs `CONSERVATIVE_CHARS_PER_TOKEN`'s 1-char-per-3-tokens worst case), the
+ * system prompt is a FIXED, MEASURED, ASCII/English-only string — assuming
+ * CJK worst-case token density for it was the bug this issue fixes: it
+ * inflated a ~2.1KB prompt to ~6,400 "tokens" (vs. an actual ~530 for English
+ * text at the standard ~4 chars/token rule of thumb), eating the entire
+ * budget on any context window below ~7,400 tokens before a single character
+ * of user content was considered. `3` chars/token keeps a deliberate margin
+ * below that ~4 chars/token reality (over-counting real English tokens by
+ * roughly 33%) so the deduction stays conservative — safe if the prompt grows
+ * or the true ratio drifts a bit — without re-imposing the ~12x CJK-worst-case
+ * penalty that doesn't apply to this string.
+ */
+const SYSTEM_PROMPT_CHARS_PER_TOKEN = 3;
 
 /**
  * #143 item② — output tokens reserved out of a declared `contextWindowTokens`
@@ -270,12 +299,6 @@ export const CONSERVATIVE_CHARS_PER_TOKEN = 1 / 3;
  * duplicating the number.
  */
 export const RESERVED_OUTPUT_TOKENS = 1_300;
-
-/** Chars → estimated tokens, using the same conservative constant throughout
- *  so a budget derived from it and a later check against it never disagree. */
-function estimateTokens(chars: number): number {
-  return Math.ceil(chars / CONSERVATIVE_CHARS_PER_TOKEN);
-}
 
 /**
  * #143 item② — the character budget `run()` hands `boundExtractionInput`,
@@ -291,7 +314,14 @@ function estimateTokens(chars: number): number {
 export function extractionCharBudget(llm: ConsolidatorLlm | undefined): number {
   const contextWindowTokens = llm?.contextWindowTokens;
   if (contextWindowTokens === undefined) return MAX_EXTRACTION_INPUT_CHARS;
-  const systemPromptTokens = estimateTokens(EXTRACTION_SYSTEM_PROMPT.length);
+  // #174 — the system prompt is fixed English text, not CJK-heavy user
+  // content, so it gets its own (still conservative) chars-per-token ratio
+  // instead of `CONSERVATIVE_CHARS_PER_TOKEN`'s CJK worst case. See
+  // `SYSTEM_PROMPT_CHARS_PER_TOKEN`'s doc for why that constant doesn't apply
+  // to it.
+  const systemPromptTokens = Math.ceil(
+    EXTRACTION_SYSTEM_PROMPT.length / SYSTEM_PROMPT_CHARS_PER_TOKEN,
+  );
   const availableTokens = contextWindowTokens - systemPromptTokens - RESERVED_OUTPUT_TOKENS;
   return Math.max(0, Math.floor(availableTokens * CONSERVATIVE_CHARS_PER_TOKEN));
 }
@@ -711,9 +741,12 @@ function prefixClippedTo(tail: string, n: number): string {
 export class LlmConsolidator implements Consolidator {
   constructor(private readonly llm: ConsolidatorLlm) {}
 
-  async extract(input: ConsolidationInput): Promise<ExtractedMemory[]> {
+  async extract(
+    input: ConsolidationInput,
+    opts?: ConsolidatorLlmCallOptions,
+  ): Promise<ExtractedMemory[]> {
     const prompt = `${EXTRACTION_SYSTEM_PROMPT}\n\n${buildExtractionUserContent(input)}`;
-    return parseExtractedMemories(await this.llm.complete(prompt));
+    return parseExtractedMemories(await this.llm.complete(prompt, opts));
   }
 }
 
@@ -1045,12 +1078,25 @@ const ATTEMPT_ERROR_MAX_CHARS = 300;
  * `ConsolidatorLlm`, so the match stays on the shape of the error (a
  * `TimeoutError`, a "HTTP <code>" message) rather than on any client this
  * package owns.
+ *
+ * `signal` (#167) is this attempt's OWN cancellation signal, not a generic
+ * parameter — passed so an `AbortError`-named rejection is only classified
+ * `"aborted"` when THIS call's signal actually fired. Once #167 forwards the
+ * signal into the extraction request, a provider's own transport-level abort
+ * (a timeout, a connection reset) can surface with the same `name` without the
+ * user ever cancelling anything; matching on the name alone would misreport
+ * that failure as a clean cancellation and hide it (PR #166 Codex P2, absorbed
+ * into this issue's acceptance criteria).
  */
-export function classifyConsolidateError(error: unknown): ConsolidateAttemptOutcome {
+export function classifyConsolidateError(
+  error: unknown,
+  signal?: AbortSignal,
+): ConsolidateAttemptOutcome {
   if (error instanceof ExtractionParseError) return "parse-error";
   if (error instanceof ConsolidateAbortedError) return "aborted";
   const message = error instanceof Error ? error.message : String(error);
   const name = error instanceof Error ? error.name : "";
+  if (name === "AbortError" && signal?.aborted) return "aborted";
   // AbortSignal.timeout rejects with name 'TimeoutError'; a client that reports
   // its own deadline in prose is caught by the message probe.
   if (name === "TimeoutError" || /timed out/i.test(message)) return "timeout";
@@ -1596,11 +1642,17 @@ export async function consolidate(params: ConsolidateParams): Promise<Consolidat
     // Extractor failure (LLM timeout, transport error, unparseable reply)
     // intentionally propagates WITHOUT advancing the watermark — the next
     // boundary retries the same window. Callers at boundaries catch and degrade.
-    const extracted = await consolidator.extract({
-      observations: bounded.observations,
-      ...(bounded.transcriptTail ? { transcriptTail: bounded.transcriptTail } : {}),
-      existingMemories: bounded.existingMemories,
-    });
+    // #167: `params.signal` is forwarded past the preflight check above so a
+    // cancellation arriving mid-extraction can stop the in-flight request too,
+    // not just one arriving before it started.
+    const extracted = await consolidator.extract(
+      {
+        observations: bounded.observations,
+        ...(bounded.transcriptTail ? { transcriptTail: bounded.transcriptTail } : {}),
+        existingMemories: bounded.existingMemories,
+      },
+      params.signal ? { signal: params.signal } : undefined,
+    );
 
     // Supersede only what the extractor was actually SHOWN — `bounded`, not the
     // full `existing` list. Budget-trimmed memories are valid but invisible to
@@ -1879,7 +1931,7 @@ export async function consolidate(params: ConsolidateParams): Promise<Consolidat
     result = await run();
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    recordAttempt(classifyConsolidateError(error), {
+    recordAttempt(classifyConsolidateError(error, params.signal), {
       error: message.slice(0, ATTEMPT_ERROR_MAX_CHARS),
     });
     throw error;
