@@ -35,13 +35,22 @@
       "dependsOn": ["^build"],
       "outputs": ["dist/**", "*.tsbuildinfo"]
     },
-    // vitest는 TS를 직접 트랜스파일하므로 자기 패키지의 build는 필요 없다. mori의 테스트가
-    // 임포트하는 @mori/kernel만 dist가 있어야 하고, 그것이 ^build다. outputs가 비어 있어도
-    // turbo는 종료 코드와 로그를 캐시한다 — 그것이 스킵의 근거다.
+    // `build`(^ 없음)가 자기 패키지, `^build`가 의존 패키지다. 둘 다 필요하다:
+    //   - `^build` — mori의 테스트가 임포트하는 @mori/kernel이 dist/*.d.ts·dist/index.js로
+    //     해결된다 (kernel package.json의 exports).
+    //   - `build` — vitest 자체는 TS를 직접 트랜스파일하므로 대부분의 테스트에는 자기 dist가
+    //     필요 없지만, packages/mori/src/bin-entrypoint.test.ts는 **빌드 산출물을 심링크로
+    //     실행하는** 회귀 테스트라 자기 패키지의 dist/index.js가 있어야 한다. 예전에는 루트
+    //     `pretest` 훅이 이것을 보장했고 이 PR이 그 훅을 없앴으므로, 그 계약을 여기로 옮긴다.
+    //     빠뜨리면 `pnpm test` 단독 실행이 깨끗한 체크아웃에서 실패한다 (#185 리뷰).
+    // outputs가 비어 있어도 turbo는 종료 코드와 로그를 캐시한다 — 그것이 스킵의 근거다.
     "test": {
-      "dependsOn": ["^build"],
+      "dependsOn": ["^build", "build"],
       "outputs": []
     },
+    // 여기에는 `build`를 넣지 않는다. tsc는 자기 패키지의 소스를 dist가 아니라 src에서 읽고
+    // (tsconfig.test.json의 include), 패키지 **밖**의 @mori/kernel만 dist/*.d.ts로 해결하므로
+    // 필요한 것은 ^build뿐이다. 넣어도 결과는 같지만 캐시 미스 시 불필요한 빌드가 붙는다.
     "typecheck:test": {
       "dependsOn": ["^build"],
       "outputs": []
