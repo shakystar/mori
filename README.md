@@ -200,3 +200,8 @@ content.** Real isolation (container, seccomp, a permission system) is not imple
 
 See [TESTING.md](./TESTING.md) for this repo's testing conventions before adding or
 changing tests.
+
+See [docs/storage-boundary-secrets.md](./docs/storage-boundary-secrets.md) for the
+canonical list of values that must never cross mori's storage boundary (credential
+shapes, raw tool payloads) before touching capture, consolidate, or the mask-secrets
+module.

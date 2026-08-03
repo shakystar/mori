@@ -2,6 +2,13 @@
  * Masks credential-shaped values out of shell command text before it reaches
  * the memory kernel (#129).
  *
+ * `SECRET_MASK_PATTERNS` is the canonical definition of "category 1" (pattern-
+ * matched credential shapes) in the storage-boundary forbidden list — see
+ * `docs/storage-boundary-secrets.md` (#188 C). Do not duplicate this list
+ * elsewhere; the kernel-side counterpart (category 2, write-tool payload
+ * content) uses a different, pattern-free mechanism instead of importing this
+ * one, because the kernel cannot depend on mori (see that doc for why).
+ *
  * `observedShell` hands the raw command to `@mori/kernel`, whose event log is
  * append-only (packages/kernel/src/storage/event-store.ts) — nothing appended
  * can be edited or deleted later, only superseded going forward. A secret that

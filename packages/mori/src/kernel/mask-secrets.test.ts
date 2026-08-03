@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { maskSecrets, SECRET_MASK_PATTERNS } from "./mask-secrets.js";
 
+// This is the regression check for "category 1" of the storage-boundary
+// forbidden list — docs/storage-boundary-secrets.md (#188 C, #129).
 describe("secret mask patterns", () => {
   /** One sample command per pattern id. Every id must appear here. */
   const samples: Record<string, string[]> = {

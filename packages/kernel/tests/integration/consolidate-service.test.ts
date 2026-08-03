@@ -605,6 +605,8 @@ describe("consolidate — semantic wiring", () => {
 // type is an unenforced plain string, so this simulates a caller that hands
 // it file content anyway (the #109/PR #127 path contract lives at the harness
 // wiring layer, not here) and asserts the leak is structurally impossible.
+// This is the regression check for "category 2" of the storage-boundary
+// forbidden list — docs/storage-boundary-secrets.md (#188 C).
 describe("consolidate — rule-based fallback never echoes write-tool content (#113)", () => {
   it("never puts a write-tool observation's summary/filePath value into memory text", async () => {
     const secret = "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
