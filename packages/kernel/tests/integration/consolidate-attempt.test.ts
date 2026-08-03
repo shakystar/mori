@@ -94,6 +94,20 @@ describe("classifyConsolidateError", () => {
   it("maps a ConsolidateAbortedError to aborted (#141)", () => {
     expect(classifyConsolidateError(new ConsolidateAbortedError())).toBe("aborted");
   });
+
+  it("maps an AbortError to aborted only when the call's own signal actually fired (#167)", () => {
+    const abortError = new Error("aborted");
+    abortError.name = "AbortError";
+    const controller = new AbortController();
+
+    // Not this call's doing — a provider's own transport-level abort (timeout, connection
+    // reset) can surface the same name without the user ever cancelling anything.
+    expect(classifyConsolidateError(abortError, controller.signal)).toBe("error");
+    expect(classifyConsolidateError(abortError)).toBe("error");
+
+    controller.abort();
+    expect(classifyConsolidateError(abortError, controller.signal)).toBe("aborted");
+  });
 });
 
 describe("consolidate — attempt telemetry", () => {
@@ -208,6 +222,56 @@ describe("consolidate — attempt telemetry", () => {
 
     expect(extractCalls).toBe(0);
     // The failure must not consume the window — the next boundary retries it.
+    expect(getConsolidateWatermark(projectId)).toBeUndefined();
+    expect(readLastConsolidateAttempt(projectId)).toMatchObject({
+      outcome: "aborted",
+      pendingObservations: 1,
+    });
+  });
+
+  it("aborts extraction already in flight via the signal forwarded to Consolidator.extract, and records outcome aborted (#167)", async () => {
+    await seedObservation("decided to ship");
+
+    // Hangs until the FORWARDED signal fires — it never decides to cancel itself, only reacts
+    // to the same signal `consolidate()` was given, exactly like the real `ConsolidatorLlm`
+    // (`PiConsolidatorLlm`) reacting to the request it forwarded the signal into.
+    let extractStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      extractStarted = resolve;
+    });
+    const consolidator: Consolidator = {
+      extract(_input, opts) {
+        extractStarted();
+        return new Promise((_resolve, reject) => {
+          opts?.signal?.addEventListener(
+            "abort",
+            () => {
+              const error = new Error("aborted");
+              error.name = "AbortError";
+              reject(error);
+            },
+            { once: true },
+          );
+        });
+      },
+    };
+    const controller = new AbortController();
+
+    const attempt = consolidate({
+      projectId,
+      actor: "test",
+      consolidator,
+      signal: controller.signal,
+    });
+    // Wait until extraction has ACTUALLY started (the preflight check passed) before aborting —
+    // otherwise the abort could land before extract() is even reached, which would just
+    // re-exercise the #141 preflight path instead of this test's mid-flight one.
+    await started;
+    controller.abort();
+
+    await expect(attempt).rejects.toMatchObject({ name: "AbortError" });
+    // Append-only: nothing already durable is rewound, and the watermark must not advance
+    // past a window that was never actually distilled.
     expect(getConsolidateWatermark(projectId)).toBeUndefined();
     expect(readLastConsolidateAttempt(projectId)).toMatchObject({
       outcome: "aborted",

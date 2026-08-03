@@ -96,6 +96,13 @@ export type ExplicitConsolidateOutcome =
  * `ConsolidateAbortedError` in `consolidate-service.ts`) rather than this file importing that
  * class directly — recognizing it by name keeps this trigger from depending on which kernel
  * implementation is wired in.
+ *
+ * #167 also requires `signal?.aborted` itself, not just the error's name: once the kernel
+ * forwards `signal` all the way into the extraction request (#167's own change), a provider's
+ * OWN transport-level abort (a timeout, a connection reset) can reject with the same
+ * `AbortError` name without this call's `signal` ever having fired. Reporting that as
+ * `cancelled` would hide a genuine failure behind "the user cancelled it" — so `cancelled` is
+ * only reported when this call's own signal is the one that actually aborted.
  */
 export async function consolidateExplicit(
   kernel: MoriKernel,
@@ -107,7 +114,9 @@ export async function consolidateExplicit(
     await consolidateGuarded(kernel, llm, "manual", signal);
     return { kind: "ok" };
   } catch (error) {
-    if (error instanceof Error && error.name === "AbortError") return { kind: "cancelled" };
+    if (error instanceof Error && error.name === "AbortError" && signal?.aborted) {
+      return { kind: "cancelled" };
+    }
     return { kind: "failed", error };
   }
 }
