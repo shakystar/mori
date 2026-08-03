@@ -72,5 +72,3 @@ describe("personal-store id family", () => {
     expect(accountOfPersonalStore(PERSONAL_STORE_ID)).toBe(DEFAULT_ACCOUNT_ID);
   });
 });
-
-// [#185 검증용 커밋 — kernel의 테스트 파일만 건드린다. kernel test가 캐시 미스로 다시 도는지 본다. 되돌린다]

@@ -130,5 +130,3 @@ if (isMainEntry(entry, import.meta.url)) {
   const exitCode = await runCli(process.argv.slice(2), process.env);
   process.exit(exitCode);
 }
-
-// [#185 검증용 커밋 — mori만 건드린다. kernel의 build/test가 캐시 히트로 스킵되는지 본다. 되돌린다]
