@@ -8,15 +8,23 @@
 
 ## 카테고리 1 — 자격증명 형태 값 (패턴 매칭)
 
-정본: `packages/mori/src/kernel/mask-secrets.ts`의 `SECRET_MASK_PATTERNS`
-(5종 — `url-userinfo` / `long-flag-value` / `short-p-flag` / `bearer-token` /
-`secret-env-assignment`).
+정본: `packages/mori/src/kernel/mask-secrets.ts`의 `SECRET_MASK_PATTERNS` —
+개수와 항목은 코드에서 읽어라, 여기 나열하지 않는다.
 
 적용 지점: mori → kernel 경계, 셸 명령 캡처
 (`packages/mori/src/kernel/index.ts`의 `createAgentEventObserver`, `shell`
 verdict). `observedShell`에 넘기기 **직전** `maskSecrets`를 통과시킨다 — 커널의
 이벤트 로그는 append-only라 한 번 적재되면 지울 수 없으므로, 마스킹은 반드시
 이 경계를 넘기 전에 일어나야 한다.
+
+**한정(씨앗 목록, 스캐너 아님)**: `SECRET_MASK_PATTERNS`는 완전성을 주장하지
+않는 씨앗 목록이다. 예를 들어 `secret-env-assignment`는 `SECRET`/`API_KEY`/
+`APIKEY`/`TOKEN`/`PASSWORD`/`PASSWD` 이름만 인식하므로 `CLIENT_CREDENTIAL=abc`
+같은 형태는 지금도 마스킹 없이 append-only 로그를 넘어간다. 이 문서는 그런
+미커버 형태를 이 카테고리의 "금지"로 주장하지 않는다 — 목표는 흔한 형태를
+싸게 잡는 것이지, 새는 경로가 없다고 보장하는 것이 아니다. 미커버 형태를
+발견해도 여기서 패턴을 늘리지 않는다(#209 비범위) — 발견은 PR 본문
+"발견(범위 밖)"에 남긴다.
 
 해당 이슈: **#129** (셸 명령의 자격증명이 마스킹 없이 평문으로 적재됨).
 
@@ -35,18 +43,32 @@ verdict). `observedShell`에 넘기기 **직전** `maskSecrets`를 통과시킨�
 않는다.
 
 적용 지점: kernel 내부, LLM이 주입되지 않았을 때의 폴백 추출기(`RuleBasedConsolidator`).
-LLM 경로는 `EXTRACTION_SYSTEM_PROMPT`가 별도로 필터링을 맡으며 이 문서의 범위
-밖이다.
+
+**이 구조적 보장은 `RuleBasedConsolidator`에 한정된다 — `LlmConsolidator`
+경로에는 없다.** `MORI_CONSOLIDATE_MODEL`이 설정돼 있거나 커스텀 consolidator가
+주입되면 `LlmConsolidator.extract`가 대신 쓰이는데, 그 프롬프트를 만드는
+`buildExtractionUserContent`(`consolidate-service.ts`)는 관찰의 `summary`를
+가공 없이 그대로 프롬프트에 넣고, 돌아온 `text`는 `parseExtractedMemories`가
+페이로드 필터링 없이 그대로 받는다. 즉 `EXTRACTION_SYSTEM_PROMPT`는 모델에게
+그러지 말라고 지시할 뿐 구조적으로 막지는 않는다 — 값을 읽어 에코하는 추출을
+막는 것은 코드가 아니라 프롬프트 준수 여부다. 이 문서가 "카테고리 2가
+구조적으로 막는다"고 말하는 것은 오직 `RuleBasedConsolidator` 경로에서다.
 
 해당 이슈: **#113** (`Edited N file(s): <path 목록>` 형태로 파일 경로/내용이
 메모리 본문에 직접 노출됨).
 
 **주의(범위)**: 이 규칙은 append-only 원본 이벤트 로그(`observation.captured`)가
-아니라 **consolidate가 만들어내는, 장기 검색 가능한 메모리**에 적용된다. 캡처
-계약(#109/PR #127 — 하네스는 `toolInputText`에 경로만 담기로 되어 있다)을 어긴
-호출자가 원본 이벤트 로그 자체에 내용을 실어 보내는 것은 이 검사의 대상이
-아니다(그건 캡처 계약의 문제다) — 다만 그런 계약 위반이 있어도 그 값이 검색
-가능한 메모리로 **승격**되는 것만큼은 카테고리 2가 구조적으로 막는다.
+아니라 **consolidate가 만들어내는, 장기 검색 가능한 메모리**에 적용된다. 원본
+이벤트 로그 자체에 원문 페이로드가 실리는 것은 이 검사의 대상이 아니다 — 다만
+그 원인이 항상 캡처 계약(#109/PR #127) 위반은 아니다: `apply_patch`/`ApplyPatch`
+관찰은 그 계약의 **예외**로, `toolInputText`에 원래 raw patch body가 들어오는
+것이 정상이다(`capture-service.ts`의 `evaluateCapture` 주석 참고). 패치 헤더에서
+경로를 뽑아내면 `filePath`/`summary`에는 경로만 남지만, 헤더를 인식하지 못하면
+`evaluateCapture`가 clip된 raw patch body를 그대로 `summary`에 넣는 폴백이 있다
+— 계약을 지킨 정상 호출자도 이 경로로 원문을 이벤트 로그에 남길 수 있다는 뜻이다.
+그런 경우까지 포함해서, 원본 이벤트 로그에 실제로 무엇이 실렸든 그 값이 검색
+가능한 메모리로 **승격**되는 것만큼은(`RuleBasedConsolidator` 경로에 한해)
+카테고리 2가 구조적으로 막는다.
 
 ## 왜 두 카테고리를 하나의 정의로 합치지 않는가 (모듈 경계)
 
@@ -71,13 +93,13 @@ import 경계를 우회하는 코드만 늘어난다. 대신 각 카테고리는
 상호 참조로 잇는다:
 
 - **카테고리 1 (#129)**: `packages/mori/src/kernel/mask-secrets.test.ts`
-  (씨앗 패턴 5종 전부 커버 + "leaves ordinary commands with no credential shape
-  untouched"로 오탐 없음을 단언) + `index.test.ts`의 "masks credential-shaped
-  values in a captured bash command (#129)" (mori → kernel 경계 자체에서
-  마스킹이 실제로 적용되는지 확인).
+  (씨앗 패턴을 `SECRET_MASK_PATTERNS`와 대조해 전부 커버 + "leaves ordinary
+  commands with no credential shape untouched"로 오탐 없음을 단언) +
+  `index.test.ts`의 "masks credential-shaped values in a captured bash
+  command (#129)" (mori → kernel 경계 자체에서 마스킹이 실제로 적용되는지 확인).
 - **카테고리 2 (#113)**: `packages/kernel/tests/integration/consolidate-service.test.ts`의
   `describe("consolidate — rule-based fallback never echoes write-tool content (#113)")`
-  두 건 — 자격증명 형태 값을 `filePath`/`summary`에 주입해도 저장된 메모리
+  아래 테스트들 — 자격증명 형태 값을 `filePath`/`summary`에 주입해도 저장된 메모리
   텍스트에 나타나지 않음을 확인하는 테스트, 그리고 경로 값 없이 개수만으로
   dedup됨을 확인하는 테스트.
 
