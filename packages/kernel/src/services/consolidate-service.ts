@@ -250,16 +250,40 @@ export const EXPECTED_MAX_OUTPUT_CHARS = 2_500;
  * FULL rendered reply, but until now nothing told the model (or enforced
  * post-hoc) a PER-ITEM share of it — a schema-valid, item-count-compliant
  * reply could still blow the output budget one long `text` at a time.
- * Floor division, no JSON-scaffolding margin folded in: the margin problem is
- * solved on the enforcement side instead (`parseExtractedMemories` measures
- * each item's actual RENDERED JSON length against this constant, not just
- * `text.length`), so this constant stays the simple, honest "budget divided
- * evenly across the slots the model was told exist" and doesn't try to do
- * both jobs at once. Interpolated into `EXTRACTION_SYSTEM_PROMPT` below and
- * into `parseExtractedMemories`'s enforcement — never a literal in either
- * place, for the same reason `MAX_MEMORIES_PER_BOUNDARY` isn't (#169).
+ *
+ * PER-ITEM key/quote/comma overhead is NOT subtracted here — it is enforced
+ * instead: `parseExtractedMemories` measures each item's actual RENDERED JSON
+ * length (`JSON.stringify(item).length`, so `supersedeReason` and friends are
+ * counted too) against this constant rather than `text.length`. Guessing a
+ * fixed per-item margin would be strictly worse — the overhead varies with
+ * which optional fields an item carries, so a guess is wrong in both
+ * directions at once.
+ *
+ * The ARRAY scaffolding, unlike the per-item kind, is exactly known ahead of
+ * time — `[`, `]`, and one comma between each pair of items — so it IS
+ * subtracted, and that is what makes the whole-reply invariant true of the
+ * rendered array and not merely of the sum of its items. Interpolated into
+ * `EXTRACTION_SYSTEM_PROMPT` below and into `parseExtractedMemories`'s
+ * enforcement — never a literal in either place, for the same reason
+ * `MAX_MEMORIES_PER_BOUNDARY` isn't (#169).
  */
-export const PER_ITEM_MAX_CHARS = Math.floor(EXPECTED_MAX_OUTPUT_CHARS / MAX_MEMORIES_PER_BOUNDARY);
+const EXTRACTION_ARRAY_SCAFFOLD_CHARS = "[]".length + (MAX_MEMORIES_PER_BOUNDARY - 1);
+
+export const PER_ITEM_MAX_CHARS = Math.floor(
+  (EXPECTED_MAX_OUTPUT_CHARS - EXTRACTION_ARRAY_SCAFFOLD_CHARS) / MAX_MEMORIES_PER_BOUNDARY,
+);
+
+/**
+ * #213 — floor on how far {@link truncateToItemBudget} may shorten `text`.
+ * Without it, an item whose NON-`text` fields alone overrun the budget (an
+ * unbounded `supersedeReason` next to a long `supersedesMemoryId` does it) has
+ * its `text` sliced to `""` — and `parseExtractedMemories` rejects blank
+ * `text` twenty lines earlier precisely because a memory with no content is
+ * worse than no memory. Half the per-item budget, derived rather than picked:
+ * the payload field is guaranteed the larger share of its own slot, and the
+ * passengers cannot squeeze it out entirely.
+ */
+const MIN_TRUNCATED_TEXT_CHARS = Math.floor(PER_ITEM_MAX_CHARS / 2);
 
 /**
  * #169 — `MAX_MEMORIES_PER_BOUNDARY` is enforced today only AFTER the full
@@ -313,10 +337,11 @@ export const EXTRACTION_SYSTEM_PROMPT = [
   `${MAX_MEMORIES_PER_BOUNDARY} candidates are durable, choose the`,
   `${MAX_MEMORIES_PER_BOUNDARY} most durable ones yourself and list them most`,
   "durable first, since only the first ones you list will be kept.",
-  `Keep each item's "text" under ${PER_ITEM_MAX_CHARS} characters, and keep`,
-  `the ENTIRE reply (every item, every field, combined) under`,
-  `${EXPECTED_MAX_OUTPUT_CHARS} characters — a reply over this size is`,
-  "truncated, which loses information you could have kept by writing less.",
+  `Keep each item under ${PER_ITEM_MAX_CHARS} characters of JSON — that is the`,
+  "whole item as you write it, keys and quotes and every optional field",
+  `included, not the "text" value alone. Keep the ENTIRE reply under`,
+  `${EXPECTED_MAX_OUTPUT_CHARS} characters. An item over its size is truncated,`,
+  "which loses information you could have kept by writing less.",
   "Kind: decision = commitment, rule, directive, chosen policy, or preference;",
   "rationale = why a choice was made, tradeoff, root cause, or rejected",
   "alternative; progress = completed work, current state, blocker, handoff,",
@@ -963,10 +988,9 @@ function sanitizeEvidenceTags(value: unknown): string[] | undefined {
 /**
  * #213 (PR #197 Codex P1, relayed) — enforces {@link PER_ITEM_MAX_CHARS} on
  * the RENDERED item (`JSON.stringify`), not just its raw `text`. `text` is
- * usually the dominant contributor, but it is not the only unbounded one:
- * unlike `obsoleteWhen`/`kindMisfitReason`/`supersedesNote` (already capped
- * at `MAX_EVIDENCE_CHARS` via `sanitizeEvidenceText`), `supersedeReason` has
- * no existing cap and rides along on every superseding item — exactly the
+ * usually the dominant contributor but it is not the only one: the evidence
+ * fields ride along on every item, and even capped individually at
+ * `MAX_EVIDENCE_CHARS` they add up — exactly the
  * "kind/text/evidence/supersedeReason" scaffolding overhead the owner named
  * as the residual risk once the prompt already asks for both an item cap and
  * a whole-reply cap. Measuring the full rendered item (not just `text`)
@@ -979,7 +1003,16 @@ function sanitizeEvidenceTags(value: unknown): string[] | undefined {
  * elsewhere trades a clean sentence boundary for a simple, predictable cut).
  * `text` is the field shortened even when another field caused the overflow,
  * because it is the one field guaranteed to be present and the one the
- * prompt itself instructs the model to keep short.
+ * prompt itself instructs the model to keep short. It is never shortened past
+ * {@link MIN_TRUNCATED_TEXT_CHARS} though: an item can be left over budget
+ * (reported, and bounded anyway now that `supersedeReason` is capped like its
+ * sibling evidence fields) but it is never left with the empty `text` that
+ * this very function's parse step rejects outright.
+ *
+ * Cutting mid-sentence is accepted rather than backing up to a word or
+ * sentence boundary — `clippedTo`/`prefixClippedTo` above already cut the
+ * transcript the same blunt way, and one predictable rule per module beats a
+ * cleverer cut here that reads as an inconsistency there.
  *
  * Silent would repeat the exact bug this issue closes at one remove — a
  * kept-but-mangled memory with no trace of why — so the caller learns via
@@ -991,7 +1024,10 @@ function truncateToItemBudget(item: ExtractedMemory, onTruncate?: () => void): E
   const overflow = JSON.stringify(item).length - PER_ITEM_MAX_CHARS;
   if (overflow <= 0) return item;
   onTruncate?.();
-  const keptChars = Math.max(0, item.text.length - overflow);
+  // Each dropped `text` char frees AT LEAST one rendered char (escapes render
+  // wider, never narrower), so one pass suffices — no re-measure loop.
+  const keptChars = Math.max(MIN_TRUNCATED_TEXT_CHARS, item.text.length - overflow);
+  if (keptChars >= item.text.length) return item;
   return { ...item, text: item.text.slice(0, keptChars) };
 }
 
@@ -1032,6 +1068,10 @@ export function parseExtractedMemories(
   }
 
   const kinds: ConsolidatedMemoryKind[] = ["decision", "rationale", "progress"];
+  // #213: the size cap runs AFTER the count cap (`slice`), never before — an
+  // item the count cap is about to discard has no reason to pay for, or
+  // report, truncation. Same cap-order invariant the rest of this file keeps:
+  // a size limit must not run ahead of the boundary that decides what is kept.
   return parsed
     .filter(
       (item): item is Record<string, unknown> =>
@@ -1051,33 +1091,30 @@ export function parseExtractedMemories(
       // stray reason on a non-misfit item would skew it.
       const kindMisfitReason = kindMisfit ? sanitizeEvidenceText(item.kindMisfitReason) : undefined;
       const supersedesNote = sanitizeEvidenceText(item.supersedesNote);
+      // #213: the one free-text field that was passed through uncapped, which
+      // is why the owner named it as the residual risk — an item can overrun
+      // its whole budget on `supersedeReason` alone. Capped here like its
+      // three sibling evidence fields rather than special-cased downstream.
+      const supersedeReason = sanitizeEvidenceText(item.supersedeReason);
       const tags = sanitizeEvidenceTags(item.tags);
 
-      const built: ExtractedMemory = {
+      return {
         kind: kind as ConsolidatedMemoryKind,
         text: text.trim(),
         salience: clampSalience(typeof item.salience === "number" ? item.salience : 5),
         ...(typeof item.supersedesMemoryId === "string"
           ? { supersedesMemoryId: item.supersedesMemoryId }
           : {}),
-        ...(typeof item.supersedeReason === "string"
-          ? { supersedeReason: item.supersedeReason }
-          : {}),
+        ...(supersedeReason ? { supersedeReason } : {}),
         ...(obsoleteWhen ? { obsoleteWhen } : {}),
         ...(kindMisfit ? { kindMisfit: true } : {}),
         ...(kindMisfitReason ? { kindMisfitReason } : {}),
         ...(supersedesNote ? { supersedesNote } : {}),
         ...(tags ? { tags } : {}),
       };
-      return built;
     })
     .filter((item): item is ExtractedMemory => item !== undefined)
     .slice(0, maxItems)
-    // #213: truncate AFTER the count cap, not before — an item the count cap
-    // is about to discard has no reason to pay for (or report) truncation.
-    // Also keeps the cap-order invariant this file already relies on
-    // elsewhere: a size limit must never run ahead of the boundary that
-    // decides what is actually kept.
     .map((item) => truncateToItemBudget(item, opts.onTruncate));
 }
 

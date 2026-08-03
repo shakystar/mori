@@ -310,6 +310,14 @@ describe("PER_ITEM_MAX_CHARS — derived per-item budget never overruns the whol
     expect(MAX_MEMORIES_PER_BOUNDARY * PER_ITEM_MAX_CHARS).toBeLessThanOrEqual(
       EXPECTED_MAX_OUTPUT_CHARS,
     );
+    // The sum of the items is not the reply: `[`, `]` and the commas between
+    // items are chars the model has to emit too. Asserted on a REAL rendered
+    // array so the derivation has to account for them rather than land the
+    // arithmetic just inside the budget and the actual reply just outside it.
+    const fullReply = JSON.stringify(
+      Array.from({ length: MAX_MEMORIES_PER_BOUNDARY }, () => "x".repeat(PER_ITEM_MAX_CHARS - 2)),
+    );
+    expect(fullReply.length).toBeLessThanOrEqual(EXPECTED_MAX_OUTPUT_CHARS);
   });
 });
 
