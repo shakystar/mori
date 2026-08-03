@@ -268,6 +268,12 @@ describe("SqliteMemoryKernel.transformContext — session-start injection", () =
         // the side, so its failure must not cost the injection that already
         // succeeded.
         expect(injectedCount(result)).toBe(1);
+        // Independent evidence that the spy actually intercepted the call
+        // (PR #198 review): if the named-import binding had bypassed the
+        // spy, reinforcement would have run for real and stamped this row,
+        // making the assertion above pass for the wrong reason.
+        const row = listValidMemories(projectId).find((r) => r.memory.id === "mem_a");
+        expect(row?.lastAccessedAt).toBeUndefined();
       } finally {
         spy.mockRestore();
       }
