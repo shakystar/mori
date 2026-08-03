@@ -82,12 +82,29 @@ describe("withProjectLock — acquire / release", () => {
   });
 
   it("serializes overlapping holders — the second body starts only after the first returns", async () => {
+    // withProjectLock makes no promise about ACQUISITION order — two callers
+    // racing the same `mkdir` can land either way, only mutual exclusion is
+    // guaranteed (#164). So this test removes the race instead of asserting
+    // an order the module never promised: `second` is not even started until
+    // `first` has provably entered its critical section, which means it is
+    // certain to find the lock held and queue behind it. That makes the
+    // acquisition order deterministic as a side effect of mutual exclusion,
+    // which is exactly what the test's name is checking.
     const order: string[] = [];
+    let firstEntered: () => void = () => {};
+    const enteredFirst = new Promise<void>((resolve) => {
+      firstEntered = resolve;
+    });
+
     const first = withProjectLock(projectId, async () => {
       order.push("first:enter");
+      firstEntered();
       await new Promise((resolve) => setTimeout(resolve, 40));
       order.push("first:exit");
     });
+
+    await enteredFirst;
+
     const second = withProjectLock(projectId, async () => {
       order.push("second:enter");
       order.push("second:exit");

@@ -71,6 +71,55 @@ describe("PiConsolidatorLlm", () => {
     expect(seenMaxTokens).toBe(RESERVED_OUTPUT_TOKENS);
   });
 
+  it("forwards opts.signal into the request and throws an AbortError when it aborts mid-flight (#167)", async () => {
+    const faux = fauxProvider();
+    const models = createModels();
+    models.setProvider(faux.provider);
+
+    let sawSignal: AbortSignal | undefined;
+    let requestStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      requestStarted = resolve;
+    });
+    faux.setResponses([
+      (_context, options) => {
+        sawSignal = options?.signal;
+        requestStarted();
+        // Hangs until the forwarded signal fires — mirrors how the real transport
+        // (fetch, an SDK's own cancel) would behave, and how pi-ai's own faux/real
+        // streams resolve on abort: with an AssistantMessage, not a rejection.
+        return new Promise((resolve) => {
+          options?.signal?.addEventListener("abort", () => {
+            resolve(fauxAssistantMessage("", { stopReason: "aborted" }));
+          });
+        });
+      },
+    ]);
+
+    const llm = new PiConsolidatorLlm(models, faux.provider.id, faux.getModel().id);
+    const controller = new AbortController();
+    const completion = llm.complete("prompt", { signal: controller.signal });
+    // Wait until the request has ACTUALLY reached the provider (so the signal was not yet
+    // aborted when it got there) before aborting — otherwise the abort could fire before the
+    // listener above is attached, which would never resolve the faux response's promise.
+    await started;
+    controller.abort();
+
+    await expect(completion).rejects.toMatchObject({ name: "AbortError" });
+    expect(sawSignal).toBe(controller.signal);
+  });
+
+  it("consolidates normally when no opts are passed (regression, #167)", async () => {
+    const faux = fauxProvider();
+    const models = createModels();
+    models.setProvider(faux.provider);
+    faux.setResponses([fauxAssistantMessage("distilled summary")]);
+
+    const llm = new PiConsolidatorLlm(models, faux.provider.id, faux.getModel().id);
+
+    await expect(llm.complete("prompt")).resolves.toBe("distilled summary");
+  });
+
   it("throws when the configured provider/model is not registered", async () => {
     const models = createModels();
 
