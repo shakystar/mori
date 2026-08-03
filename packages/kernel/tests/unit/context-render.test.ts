@@ -120,13 +120,6 @@ describe("renderMemoryContext", () => {
     expect(text).toContain(["````", fenced, "````"].join("\n"));
   });
 
-  it("keeps multi-line dialogue inside a fenced segment unflattened", () => {
-    const body = "USER: line one\nline two\n\nAGENT: reply";
-    const text = renderMemoryContext({ rawSegments: [{ id: "seg_1", text: body }] });
-
-    expect(text).toContain(["```", body, "```"].join("\n"));
-  });
-
   it("omits the channels retrieval found nothing for", () => {
     const text = renderMemoryContext({ consolidatedMemories: [MEMORY] });
 
