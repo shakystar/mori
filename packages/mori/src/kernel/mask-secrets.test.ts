@@ -178,4 +178,40 @@ describe("maskSecrets", () => {
 
     expect(maskSecrets(command)).toBe(command);
   });
+
+  it("masks a long-flag value separated by more than one space, keeping the rest of the command", () => {
+    const masked = maskSecrets("client --password    hunter2; git commit --allow-empty -m update");
+
+    expect(masked).toBe("client --password    ***; git commit --allow-empty -m update");
+    expect(masked).not.toContain("hunter2");
+  });
+
+  it("masks a long-flag value separated by a tab, keeping the rest of the command", () => {
+    const masked = maskSecrets("client --password\thunter2; git commit --allow-empty -m update");
+
+    expect(masked).toBe("client --password\t***; git commit --allow-empty -m update");
+    expect(masked).not.toContain("hunter2");
+  });
+
+  it("does not let a long-flag value swallow the next line of a multi-line command", () => {
+    const masked = maskSecrets("client --password\nhunter2; git commit --allow-empty -m update");
+
+    expect(masked).toBe("client --password\nhunter2; git commit --allow-empty -m update");
+    expect(masked).not.toContain("***");
+  });
+
+  it("masks a secret env assignment name with no underscore before the keyword", () => {
+    const masked = maskSecrets("PGPASSWORD=hunter2 psql -U admin && git commit -am update");
+
+    expect(masked).toBe("PGPASSWORD=*** psql -U admin && git commit -am update");
+    expect(masked).not.toContain("hunter2");
+    expect(masked).toContain("git commit -am update");
+  });
+
+  it("masks another secret env assignment name with no underscore before the keyword", () => {
+    const masked = maskSecrets("MYPASSWORD=hunter2 ./generate && git commit -am update");
+
+    expect(masked).toBe("MYPASSWORD=*** ./generate && git commit -am update");
+    expect(masked).not.toContain("hunter2");
+  });
 });
