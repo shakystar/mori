@@ -9,7 +9,13 @@ import {
   type Project,
 } from "../domain/entities.js";
 import type { DomainEvent } from "../domain/events.js";
-import type { ConsolidatorLlm, ConversationSlice, ConversationSource, Embedder } from "../index.js";
+import type {
+  ConsolidatorLlm,
+  ConsolidatorLlmCallOptions,
+  ConversationSlice,
+  ConversationSource,
+  Embedder,
+} from "../index.js";
 import { laneOf, laneWhereSql, SELF_LANE } from "../projections/projector.js";
 import { getDb } from "../storage/db.js";
 import {
@@ -140,7 +146,13 @@ export interface ConsolidationInput {
  * builds — any provider, any local model).
  */
 export interface Consolidator {
-  extract(input: ConsolidationInput): Promise<ExtractedMemory[]>;
+  /**
+   * `opts` (#167) carries the same `signal` `run()` already checked once before
+   * calling this — forwarded here so an LLM-backed extractor can cancel the
+   * request itself instead of the cancellation only being observable before
+   * extraction started.
+   */
+  extract(input: ConsolidationInput, opts?: ConsolidatorLlmCallOptions): Promise<ExtractedMemory[]>;
 }
 
 // --- rule-based degraded extractor -------------------------------------------
@@ -711,9 +723,12 @@ function prefixClippedTo(tail: string, n: number): string {
 export class LlmConsolidator implements Consolidator {
   constructor(private readonly llm: ConsolidatorLlm) {}
 
-  async extract(input: ConsolidationInput): Promise<ExtractedMemory[]> {
+  async extract(
+    input: ConsolidationInput,
+    opts?: ConsolidatorLlmCallOptions,
+  ): Promise<ExtractedMemory[]> {
     const prompt = `${EXTRACTION_SYSTEM_PROMPT}\n\n${buildExtractionUserContent(input)}`;
-    return parseExtractedMemories(await this.llm.complete(prompt));
+    return parseExtractedMemories(await this.llm.complete(prompt, opts));
   }
 }
 
@@ -1045,12 +1060,25 @@ const ATTEMPT_ERROR_MAX_CHARS = 300;
  * `ConsolidatorLlm`, so the match stays on the shape of the error (a
  * `TimeoutError`, a "HTTP <code>" message) rather than on any client this
  * package owns.
+ *
+ * `signal` (#167) is this attempt's OWN cancellation signal, not a generic
+ * parameter — passed so an `AbortError`-named rejection is only classified
+ * `"aborted"` when THIS call's signal actually fired. Once #167 forwards the
+ * signal into the extraction request, a provider's own transport-level abort
+ * (a timeout, a connection reset) can surface with the same `name` without the
+ * user ever cancelling anything; matching on the name alone would misreport
+ * that failure as a clean cancellation and hide it (PR #166 Codex P2, absorbed
+ * into this issue's acceptance criteria).
  */
-export function classifyConsolidateError(error: unknown): ConsolidateAttemptOutcome {
+export function classifyConsolidateError(
+  error: unknown,
+  signal?: AbortSignal,
+): ConsolidateAttemptOutcome {
   if (error instanceof ExtractionParseError) return "parse-error";
   if (error instanceof ConsolidateAbortedError) return "aborted";
   const message = error instanceof Error ? error.message : String(error);
   const name = error instanceof Error ? error.name : "";
+  if (name === "AbortError" && signal?.aborted) return "aborted";
   // AbortSignal.timeout rejects with name 'TimeoutError'; a client that reports
   // its own deadline in prose is caught by the message probe.
   if (name === "TimeoutError" || /timed out/i.test(message)) return "timeout";
@@ -1596,11 +1624,17 @@ export async function consolidate(params: ConsolidateParams): Promise<Consolidat
     // Extractor failure (LLM timeout, transport error, unparseable reply)
     // intentionally propagates WITHOUT advancing the watermark — the next
     // boundary retries the same window. Callers at boundaries catch and degrade.
-    const extracted = await consolidator.extract({
-      observations: bounded.observations,
-      ...(bounded.transcriptTail ? { transcriptTail: bounded.transcriptTail } : {}),
-      existingMemories: bounded.existingMemories,
-    });
+    // #167: `params.signal` is forwarded past the preflight check above so a
+    // cancellation arriving mid-extraction can stop the in-flight request too,
+    // not just one arriving before it started.
+    const extracted = await consolidator.extract(
+      {
+        observations: bounded.observations,
+        ...(bounded.transcriptTail ? { transcriptTail: bounded.transcriptTail } : {}),
+        existingMemories: bounded.existingMemories,
+      },
+      params.signal ? { signal: params.signal } : undefined,
+    );
 
     // Supersede only what the extractor was actually SHOWN — `bounded`, not the
     // full `existing` list. Budget-trimmed memories are valid but invisible to
@@ -1879,7 +1913,7 @@ export async function consolidate(params: ConsolidateParams): Promise<Consolidat
     result = await run();
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    recordAttempt(classifyConsolidateError(error), {
+    recordAttempt(classifyConsolidateError(error, params.signal), {
       error: message.slice(0, ATTEMPT_ERROR_MAX_CHARS),
     });
     throw error;
