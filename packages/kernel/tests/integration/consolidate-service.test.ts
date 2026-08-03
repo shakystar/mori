@@ -1157,14 +1157,17 @@ describe("consolidate — bounded input keeps the watermark self-healing (#113)"
 // small local model's real context can be smaller than the constant assumes
 // either way. `extractionCharBudget` derives the char budget from the
 // injected LLM's declared `contextWindowTokens` instead, when it has one.
-// #143 item② (PR #168 review, round 3): CONSERVATIVE_CHARS_PER_TOKEN is 1/3,
-// and `estimateTokens` applies it to the system prompt too — so a ~2.1KB
-// system prompt alone now estimates to ceil(2132 / (1/3)) = 6,396 "tokens",
-// which already exceeds a 4,000-token window before any budget is left for
-// user content. 16,000 leaves enough headroom (~2,768 derived chars, per the
-// math below) to still exercise clipping/narrow-window/drain behavior below,
-// which is the point of these tests — a window so narrow the budget floors to
-// 0 would test nothing.
+// #174 (was #143 item②, PR #168 review round 3): CONSERVATIVE_CHARS_PER_TOKEN
+// is 1/3, and `estimateTokens` used to apply it to the system prompt too — a
+// ~2.1KB system prompt inflated to ~6,400 "tokens", already exceeding a
+// 4,000-token window before any budget was left for user content. Fixed by
+// #174 with a system-prompt-specific ratio (see `SYSTEM_PROMPT_CHARS_PER_TOKEN`
+// in consolidate-service.ts); 16,000 leaves plenty of headroom (~4,600 derived
+// chars) to still exercise clipping/narrow-window/drain behavior below, which
+// is the point of these tests — a window so narrow the budget floors to 0
+// would test nothing. Kept at 16,000 rather than narrowed further: it's
+// already comfortably above the #174 regression floor and still small enough
+// to force clipping in "still guarantees at least one observation...".
 const NARROW_CONTEXT_WINDOW_TOKENS = 16_000;
 
 describe("extractionCharBudget — model-aware extraction budget (#143)", () => {
@@ -1180,6 +1183,30 @@ describe("extractionCharBudget — model-aware extraction budget (#143)", () => 
     });
     expect(budget).toBeGreaterThan(0);
     expect(budget).toBeLessThan(MAX_EXTRACTION_INPUT_CHARS);
+  });
+
+  // #174 — before the fix, `estimateTokens` applied the CJK-worst-case
+  // `CONSERVATIVE_CHARS_PER_TOKEN` to the (English, fixed) system prompt too,
+  // inflating it to ~6,400 "tokens" and leaving an 8,192-token window only
+  // 267 derived chars — not enough for a single observation to survive
+  // `boundExtractionInput`'s minimum. Guards the regression directly.
+  it("leaves a usable budget for an 8,192-token declared context window", () => {
+    const budget = extractionCharBudget({
+      complete: async () => "[]",
+      contextWindowTokens: 8_192,
+    });
+    expect(budget).toBeGreaterThanOrEqual(1_000);
+  });
+
+  // #174 — same regression, at the floor: before the fix this window's
+  // derived budget was 0 (`Math.max(0, …)` clamped it), so extraction ran
+  // with an empty input budget on every boundary.
+  it("does not floor the derived budget to 0 for a 4,000-token declared context window", () => {
+    const budget = extractionCharBudget({
+      complete: async () => "[]",
+      contextWindowTokens: 4_000,
+    });
+    expect(budget).not.toBe(0);
   });
 
   it("keeps the estimated prompt tokens (system + rendered user content) within a small declared context window, for a dense CJK backlog", async () => {

@@ -190,6 +190,18 @@ function backfillEntityTableLane(
  * are never indexed) and has no lane concept for `decision`/`checkpoint`/
  * `topic` (their source tables never got a v12 column — out of #150's
  * scope), so only these four kinds apply.
+ *
+ * The `AND source_project_id IS NOT (...)` guard (#179, PR #178 non-blocking
+ * follow-up) is load-bearing beyond the usual "skip a no-op write" nicety:
+ * fts5 has no notion of updating a single column in place — an UPDATE that
+ * touches ANY column of a row, including an UNINDEXED one, is executed as a
+ * delete+insert that rewrites that row's term index. Per judgement ① settled
+ * in #150 (no real store has ever had a foreign row to correct), the
+ * unguarded UPDATE rewrote the ENTIRE content index, every migration, on
+ * every real store — the guard makes that the byte-identical no-op judgement
+ * ① already implied it should be. `IS NOT` (not `!=`) so a still-NULL lane on
+ * both sides (the common case) also counts as "unchanged" — NULL != NULL is
+ * NULL/false in SQL and would otherwise force a write every time.
  */
 function backfillSearchFtsLane(db: Database.Database): void {
   const kindTables: ReadonlyArray<readonly [string, string]> = [
@@ -202,7 +214,10 @@ function backfillSearchFtsLane(db: Database.Database): void {
     db.prepare(
       `UPDATE search_fts SET source_project_id = (
          SELECT source_project_id FROM ${table} WHERE ${table}.id = search_fts.entity_id
-       ) WHERE kind = ?`,
+       ) WHERE kind = ?
+         AND source_project_id IS NOT (
+           SELECT source_project_id FROM ${table} WHERE ${table}.id = search_fts.entity_id
+         )`,
     ).run(kind);
   }
 }
