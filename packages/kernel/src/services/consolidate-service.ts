@@ -294,23 +294,40 @@ export const EXTRACTION_SYSTEM_PROMPT = [
  */
 export const CONSERVATIVE_CHARS_PER_TOKEN = 1 / 3;
 
+/** Chars → estimated tokens, using the same conservative constant throughout
+ *  so a budget derived from it and a later check against it never disagree. */
+export function estimateTokens(chars: number): number {
+  return Math.ceil(chars / CONSERVATIVE_CHARS_PER_TOKEN);
+}
+
+/**
+ * Upper end of the output size `MAX_MEMORIES_PER_BOUNDARY` (12) short
+ * one-sentence items renders to (see `MAX_EXTRACTION_INPUT_CHARS`'s doc:
+ * "roughly 2,000-2,500 output chars"). {@link RESERVED_OUTPUT_TOKENS} is
+ * derived from this value below instead of stating a separate token number
+ * by hand — PR #197 review (#169) found the two had drifted: the old
+ * hand-picked `1_300` was actually `2_500 * CONSERVATIVE_CHARS_PER_TOKEN`
+ * (roughly a third of 2,500 chars), the OPPOSITE of what its own doc
+ * comment claimed ("divided by `CONSERVATIVE_CHARS_PER_TOKEN`", i.e.
+ * `estimateTokens(2500)` = 7,500). A cap that small lets a legitimately
+ * full 12-item CJK-heavy reply still hit `stopReason: "length"` — exactly
+ * the failure #169 exists to prevent, just relocated from the input axis to
+ * the output axis.
+ */
+export const EXPECTED_MAX_OUTPUT_CHARS = 2_500;
+
 /**
  * #143 item② — output tokens reserved out of a declared `contextWindowTokens`
  * before any of it is offered to the input budget, so the model's own JSON
  * reply never has to compete with the prompt for the declared window.
- * `MAX_MEMORIES_PER_BOUNDARY` (12) short one-sentence items renders to
- * roughly 2,000-2,500 output chars (see `MAX_EXTRACTION_INPUT_CHARS`'s doc);
- * divided by `CONSERVATIVE_CHARS_PER_TOKEN` and rounded up generously.
- * Exported so tests can check the render against it directly instead of
- * duplicating the number.
+ * Derived from {@link EXPECTED_MAX_OUTPUT_CHARS} via {@link estimateTokens} —
+ * the same conversion the input budget (`extractionCharBudget`) uses — so the
+ * provider-side generation cap and the prompt's own item/size allowance can
+ * never drift apart the way the old hand-picked `1_300` did (see
+ * `EXPECTED_MAX_OUTPUT_CHARS`'s doc). Exported so tests can check the
+ * provider-call render against it directly instead of duplicating the number.
  */
-export const RESERVED_OUTPUT_TOKENS = 1_300;
-
-/** Chars → estimated tokens, using the same conservative constant throughout
- *  so a budget derived from it and a later check against it never disagree. */
-function estimateTokens(chars: number): number {
-  return Math.ceil(chars / CONSERVATIVE_CHARS_PER_TOKEN);
-}
+export const RESERVED_OUTPUT_TOKENS = estimateTokens(EXPECTED_MAX_OUTPUT_CHARS);
 
 /**
  * #143 item② — the character budget `run()` hands `boundExtractionInput`,

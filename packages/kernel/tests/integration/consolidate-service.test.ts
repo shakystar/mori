@@ -18,6 +18,7 @@ import type {
   Embedder,
 } from "../../src/index.js";
 import {
+  EXPECTED_MAX_OUTPUT_CHARS,
   EXTRACTION_SYSTEM_PROMPT,
   ExtractionParseError,
   MAX_EXTRACTION_INPUT_CHARS,
@@ -27,6 +28,7 @@ import {
   buildExtractionUserContent,
   chunkConversation,
   consolidate,
+  estimateTokens,
   extractionCharBudget,
   getConsolidateWatermark,
   getConsolidationStatus,
@@ -254,6 +256,22 @@ describe("EXTRACTION_SYSTEM_PROMPT — count cap stated at generation time (#169
     // the number some other way) — bumping MAX_MEMORIES_PER_BOUNDARY changes
     // this rendered prompt, which is the point: the two can never drift apart.
     expect(occurrences).toBeGreaterThan(0);
+  });
+});
+
+// PR #197 review (#169): the provider-side generation cap and the prompt's
+// own item/size allowance had drifted apart — RESERVED_OUTPUT_TOKENS (1,300)
+// was far smaller than what a full MAX_MEMORIES_PER_BOUNDARY-item CJK-heavy
+// reply is allowed to render to, so an otherwise valid reply could still hit
+// `stopReason: "length"`. This pins the invariant the fix relies on: the cap
+// must be AT LEAST the token estimate for the worst-case output size, using
+// this file's own conversion (`estimateTokens`) — not a hand-picked number
+// that can silently fall out of step with it again.
+describe("RESERVED_OUTPUT_TOKENS — generation cap stays consistent with the allowed output size (#169)", () => {
+  it("is at least estimateTokens(EXPECTED_MAX_OUTPUT_CHARS)", () => {
+    expect(RESERVED_OUTPUT_TOKENS).toBeGreaterThanOrEqual(
+      estimateTokens(EXPECTED_MAX_OUTPUT_CHARS),
+    );
   });
 });
 
