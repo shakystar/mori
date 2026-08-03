@@ -212,8 +212,16 @@ describe("two-reader equivalence: stored segments vs the search index (#116)", (
    * the other is #116; the equality also fails the other way, if a prune ever
    * evicted the index rows of segments that survived.
    */
-  it("listSegments() and searchByKind(segment) report the same ids after a standalone prune", async () => {
+  it("listSegments() and searchByKind(segment) report the same ids before and after a standalone prune", async () => {
     const projectId = await seedProject();
+    const readBodyIds = (): string[] =>
+      listSegments(projectId)
+        .map((s) => s.id)
+        .sort();
+    const readIndexIds = (): string[] =>
+      searchByKind(projectId, SEGMENT_TOKEN, "segment", 50)
+        .map((hit) => hit.entityId)
+        .sort();
 
     // Real write path: a consolidation boundary chunks the slice into segments
     // and reindexes FTS itself, so both sides start out populated by production
@@ -228,7 +236,14 @@ describe("two-reader equivalence: stored segments vs the search index (#116)", (
         },
       },
     });
-    expect(listSegments(projectId)).toHaveLength(5);
+    // The declared invariant is "body vs index", not "body vs index *after* a
+    // prune", and asserting it only afterwards lets the prune destroy its own
+    // evidence: if the write path indexed just the newest 3 segments, the
+    // `maxCount: 3` below deletes exactly the 2 that were never indexed, and
+    // both the post-prune equality and its 3-id anchor still hold. Same
+    // behaviour at two points in time, so it stays one test.
+    expect(readBodyIds()).toHaveLength(5);
+    expect(readIndexIds()).toEqual(readBodyIds());
 
     // Standalone prune — the maintenance/manual entry point. consolidate()
     // happens to reindex right after its own prune, which is why this defect
@@ -237,17 +252,10 @@ describe("two-reader equivalence: stored segments vs the search index (#116)", (
     const pruned = pruneSegments(projectId, { maxCount: 3 });
     expect(pruned).toHaveLength(2);
 
-    const bodyIds = listSegments(projectId)
-      .map((s) => s.id)
-      .sort();
-    const indexIds = searchByKind(projectId, SEGMENT_TOKEN, "segment", 50)
-      .map((hit) => hit.entityId)
-      .sort();
-
-    expect(indexIds).toEqual(bodyIds);
+    expect(readIndexIds()).toEqual(readBodyIds());
     // Non-vacuity: survivors are still reachable through BOTH readers, so
     // "prune wiped everything" does not satisfy the equality either.
-    expect(bodyIds).toHaveLength(3);
+    expect(readBodyIds()).toHaveLength(3);
   });
 });
 
@@ -255,6 +263,14 @@ describe("two-reader equivalence: stored segments vs the search index (#116)", (
 
 const DEFAULT_PERSONAL_ID = getPersonalStoreId(DEFAULT_ACCOUNT_ID); // legacy "personal_self"
 const OTHER_PERSONAL_ID = getPersonalStoreId("acc_abc"); // "personal_acc_abc"
+/**
+ * A SECOND non-default account, so the matrix crosses the account-keyed branch
+ * of path resolution at two values instead of one. With only the legacy flat id
+ * and a single account id, a regression that leaves `personal/` alone but drops
+ * `accountId` from `accounts/<id>/personal` keeps THOSE two apart — and still
+ * aliases every logged-in account onto one db, which is #155 itself.
+ */
+const SECOND_OTHER_PERSONAL_ID = getPersonalStoreId("acc_xyz"); // "personal_acc_xyz"
 const PERSONAL_TS = "2026-06-01T00:00:00.000Z";
 
 async function seedPersonalStore(personalStoreId: string, summary: string): Promise<void> {
@@ -305,24 +321,26 @@ describe("two-reader equivalence: personal-store identity vs path routing (#155)
    * still anchored self on the id it was opened with, so one account's own
    * observations read back as foreign and vanished from the self lane.
    */
-  it("path routing and self-identity agree on whether two personal-store ids are the same store", async () => {
+  it("path routing and self-identity agree on whether any two personal-store ids are the same store", async () => {
+    const ids = [DEFAULT_PERSONAL_ID, OTHER_PERSONAL_ID, SECOND_OTHER_PERSONAL_ID];
     // Guard against a false-green: the cross pairs below only mean anything
-    // while the two ids are actually distinct. If `getPersonalStoreId` ever
-    // collapsed them, `notes` would hold one key and the loop would degenerate
-    // to the writer === reader case, which passes trivially.
-    expect(OTHER_PERSONAL_ID).not.toBe(DEFAULT_PERSONAL_ID);
+    // while the ids are actually distinct — ALL of them. If `getPersonalStoreId`
+    // ever collapsed any two, `notes` would lose a key and those pairs would
+    // degenerate to the writer === reader case, which passes trivially.
+    expect(new Set(ids).size).toBe(ids.length);
 
     const notes = {
       [DEFAULT_PERSONAL_ID]: "default account self note",
       [OTHER_PERSONAL_ID]: "other account self note",
+      [SECOND_OTHER_PERSONAL_ID]: "second other account self note",
     };
-    // Written in this order, so under an aliasing path resolver the LAST
-    // rebuild anchors self on OTHER_PERSONAL_ID and demotes the other id's
-    // observation to the foreign lane.
-    await seedPersonalStore(DEFAULT_PERSONAL_ID, notes[DEFAULT_PERSONAL_ID] as string);
-    await seedPersonalStore(OTHER_PERSONAL_ID, notes[OTHER_PERSONAL_ID] as string);
+    // Written in `ids` order, so under an aliasing path resolver the LAST
+    // rebuild anchors self on the final id and demotes every earlier id's
+    // observation in that db to the foreign lane.
+    for (const id of ids) {
+      await seedPersonalStore(id, notes[id] as string);
+    }
 
-    const ids = [DEFAULT_PERSONAL_ID, OTHER_PERSONAL_ID];
     for (const writer of ids) {
       for (const reader of ids) {
         const sameStoreByPath = getProjectDbFile(writer) === getProjectDbFile(reader);
