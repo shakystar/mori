@@ -269,10 +269,19 @@ emit "unresolved=${unresolved_json}"
 emit "failed=${failed_json}"
 emit "failed_count=$(jq -r 'length' <<<"$failed_json")"
 
-# 갱신 실패는 침묵시키지 않는다. armed PR이 갱신되지 않으면 그 PR은 계속 머지되지 않는데,
-# 그 정지는 아무 화면에도 뜨지 않는다 — 이 이슈가 다루는 결함의 성질 그대로다. 이 잡은 어떤
-# 머지도 게이팅하지 않으므로 레드로 남겨도 막히는 것이 없고, 다음 main push가 다시 시도한다.
+# 갱신 실패도, 분류 실패도 침묵시키지 않는다. 둘 다 armed PR이 갱신되지 않은 채 남는다는
+# 점에서 결과가 같다 — 이 잡은 어떤 머지도 게이팅하지 않으므로 레드로 남겨도 막히는 것이
+# 없고, 다음 main push가 다시 시도한다. 원인이 다르므로 메시지는 구분해서 남긴다: failed는
+# update-branch 호출 자체가 실패한 것이고, unresolved는 재시도를 다 써도 갱신 대상 여부조차
+# 판단하지 못한 것이다 (classify()가 error:classify-*를 낸 경우 — skip:mergeability-unknown은
+# GitHub이 계산 중인 정상 상태라 여기 포함되지 않는다).
+exit_code=0
 if [ "${#failed[@]}" -ne 0 ]; then
   echo "update-branch 호출이 실패한 PR이 있습니다: ${failed[*]}" >&2
-  exit 1
+  exit_code=1
 fi
+if [ "${#unresolved[@]}" -ne 0 ]; then
+  echo "갱신 대상 여부를 판단하지 못한 PR이 있습니다: ${unresolved[*]}" >&2
+  exit_code=1
+fi
+exit "$exit_code"
