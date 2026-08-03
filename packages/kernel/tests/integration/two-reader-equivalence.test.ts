@@ -11,7 +11,7 @@ import { DEFAULT_ACCOUNT_ID } from "../../src/domain/identity/account.js";
 import { getPersonalStoreId } from "../../src/domain/identity/personal-store.js";
 import type { ConversationSlice, ConversationSource } from "../../src/index.js";
 import { resolveConflict } from "../../src/services/conflict-service.js";
-import { consolidate } from "../../src/services/consolidate-service.js";
+import { SEGMENT_MAX_CHARS, consolidate } from "../../src/services/consolidate-service.js";
 import {
   getMemoryIndex,
   listOpenConflicts,
@@ -50,15 +50,25 @@ import { getProjectDbFile } from "../../src/storage/path-resolver.js";
  */
 
 let sandbox: string;
+let rawSegmentsBefore: string | undefined;
 
 beforeEach(async () => {
   sandbox = await mkdtemp(join(tmpdir(), "mori-two-reader-"));
   process.env.MEMORIZE_ROOT = sandbox;
+  // The #116 pair only exists while the raw-detail buffer writes segments, and
+  // `MEMORIZE_RAW_SEGMENTS=0` is a supported setting, not a misconfiguration.
+  // Pin the mode here (the repo's other raw-segment tests neutralize the same
+  // variable) so an inherited environment cannot turn this gate red *before*
+  // the equivalence it exists to check ever runs.
+  rawSegmentsBefore = process.env.MEMORIZE_RAW_SEGMENTS;
+  process.env.MEMORIZE_RAW_SEGMENTS = "1";
 });
 
 afterEach(async () => {
   closeAll();
   delete process.env.MEMORIZE_ROOT;
+  if (rawSegmentsBefore === undefined) delete process.env.MEMORIZE_RAW_SEGMENTS;
+  else process.env.MEMORIZE_RAW_SEGMENTS = rawSegmentsBefore;
   await rm(sandbox, { recursive: true, force: true });
 });
 
@@ -159,15 +169,29 @@ describe("two-reader equivalence: open conflicts (#148)", () => {
 const SEGMENT_TOKEN = "unobtaniumsegment";
 
 /**
- * A conversation of `turns` turns, each ~800 chars — over half of
- * `SEGMENT_MAX_CHARS` (1500), so greedy turn-packing gives one segment per
- * turn with a distinct ordinal inside a single boundary's shared `created_at`.
+ * Turn length, derived from the exported chunking budget rather than hardcoded.
+ * `chunkConversation` packs whole turns greedily, so it can never fit two turns
+ * in one segment once `len + 2 + len > SEGMENT_MAX_CHARS` — i.e. once a turn is
+ * over half the budget. 60% keeps that true if someone legitimately retunes the
+ * constant, so "one turn = one segment" stops being an assumption about 1500.
+ */
+const TURN_CHARS = Math.ceil(SEGMENT_MAX_CHARS * 0.6);
+
+/** One turn: an ordinal plus repeats of the token, padded past `TURN_CHARS`. */
+function fakeTurn(ordinal: number): string {
+  const prefix = `turn ${ordinal} `;
+  const filler = `${SEGMENT_TOKEN} `;
+  const repeats = Math.ceil((TURN_CHARS - prefix.length) / filler.length);
+  return `${prefix}${filler.repeat(repeats)}`.trimEnd();
+}
+
+/**
+ * A conversation of `turns` turns, each over half of `SEGMENT_MAX_CHARS`, so
+ * greedy turn-packing gives one segment per turn with a distinct ordinal inside
+ * a single boundary's shared `created_at`.
  */
 function fakeConversation(turns: number): ConversationSource {
-  const text = Array.from(
-    { length: turns },
-    (_, i) => `turn ${i} ${`${SEGMENT_TOKEN} `.repeat(45)}`,
-  ).join("\n\n");
+  const text = Array.from({ length: turns }, (_, i) => fakeTurn(i)).join("\n\n");
   let read = false;
   return {
     id: "conv-1",
