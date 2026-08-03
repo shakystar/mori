@@ -1028,6 +1028,14 @@ export function getConsolidateWatermark(projectId: string): string | undefined {
   return readMeta(projectId, WATERMARK_META_KEY);
 }
 
+/**
+ * Deliberately UNGUARDED — the monotonicity rule #211 added belongs to
+ * `commitBoundaryCursors`, which is the boundary's commit, not to this
+ * accessor. The gc repair described above has to move the cursor BACKWARDS (to
+ * a surviving event, once the one it named was physically reclaimed), and a
+ * repair that the guard silently dropped would leave the store re-consolidating
+ * its whole log forever.
+ */
 export function setConsolidateWatermark(projectId: string, eventId: string): void {
   writeMeta(projectId, WATERMARK_META_KEY, eventId);
 }
@@ -1114,6 +1122,44 @@ export function resumePointsOf(
 }
 
 /**
+ * `seq` of the event with this id, or `undefined` when the log does not hold
+ * it. `seq` is the events table's `INTEGER PRIMARY KEY`, assigned in append
+ * order, and it is ALREADY the authority on what a watermark means:
+ * `readEventsSince` resolves the stored id to its `seq` and returns everything
+ * strictly after it. So "is this watermark ahead of that one" has exactly one
+ * correct answer and it is this comparison — NOT a comparison of the ids
+ * themselves, which `createId` builds as `evt_<base36 ms>_<random>` and which
+ * therefore tie (and then order arbitrarily) for two events appended in the
+ * same millisecond.
+ */
+function eventSeq(projectId: string, eventId: string): number | undefined {
+  const row = getDb(projectId).prepare("SELECT seq FROM events WHERE id = ?").get(eventId) as
+    { seq: number } | undefined;
+  return row?.seq;
+}
+
+/**
+ * #211: whether writing `targetEventId` as the watermark would move it BACK (or
+ * nowhere), judged against what is stored right now.
+ *
+ * Only a PROVEN regression is reported. A watermark that is absent, or one
+ * whose event is no longer in the log (a gc'd observation — see
+ * `getConsolidateWatermark`), yields no comparison, and refusing a write there
+ * would pin the cursor on exactly the store that needs it repaired. The guard
+ * exists to drop a stale write, never to become a second opinion on a healthy
+ * boundary's target.
+ */
+function watermarkWouldRegress(projectId: string, targetEventId: string): boolean {
+  const current = getConsolidateWatermark(projectId);
+  if (current === undefined) return false;
+  if (current === targetEventId) return true;
+  const currentSeq = eventSeq(projectId, current);
+  const targetSeq = eventSeq(projectId, targetEventId);
+  if (currentSeq === undefined || targetSeq === undefined) return false;
+  return currentSeq >= targetSeq;
+}
+
+/**
  * #139: commit the event watermark and the conversation offset in one SQLite
  * transaction. `run()`'s commit tail used to call `setConsolidateWatermark`
  * and `writeConversationOffset` as two independent writes — if the process
@@ -1126,6 +1172,41 @@ export function resumePointsOf(
  * least one write to make, and writes only the cursors that were passed.
  * `getDb(projectId)` is a cached per-project connection (storage/db.ts), so
  * the nested writes below run on the same connection `.transaction()` wraps.
+ *
+ * #211: and each write is MONOTONIC — a cursor is only ever moved forward.
+ * This is the whole of the tail's protection, so it is worth saying why it
+ * lives here and not at a check point.
+ *
+ * This is the LAST thing `run()` does, and it sits far past #158's final check
+ * point (④, immediately before the `memory.consolidated` append). Between the
+ * two are the projection rebuild, two embedder round trips and the
+ * contradiction judge — most of a boundary's wall-clock — so a holder
+ * dispossessed there does not find out until it is already here. The
+ * interleave that follows is #211's ①: the new owner reads a cursor its
+ * predecessor has not yet moved, consolidates a window reaching FURTHER, and
+ * commits; the predecessor then wakes and commits its own, older target,
+ * handing the gap between them to a third boundary to distill a second time.
+ *
+ * A fifth check point cannot fix that: by here the `memory.consolidated`
+ * events are on disk, and stopping without moving the cursor turns a rare race
+ * into a CERTAIN re-distillation of the window this boundary just consumed —
+ * precisely the half-commit `throwIfDispossessed` forbids its call sites to
+ * manufacture. Ordering the write instead needs no opinion on who owns the
+ * lock: a stale target loses to whatever is already stored, and a healthy
+ * boundary's target is by construction ahead of what it read at the start, so
+ * nothing about the uncontended path changes.
+ *
+ * BOTH cursors get it. The conversation offset races the same way and worse —
+ * the winner's slice is the longer one, so the loser's late write rewinds it
+ * into content already extracted — and `ConversationSlice.newOffset` already
+ * requires offsets to be monotonically non-decreasing and already accepts
+ * "will not drain" as the cost for a source that violates that.
+ *
+ * Filtering per cursor does not weaken #139's atomicity: the surviving writes
+ * still commit inside one transaction, so no crash can interleave them. And
+ * the direction it filters is the harmless one — a cursor is only skipped
+ * because someone else already moved it FURTHER, which is the opposite of the
+ * "advanced past a window nothing distilled" half-commit #139 closed.
  */
 function commitBoundaryCursors(
   projectId: string,
@@ -1136,18 +1217,29 @@ function commitBoundaryCursors(
 ): void {
   if (cursors.watermarkEventId === undefined && cursors.conversationOffset === undefined) return;
   const commit = getDb(projectId).transaction(() => {
-    if (cursors.watermarkEventId !== undefined) {
-      setConsolidateWatermark(projectId, cursors.watermarkEventId);
+    const watermarkEventId = cursors.watermarkEventId;
+    if (watermarkEventId !== undefined && !watermarkWouldRegress(projectId, watermarkEventId)) {
+      setConsolidateWatermark(projectId, watermarkEventId);
     }
-    if (cursors.conversationOffset !== undefined) {
-      writeConversationOffset(
-        projectId,
-        cursors.conversationOffset.sourceId,
-        cursors.conversationOffset.offset,
-      );
+    const conversationOffset = cursors.conversationOffset;
+    if (
+      conversationOffset !== undefined &&
+      conversationOffset.offset > readConversationOffset(projectId, conversationOffset.sourceId)
+    ) {
+      writeConversationOffset(projectId, conversationOffset.sourceId, conversationOffset.offset);
     }
   });
-  commit();
+  // BEGIN IMMEDIATE, not the default deferred BEGIN. #211 turned this from an
+  // unconditional write into a read-modify-write, and the whole point of the
+  // read is a value ANOTHER PROCESS wrote — so the two must not be separable.
+  // A deferred transaction takes its write lock only at the first write, which
+  // leaves the compare reading a snapshot that a competing boundary can commit
+  // over before this one's `INSERT … ON CONFLICT` lands; the guard would then
+  // let through the very stale write it exists to drop. Taking the lock up
+  // front is the same reasoning (and the same `busy_timeout = 5000` the opener
+  // sets) that `runMigrations` in `storage/db.ts` documents for its own
+  // read-then-write.
+  commit.immediate();
 }
 
 // --- attempt telemetry (#51) ---------------------------------------------------
@@ -1632,8 +1724,21 @@ export interface ConsolidateParams {
    *
    * Their REACH differs too, and deliberately. `signal` is checked only at the
    * extraction-call edge (#141's scope, unchanged here); `lockSignal` is
-   * checked at every point where this boundary is about to commit — see the
-   * call sites in `run()`.
+   * checked at every point where this boundary is about to commit AND has
+   * committed nothing yet — see the call sites in `run()`. That second half is
+   * the limit, not a detail: once the `memory.consolidated` append has landed,
+   * a check point would stop the boundary mid-commit, so the tail after it has
+   * none. The tail's two writes are covered without a check point instead, and
+   * unequally: `commitBoundaryCursors` does not consult `lockSignal` at all but
+   * orders each write against stored state so a stale one loses — a guarantee
+   * that holds even if this boundary never learns it was dispossessed —
+   * whereas `recordAttempt` declines to write once `lockSignal` has fired,
+   * which is only as timely as the signal is. The heartbeat delivers it up to
+   * one lock-heartbeat period after the takeover, and a successor that records
+   * inside that lag can still be overwritten; the window is narrowed, not
+   * closed, and what is left is misreported telemetry rather than a wrong
+   * boundary. See the `## The overlap that remains` section of
+   * `storage/project-lock.ts` (#211).
    */
   lockSignal?: AbortSignal;
   /**
@@ -1683,6 +1788,35 @@ export async function consolidate(params: ConsolidateParams): Promise<Consolidat
     outcome: ConsolidateAttemptOutcome,
     extra: Partial<ConsolidateAttempt> = {},
   ): void => {
+    // #211 ②: not once this boundary's lock is gone. `last_consolidate_attempt`
+    // is a single overwritten row in the SHARED project db — the very store the
+    // lock exists to give one writer at a time — and both paths that reach here
+    // are past #158's last check point, so a dispossessed boundary arrives here
+    // in the normal course of things rather than exceptionally. Whichever
+    // verdict it carries is about a span that stopped being this store's: an
+    // `aborted`/`error` from the takeover overwrites the new owner's `ok` and
+    // makes `mori status` report a failure the store never had, and a tail that
+    // ran to the end and returns `ok` is no better — it claims the winner's
+    // work as its own count.
+    //
+    // The predicate is the SIGNAL, not the error: dispossession reaches this
+    // catch under several names (the lock's own verdict from a check point, a
+    // provider's bare `AbortError` from the cancelled extraction request), and
+    // all of them mean the same thing about who owns the store. An attempt that
+    // still holds its lock records exactly as before, whatever went wrong —
+    // this must never become telemetry silence for ordinary failures.
+    //
+    // What this does NOT do is close the window, and the doc must not claim it
+    // does. The signal is the heartbeat's NOTICE of the takeover, up to one
+    // heartbeat period (`LOCK_HEARTBEAT_MS`, 5s) behind the takeover itself, so
+    // a successor quick enough to finish and record inside that lag can still
+    // be overwritten by this boundary arriving after it — narrowed from
+    // "always" to "at most one heartbeat" (PR #225 review, Codex P2). What
+    // survives is observability only: `last_consolidate_attempt` is reported by
+    // `getConsolidationStatus` and nothing branches on it. Closing it would take
+    // a synchronous ownership check at commit time or self-ordering telemetry,
+    // both out of #211's scope (idea #189).
+    if (params.lockSignal?.aborted) return;
     try {
       writeLastConsolidateAttempt(params.projectId, {
         at: nowIso(),
@@ -2129,6 +2263,11 @@ export async function consolidate(params: ConsolidateParams): Promise<Consolidat
     // #139: commit both cursors atomically — see `commitBoundaryCursors`. A
     // crash (or thrown error) between the two writes can no longer leave one
     // cursor advanced while the other stays behind.
+    //
+    // #211: this is the tail's END, and there is deliberately no check point
+    // between it and ④ above — see `commitBoundaryCursors`, which instead makes
+    // each write monotonic so a dispossessed boundary arriving here late cannot
+    // pull either cursor back behind the boundary that took over.
     commitBoundaryCursors(params.projectId, {
       ...(eventWatermarkId !== undefined ? { watermarkEventId: eventWatermarkId } : {}),
       ...(conversationOffsetTarget !== undefined
