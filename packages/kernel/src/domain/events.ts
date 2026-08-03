@@ -6,6 +6,7 @@ import type {
   Decision,
   DecisionSupersededPayload,
   Handoff,
+  MemoryInjectedPayload,
   MemoryRetractedPayload,
   MemorySupersededPayload,
   Observation,
@@ -66,7 +67,13 @@ export type DomainEventType =
   // Tombstone (3.0.0 M3, SoT-050): retract a memory with no replacement. Like
   // memory.superseded it closes the validity window instead of deleting the
   // row, but carries no replacement and is reversible + audit-preserving.
-  | "memory.retracted";
+  | "memory.retracted"
+  // Injection's own observability (#5 2/3-a, mori#214): appended once
+  // SqliteMemoryKernel.transformContext's session-start injection has
+  // actually been shown to the model — same condition as reinforcement
+  // (mori#176). Covers only the once-per-session injection seam; turn-level
+  // retrieval (#5 2/3-b) is a separate follow-up.
+  | "memory.injected";
 
 export interface DomainEvent<TPayload = unknown> extends BaseEntity {
   type: DomainEventType;
@@ -109,4 +116,5 @@ export type DomainEventPayload =
   | Observation
   | ConsolidatedMemory
   | MemorySupersededPayload
-  | MemoryRetractedPayload;
+  | MemoryRetractedPayload
+  | MemoryInjectedPayload;

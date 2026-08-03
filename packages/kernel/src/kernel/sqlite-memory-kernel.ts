@@ -256,9 +256,10 @@ export class SqliteMemoryKernel<M, E> implements MemoryKernel<M, E> {
     } catch {
       // Silent, deliberately: the only sink this seam has is `onCaptureError`,
       // which harnesses render as a CAPTURE failure (mori prints exactly that),
-      // and mislabelling a retrieval failure is worse than staying quiet. The
-      // `memory.injected` event that gives injection its own observability
-      // arrives with 2/3.
+      // and mislabelling a retrieval failure is worse than staying quiet. A
+      // failed retrieval never reaches render, so it never reaches the
+      // `memory.injected` append below either — nothing to observe about an
+      // injection that didn't happen.
       return messages;
     }
 
@@ -285,6 +286,27 @@ export class SqliteMemoryKernel<M, E> implements MemoryKernel<M, E> {
         this.options.projectId,
         context.consolidatedMemories?.map((memory) => memory.id) ?? [],
       );
+    } catch {
+      // best-effort — see comment above.
+    }
+
+    // Injection's own observability (#5 2/3-a, mori#214): same condition as
+    // reinforcement above, for the same reason — an append here records that
+    // the model actually saw this content, not merely that retrieval found
+    // it. Best-effort and isolated the same way: a store that cannot take
+    // this append (e.g. a lock held by another process) must not undo the
+    // injection already computed and about to be returned below.
+    try {
+      await appendEvent({
+        type: "memory.injected",
+        projectId: this.options.projectId,
+        scopeType: "session",
+        scopeId: this.options.sessionId ?? this.options.projectId,
+        actor: this.options.actor,
+        payload: {
+          memoryIds: context.consolidatedMemories?.map((memory) => memory.id) ?? [],
+        },
+      });
     } catch {
       // best-effort — see comment above.
     }
