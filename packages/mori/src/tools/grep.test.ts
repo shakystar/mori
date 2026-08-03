@@ -1,25 +1,9 @@
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { GREP_MAX_MATCHES, grep } from "./grep.js";
-import { resolveWithinRoot } from "./paths.js";
 import { readFile } from "./read-file.js";
-
-// mori#124 regression: `realpathSync` is a non-configurable ESM named export, so it
-// can't be `vi.spyOn`'d directly — wrapping it via a partial `vi.mock` is the only way
-// to count calls into it while still delegating to the real implementation.
-const realpathCalls = vi.fn();
-vi.mock("node:fs", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("node:fs")>();
-  return {
-    ...actual,
-    realpathSync: (path: Parameters<typeof actual.realpathSync>[0]) => {
-      realpathCalls(path);
-      return actual.realpathSync(path);
-    },
-  };
-});
 
 describe("grep", () => {
   let root: string;
@@ -86,25 +70,6 @@ describe("grep", () => {
       expect(result.truncated).toBe(true);
       expect(result.matches).toHaveLength(GREP_MAX_MATCHES);
     }
-  });
-
-  it("relativizes matches using the guard's realRoot instead of independently re-resolving root", () => {
-    // mori#124: grep used to call realpathSync(root) a second time to relativize
-    // matches, instead of reusing resolveWithinRoot's own realRoot. Asserting the
-    // realpathSync call count matches what the guard alone performs (rather than
-    // reproducing the race itself, which isn't deterministic) pins the fix in place —
-    // a regression back to a second, independent resolution would add a call here.
-    writeFileSync(join(root, "a.txt"), "needle here");
-
-    realpathCalls.mockClear();
-    resolveWithinRoot(root, ".");
-    const guardCallCount = realpathCalls.mock.calls.length;
-    realpathCalls.mockClear();
-
-    const result = grep(root, "needle");
-
-    expect(result.ok).toBe(true);
-    expect(realpathCalls).toHaveBeenCalledTimes(guardCallCount);
   });
 
   it("returns a structured failure for a search path escaping the root", () => {

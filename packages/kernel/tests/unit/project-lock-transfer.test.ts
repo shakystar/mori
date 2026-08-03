@@ -10,6 +10,12 @@
  *
  * These live apart from `project-lock.test.ts` so that the mock covers only the
  * cases that need it.
+ *
+ * `vi.mock` on `node:fs/promises` is otherwise off-limits (TESTING.md) — this file is
+ * one of the two documented exceptions ("예외: 타이밍 레이스·장애 주입"): the interleaving
+ * and the `ENOSPC` write failure can't be produced by the scheduler or a real full disk on
+ * demand, and the assertions below check observable outcomes (overlap, lock directory
+ * state), not the mock's call log.
  */
 
 import { existsSync } from "node:fs";
