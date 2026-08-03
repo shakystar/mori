@@ -30,6 +30,96 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # turbo 태스크 캐시 (#185). 이게 있어야 PR 사이에 캐시가 이어져 "kernel을 안 건드린
+      # PR에서 kernel의 build/test가 0초"가 된다. 경로는 turbo.json의 `cacheDir`와 같아야 한다.
+      # 키에 sha를 넣어 런마다 새 엔트리를 쓰고, restore-keys 접두사로 가장 최근 엔트리를
+      # 복원한다 — main의 캐시를 PR이 물려받는 것이 이 설정의 목적이다.
+      #
+      # 캐시가 비거나 낡아도 오답이 나지는 않는다. 히트/미스 판정은 actions/cache가 아니라
+      # turbo가 파일 해시로 하고, 미스면 그냥 태스크를 다시 돌린다. 즉 이 스텝의 실패 모드는
+      # "느려진다"이지 "게이트가 통과된다"가 아니다.
+      #
+      # 단 하나 예외가 러너 이미지다 (#185 리뷰). turbo 해시에 들어가는 것은 패키지 파일 +
+      # globalDependencies + 락파일 유래 의존 해시뿐이라 **이미지 식별자가 없다.** 이 리포는
+      # 실제로 시스템 이미지에 의존한다 — packages/mori/src/tools/bash-exec.ts가 /bin/bash를
+      # 고르고, bash.test.ts가 리눅스 /proc으로 좀비/생존을 판정한다. ubuntu-latest가 새
+      # 이미지로 굴러도 runner.os는 Linux 그대로라, 키에 이미지가 없으면 옛 이미지에서 만든
+      # "통과"를 새 이미지가 그대로 재생한다 — 캐시 도입 전이라면 매 런이 다 돌아 즉시 잡혔을
+      # 이미지 호환성 회귀가 조용히 그린이 된다. ci.yml을 globalDependencies에 넣은 것과 같은
+      # 종류의 툴체인 입력인데, 이쪽은 커밋 없이 바뀌므로 더 조용하다.
+      #
+      # 그래서 이미지 식별자를 키와 restore-keys 접두사 **양쪽**에 넣는다. 접두사에도 넣어야
+      # 옛 이미지의 엔트리가 접두사 매칭으로 되살아나지 않는다. 대가는 이미지가 굴 때 한 번
+      # 콜드가 되는 것뿐이다.
+      #
+      # 키를 여기서 셸로 조립하는 이유: ImageOS/ImageVersion은 러너 머신의 환경변수이고,
+      # 워크플로 표현식의 env 컨텍스트에서 보이는지는 보장된 계약이 아니다. 안 보이면 키가
+      # 조용히 `turbo-Linux--<sha>`가 되어 고친 줄 알았는데 안 고쳐진 상태가 된다. 셸에서는
+      # 확실히 보이므로 셸에서 읽고, **비어 있으면 레드로 만든다** — 이 스텝의 목적이 조용한
+      # 캐시 오염을 막는 것이라, 조용히 넘어가는 것이 곧 실패다. 두 컨텍스트의 실측값을 함께
+      # 찍어 두면 다음 사람이 재확인할 필요가 없다.
+      - name: Resolve turbo cache key
+        id: turbo-cache-key
+        env:
+          EXPR_IMAGE_OS: ${{ env.ImageOS }}
+          EXPR_IMAGE_VERSION: ${{ env.ImageVersion }}
+        run: |
+          set -euo pipefail
+          echo "expression env context: ImageOS='${EXPR_IMAGE_OS}' ImageVersion='${EXPR_IMAGE_VERSION}'"
+          echo "shell environment:      ImageOS='${ImageOS:-}' ImageVersion='${ImageVersion:-}'"
+          if [ -z "${ImageOS:-}" ] || [ -z "${ImageVersion:-}" ]; then
+            echo "::error::러너 이미지 식별자(ImageOS/ImageVersion)가 비었다 — 이대로면 캐시 키에서 이미지가 빠져 옛 이미지의 통과 결과가 재생된다"
+            exit 1
+          fi
+          prefix="turbo-${RUNNER_OS}-${ImageOS}-${ImageVersion}-"
+          {
+            echo "prefix=${prefix}"
+            echo "key=${prefix}${GITHUB_SHA}"
+          } >> "$GITHUB_OUTPUT"
+          echo "resolved cache key:          ${prefix}${GITHUB_SHA}"
+          echo "resolved restore-keys prefix: ${prefix}"
+
+      - name: Restore turbo cache
+        uses: actions/cache@v4
+        with:
+          path: .turbo/cache
+          key: ${{ steps.turbo-cache-key.outputs.key }}
+          restore-keys: |
+            ${{ steps.turbo-cache-key.outputs.prefix }}
+
+      # 게이트 우회 방지 (#185). `turbo run <task>`는 그 스크립트가 **없는** 워크스페이스
+      # 패키지를 조용히 건너뛴다. 예전 루트 `vitest run`은 리포 어디에 있든 *.test.ts를
+      # 주워담았으므로, 스크립트를 빠뜨린 새 패키지가 생기면 그 패키지의 테스트가 한 건도
+      # 안 돌면서 CI는 그린이 된다 — 캐시가 안 도는 것보다 나쁜 실패 모드다.
+      #
+      # 패키지 목록은 pnpm에게 물어본다(`packages/*` 글롭을 여기 다시 적으면
+      # pnpm-workspace.yaml과 갈라질 수 있다). 0건을 찾으면 통과가 아니라 실패다 —
+      # 대상이 없을 때 그린이 되는 것이 바로 이 가드가 막으려는 것이기 때문이다.
+      - name: Turbo task coverage guard
+        run: |
+          set -euo pipefail
+          dirs=$(pnpm list -r --depth -1 --json | node -e '
+            let s = "";
+            process.stdin.on("data", (d) => (s += d)).on("end", () => {
+              const root = process.cwd();
+              for (const p of JSON.parse(s)) if (p.path !== root) console.log(p.path);
+            });
+          ')
+          if [ -z "$dirs" ]; then
+            echo "::error::워크스페이스 패키지를 하나도 찾지 못했다 — 가드가 헛돈 것이므로 레드로 만든다"
+            exit 1
+          fi
+          fail=0
+          for d in $dirs; do
+            for t in build test typecheck:test; do
+              if ! node -e 'process.exit((require(process.argv[1] + "/package.json").scripts || {})[process.argv[2]] ? 0 : 1)' "$d" "$t"; then
+                echo "::error::$d 에 \"$t\" 스크립트가 없다 — turbo가 이 패키지의 $t 를 조용히 건너뛴다"
+                fail=1
+              fi
+            done
+          done
+          exit $fail
+
       - name: Lint
         run: pnpm lint
 
@@ -42,11 +132,13 @@ jobs:
       - name: Typecheck tests
         run: pnpm typecheck:test
 
-      # Runs vitest directly instead of `pnpm test` so the build above isn't
-      # redone via the `pretest` lifecycle hook (that hook exists for `pnpm test`
-      # to be self-sufficient in local dev, but CI already built in the step above).
+      # `pnpm test`(= `turbo run test`)로 되돌렸다. 예전에 vitest를 직접 부른 이유는
+      # `pretest` 훅이 위 Build를 한 번 더 돌리는 것을 피하려던 것인데, #185에서 그 훅을
+      # 없앴다 — 이제 build 재실행은 turbo가 캐시로 막는다. vitest를 직접 부르면 태스크
+      # 캐시를 통째로 우회해서 이 이슈의 목적 자체가 사라지므로, 여기서는 반드시
+      # `pnpm test`여야 한다.
       - name: Test
-        run: pnpm exec vitest run
+        run: pnpm test
 
       # .github/scripts/*.sh는 bash 스크립트라 vitest가 다루지 않는다. 셸로 돌리는 이유는
       # 검증 대상이 bash의 errexit 의미론과 빈 출력 처리이기 때문이다 (#112).

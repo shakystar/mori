@@ -12,8 +12,10 @@ import { afterEach, beforeAll, describe, expect, it } from "vitest";
 // misbehaves through that symlink indirection, so this spawns the built
 // artifact through a symlink the same way a real install would.
 //
-// Requires `dist/index.js` to exist, i.e. run `pnpm build` before this test
-// (the root `pretest` script does this automatically for `pnpm test`).
+// Requires `dist/index.js` to exist. `pnpm test` guarantees it: turbo.json's
+// `test` task declares `dependsOn: ["^build", "build"]`, so this package's own
+// `build` runs first (#185). Running vitest directly against this file without
+// a prior build fails the `beforeAll` guard below.
 
 const distEntry = fileURLToPath(new URL("../dist/index.js", import.meta.url));
 
@@ -23,7 +25,7 @@ describe("bin entrypoint via symlink", () => {
   beforeAll(() => {
     if (!existsSync(distEntry)) {
       throw new Error(
-        `dist/index.js not found at ${distEntry} — run \`pnpm build\` before \`pnpm test\`.`,
+        `dist/index.js not found at ${distEntry} — run \`pnpm build\` first, or use \`pnpm test\` (which builds this package via turbo).`,
       );
     }
   });

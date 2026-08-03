@@ -7,15 +7,14 @@
     "node": ">=22.9.0"
   },
   "scripts": {
-    "build": "tsc -b",
+    "build": "turbo run build",
     "dev": "tsx packages/mori/src/index.ts",
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "pretest": "tsc -b",
-    "test": "vitest run",
+    "test": "turbo run test",
     "test:ci-scripts": "for t in .github/scripts/*.test.sh; do bash \"$t\" || exit 1; done",
-    "typecheck:test": "tsc -p packages/kernel/tsconfig.test.json && tsc -p packages/mori/tsconfig.test.json"
+    "typecheck:test": "turbo run typecheck:test"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
@@ -25,6 +24,7 @@
     "globals": "^17.8.0",
     "prettier": "^3.9.6",
     "tsx": "^4.20.0",
+    "turbo": "2.10.8",
     "typescript": "^5.7.0",
     "typescript-eslint": "^8.65.0",
     "vitest": "^3.0.0"

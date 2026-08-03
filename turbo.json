@@ -1,0 +1,59 @@
+{
+  "$schema": "https://turborepo.com/schema.json",
+  // 태스크 캐시 (#185). 목표는 "변경되지 않은 패키지의 build/test를 아예 돌리지 않는 것"이다.
+  //
+  // 태스크별 inputs를 명시하지 않은 것은 누락이 아니라 결정이다. turbo의 기본 inputs는
+  // "그 패키지 안의 git 추적 파일 전부"라, 픽스처·스냅샷·설정을 손으로 열거하다 하나를
+  // 빠뜨려 stale 캐시가 false-green을 만드는 사고(#185 본문이 지목한 최대 위험)가 구조적으로
+  // 불가능하다. 손으로 좁혀서 얻는 것은 "무관한 파일만 고쳤을 때 재실행을 면하는" 정도인데,
+  // 그 이득보다 게이트가 조용히 죽을 위험이 크다.
+  //
+  // 대신 기본 inputs가 못 잡는 것 — 패키지 **밖**의 파일 — 만 아래에 명시한다.
+  // 의존 버전은 여기 없어도 된다: turbo가 pnpm-lock.yaml에서 패키지별 외부 의존 해시를
+  // 뽑아 키에 넣는다 (락파일의 해결 버전을 바꿔 태스크 해시가 바뀌는 것으로 확인했다).
+  //
+  // `.github/workflows/ci.yml`이 여기 있는 이유는 그 파일이 이 리포의 **툴체인 정의**이기
+  // 때문이다. node 22.23.1과 pnpm 10.30.3이 거기에만 박혀 있어서, 빼놓으면 node를 올린
+  // 커밋이 옛 node로 만든 "통과" 캐시를 그대로 재생한다 — 게이트가 조용히 죽는 false-green이다.
+  // (ci.yml을 고쳐도 태스크 해시가 안 바뀌는 것을 실측하고 넣었다.) 대가는 CI 설정을 고칠
+  // 때마다 캐시가 한 번 콜드가 되는 것뿐이고, 그 빈도는 낮다.
+  "globalDependencies": [
+    "tsconfig.base.json",
+    "tsconfig.json",
+    "pnpm-workspace.yaml",
+    ".github/workflows/ci.yml"
+  ],
+  // 기본값과 같은 경로지만 명시한다. turbo는 체크아웃이 git worktree이면 캐시를 공유
+  // .git 디렉터리 쪽(= 메인 클론)에 쓴다 — 에이전트 worktree에서 돌리면 읽기 전용으로
+  // 취급해야 할 /data/repos/<repo>를 오염시킨다. 여기서 못박아 두면 CI(actions/cache가
+  // 이 경로를 보존한다)와 로컬 worktree가 같은 자리를 쓴다.
+  "cacheDir": ".turbo/cache",
+  "tasks": {
+    // 각 패키지의 `tsc -b`. mori는 @mori/kernel의 dist/*.d.ts를 보므로 ^build가 필요하다.
+    // tsbuildinfo를 outputs에 넣어야 캐시 복원 뒤의 tsc -b가 증분 상태를 잃지 않는다.
+    "build": {
+      "dependsOn": ["^build"],
+      "outputs": ["dist/**", "*.tsbuildinfo"]
+    },
+    // `build`(^ 없음)가 자기 패키지, `^build`가 의존 패키지다. 둘 다 필요하다:
+    //   - `^build` — mori의 테스트가 임포트하는 @mori/kernel이 dist/*.d.ts·dist/index.js로
+    //     해결된다 (kernel package.json의 exports).
+    //   - `build` — vitest 자체는 TS를 직접 트랜스파일하므로 대부분의 테스트에는 자기 dist가
+    //     필요 없지만, packages/mori/src/bin-entrypoint.test.ts는 **빌드 산출물을 심링크로
+    //     실행하는** 회귀 테스트라 자기 패키지의 dist/index.js가 있어야 한다. 예전에는 루트
+    //     `pretest` 훅이 이것을 보장했고 이 PR이 그 훅을 없앴으므로, 그 계약을 여기로 옮긴다.
+    //     빠뜨리면 `pnpm test` 단독 실행이 깨끗한 체크아웃에서 실패한다 (#185 리뷰).
+    // outputs가 비어 있어도 turbo는 종료 코드와 로그를 캐시한다 — 그것이 스킵의 근거다.
+    "test": {
+      "dependsOn": ["^build", "build"],
+      "outputs": []
+    },
+    // 여기에는 `build`를 넣지 않는다. tsc는 자기 패키지의 소스를 dist가 아니라 src에서 읽고
+    // (tsconfig.test.json의 include), 패키지 **밖**의 @mori/kernel만 dist/*.d.ts로 해결하므로
+    // 필요한 것은 ^build뿐이다. 넣어도 결과는 같지만 캐시 미스 시 불필요한 빌드가 붙는다.
+    "typecheck:test": {
+      "dependsOn": ["^build"],
+      "outputs": []
+    }
+  }
+}
