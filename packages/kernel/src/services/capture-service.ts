@@ -1,5 +1,6 @@
 import { type Observation, type ObservationSignal, createObservation } from "../domain/entities.js";
 import { appendEvent } from "../storage/event-store.js";
+import { throwIfDispossessed } from "../storage/project-lock.js";
 import { rebuildProjectProjection } from "./projection-store.js";
 
 /**
@@ -233,6 +234,13 @@ export interface CaptureObservationParams {
   conversationId?: string;
   generationId?: string;
   toolUseId?: string;
+  /**
+   * #158: the dispossession signal `withProjectLock` hands its `fn`. Absent ⇒
+   * no cancellation, which is every caller that is not holding a project lock
+   * (and every test that predates this). When present, it is checked at the two
+   * points below and nowhere else.
+   */
+  signal?: AbortSignal;
 }
 
 /**
@@ -244,6 +252,9 @@ export interface CaptureObservationParams {
  *
  * Returns the captured observation, or undefined when the filter rejected
  * the event (read-only tool, chatter).
+ *
+ * Throws `ProjectLockCompromisedError` when `params.signal` fires — see the
+ * check points below for what is guaranteed about the store at each.
  */
 export async function captureObservation(
   params: CaptureObservationParams,
@@ -273,6 +284,12 @@ export async function captureObservation(
   // back from here.)
   const scopeId = params.sessionId ?? params.projectId;
 
+  // #158 check point ①. On disk from this call so far: NOTHING. `createObservation`
+  // and the verdict above are pure, so stopping here leaves the store byte-for-byte
+  // as it was found and costs one observation — the same price a lock we could not
+  // take already costs (`observe` routes both to `onCaptureError`).
+  throwIfDispossessed(params.signal);
+
   await appendEvent({
     type: "observation.captured",
     projectId: params.projectId,
@@ -281,6 +298,19 @@ export async function captureObservation(
     actor: params.actor,
     payload: observation,
   });
+
+  // #158 check point ②. On disk from this call: the `observation.captured` event,
+  // and only that. The asymmetry is deliberate rather than a half-commit — the
+  // event log is the source of truth and the projection is DERIVED from it by
+  // replace-all, so an observation appended without the rebuild is not lost, it
+  // is picked up by whichever capture or boundary rebuilds next. The rebuild is
+  // the step that cannot be taken back: it commits a snapshot of the log read
+  // before we knew we had been dispossessed, which drops the new owner's own
+  // concurrent append out of the projection while leaving it in the log —
+  // #132's ①, verbatim. So this is the last point where stopping is strictly
+  // better than continuing.
+  throwIfDispossessed(params.signal);
+
   await rebuildProjectProjection(params.projectId, { reindexSearch: false });
   return observation;
 }
