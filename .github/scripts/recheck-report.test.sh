@@ -542,13 +542,26 @@ run_report
 assert_eq "posted|판정 불가" \
   "$(grep -q 'method POST repos/o/r/issues/7/comments' "$GH_LOG" && echo posted || echo no-post)|$(grep -o '판정 불가' "$GH_BODY_LOG" | head -1)"
 
-it "기존 게이트 코멘트가 이미 판정 불가면 폴백이 그 코멘트를 갱신한다"
+# --- 폴백은 판정 종류를 보지 않는다 — 게이트 존재 자체로 가른다 (#183 항목 ①) --------------
+# 예전 코드는 existing_class(GET 시점 스냅샷)가 "확정"인지로 갈라 stale·error는 종전대로
+# 덮었다. GET 이후 겹친 authoritative 실행이 같은 코멘트를 확정 판정으로 PATCH하면, 폴백은
+# 자신이 든 낡은 스냅샷을 근거로 그 확정 판정을 다시 덮어썼다(T1-T3의 재전개). 지금은
+# 게이트 코멘트가 존재하기만 하면 판정 종류와 무관하게 PATCH하지 않는다.
+
+it "기존 게이트 코멘트가 판정 불가(stale)여도 폴백은 그것을 PATCH하지 않는다"
 reset_scenario
 use_fallback_env
 route "issues/7/comments" "[$(comment 100 "$BOT" "$(gate_body stale "$STALE_HEAD")")]"
 run_report
-assert_eq "patched|${FALLBACK_DETAIL}" \
-  "$(grep -q 'method PATCH repos/o/r/issues/comments/100' "$GH_LOG" && echo patched || echo no-patch)|$(grep -o "$FALLBACK_DETAIL" "$GH_BODY_LOG" | head -1)"
+assert_eq "no-patch|posted" \
+  "$(grep -q 'method PATCH repos/o/r/issues/comments/100' "$GH_LOG" && echo patched || echo no-patch)|$(grep -q 'method POST repos/o/r/issues/7/comments' "$GH_LOG" && echo posted || echo no-post)"
+
+it "기존 게이트 코멘트가 판정 불가(error)여도 폴백은 그것을 PATCH하지 않는다"
+reset_scenario
+use_fallback_env
+route "issues/7/comments" "[$(comment 100 "$BOT" "$(gate_body error "⛔ 판정 불가 — 현재 main 기준 재검증을 끝내지 못했습니다.")")]"
+run_report
+assert_not_contains "$(cat "$GH_LOG")" "method PATCH repos/o/r/issues/comments/100"
 
 it "판정 마커가 없는 옛 코멘트도 헤드라인으로 확정 판정으로 읽어 덮지 않는다"
 reset_scenario
@@ -557,14 +570,36 @@ route "issues/7/comments" "[$(comment 100 "$BOT" "$(legacy_gate_body "$RED_HEAD"
 run_report
 assert_not_contains "$(cat "$GH_LOG")" "method PATCH repos/o/r/issues/comments/100"
 
+# --- 판정 마커·헤드라인 판독이 본문 오염에 속지 않는다 (#183 항목 ②) ------------------------
+# 레드/판정불가 본문은 체크 출력 꼬리를 그대로 싣는다. 그 꼬리에 이모지나 마커 모양 문자열이
+# 우연히 섞여도(이 리포 자신의 체크 로그에 recheck-report.test.sh의 픽스처 문자열이 실릴 수
+# 있다) 그것을 판정으로 오독하면 안 된다 — 게이트 자체는 존재만으로 덮지 않지만(위 항목 ①),
+# 오독된 판정 종류는 알림 코멘트의 "기존 판정" 표시로 샌다.
+
 it "판정 종류는 헤드라인에서만 읽는다 — 본문 뒤쪽의 그린 인용에 속지 않는다"
 reset_scenario
 use_fallback_env
-# 레드 본문은 체크 출력 꼬리를 그대로 싣는다. 본문 전체를 이모지로 훑으면 판정 불가 코멘트가
-# 확정 그린으로 읽혀 폴백이 침묵하게 된다.
 route "issues/7/comments" "[$(comment 100 "$BOT" "$(legacy_gate_body "$STALE_HEAD" "이전 판정 인용: 🟢 그린입니다")")]"
 run_report
-assert_contains "$(cat "$GH_LOG")" "method PATCH repos/o/r/issues/comments/100"
+# 알림 본문의 "(기존 판정: ...)" 표시 문구만 본다 — 알림 자체의 안내문에도 "그린"이라는
+# 단어가 일반론으로 등장하므로 본문 전체에서 찾으면 오탐이 난다.
+assert_contains "$(grep -o '기존 판정: [^)]*' "$GH_BODY_LOG")" "판정 불가"
+
+it "판정 마커가 없는 옛 코멘트에 로그 꼬리로 마커 모양 문자열이 섞여도 헤드라인의 진짜 판정으로 읽는다"
+reset_scenario
+use_fallback_env
+# <!-- recheck-verdict:stale --> 가 게이트 마커 바로 다음 줄이 아니라 로그 인용 줄에 있다 —
+# verdict_marker는 그 위치를 보지 않으므로 이 줄에 낚이지 않고 헤드라인(레드)으로 읽어야 한다.
+route "issues/7/comments" "[$(comment 100 "$BOT" "$(legacy_gate_body "$RED_HEAD" "로그 원문 인용: <!-- recheck-verdict:stale -->")")]"
+run_report
+assert_contains "$(cat "$GH_BODY_LOG")" "🔴 레드"
+
+it "화이트리스트를 벗어난 판정 마커(cancelled)는 unknown으로 정규화된다"
+reset_scenario
+use_fallback_env
+route "issues/7/comments" "[$(comment 100 "$BOT" "$(gate_body cancelled "⛔ 알 수 없는 상태")")]"
+run_report
+assert_contains "$(cat "$GH_BODY_LOG")" "판독하지 못함"
 
 it "기존 코멘트 조회에 실패하면 폴백은 게이트를 건드리지 않고 알림만 남긴다"
 reset_scenario

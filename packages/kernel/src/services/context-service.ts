@@ -1,10 +1,6 @@
 import type { StartupContextPayload } from "../domain/entities.js";
 import type { Embedder } from "../index.js";
-import {
-  reinforceInjectedMemories,
-  retrieveMemoryContext,
-  retrieveSegments,
-} from "./memory-retrieval-service.js";
+import { retrieveMemoryContext, retrieveSegments } from "./memory-retrieval-service.js";
 import { semanticMemoryScores } from "./search-service.js";
 
 /**
@@ -25,13 +21,15 @@ export type MemoryContext = Pick<
 /**
  * Kernel-scope slice of upstream memorize's `loadStartContext`: the
  * freshness/relevance-ranked memory context assembly (P3-c semantic boost +
- * CLS two-layer retrieval + raw-segment channel), reinforcing whatever gets
- * injected. Everything else upstream's `loadStartContext` also assembles
- * (project/workstream/task/handoff/checkpoint, other-active-tasks, personal
- * and shared memory channels, inbound task requests) reads through
- * project-service/session-service/task-service/workspace-service/
- * personal-store-service — host-CLI product services with no kernel
- * consumer yet, so they stay out of this port (mori#63).
+ * CLS two-layer retrieval + raw-segment channel). Retrieval-only — it does NOT
+ * reinforce what it retrieves (mori#176); see the reinforcement note further
+ * down for why that is the caller's job. Everything else upstream's
+ * `loadStartContext` also assembles (project/workstream/task/handoff/
+ * checkpoint, other-active-tasks, personal and shared memory channels,
+ * inbound task requests) reads through project-service/session-service/
+ * task-service/workspace-service/personal-store-service — host-CLI product
+ * services with no kernel consumer yet, so they stay out of this port
+ * (mori#63).
  */
 export async function buildMemoryContext(
   projectId: string,
@@ -74,13 +72,18 @@ export async function buildMemoryContext(
   }
 
   // CLS two-layer retrieval: rank consolidated memories + the previous
-  // session's observation tail in one pool, then stamp the injected
-  // memories as accessed (reinforcement — projection-only, best-effort).
+  // session's observation tail in one pool. Deliberately retrieval-only —
+  // this function does NOT reinforce (mori#176). Reinforcement stamps
+  // `last_accessed_at`/`injection_count`, which is only true once a caller has
+  // actually put the result in front of the model; `buildMemoryContext` has no
+  // way to know that (its result may be discarded, e.g. a harness render
+  // failure), so the caller that confirms injection — `SqliteMemoryKernel.
+  // transformContext` — calls `reinforceInjectedMemories` itself, after render
+  // succeeds.
   const retrieved = retrieveMemoryContext(projectId, {
     ...(opts.taskTitle ? { taskTitle: opts.taskTitle } : {}),
     ...(semanticScores ? { semanticScores } : {}),
   });
-  reinforceInjectedMemories(projectId, retrieved.memories);
 
   // Raw-detail channel: verbatim transcript segments for the task, surfaced
   // ALONGSIDE consolidated memories with their own budget. Best-effort; empty
