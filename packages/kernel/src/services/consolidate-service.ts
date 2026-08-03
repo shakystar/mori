@@ -1687,10 +1687,17 @@ export interface ConsolidateParams {
    * committed nothing yet — see the call sites in `run()`. That second half is
    * the limit, not a detail: once the `memory.consolidated` append has landed,
    * a check point would stop the boundary mid-commit, so the tail after it has
-   * none. `lockSignal` still reaches the tail's two writes, just not as a
-   * stopping point — `commitBoundaryCursors` orders its writes so a stale one
-   * loses, and `recordAttempt` declines to write at all. See the `## The
-   * overlap that remains` section of `storage/project-lock.ts` (#211).
+   * none. The tail's two writes are covered without a check point instead, and
+   * unequally: `commitBoundaryCursors` does not consult `lockSignal` at all but
+   * orders each write against stored state so a stale one loses — a guarantee
+   * that holds even if this boundary never learns it was dispossessed —
+   * whereas `recordAttempt` declines to write once `lockSignal` has fired,
+   * which is only as timely as the signal is. The heartbeat delivers it up to
+   * one lock-heartbeat period after the takeover, and a successor that records
+   * inside that lag can still be overwritten; the window is narrowed, not
+   * closed, and what is left is misreported telemetry rather than a wrong
+   * boundary. See the `## The overlap that remains` section of
+   * `storage/project-lock.ts` (#211).
    */
   lockSignal?: AbortSignal;
   /**
@@ -1757,6 +1764,17 @@ export async function consolidate(params: ConsolidateParams): Promise<Consolidat
     // all of them mean the same thing about who owns the store. An attempt that
     // still holds its lock records exactly as before, whatever went wrong —
     // this must never become telemetry silence for ordinary failures.
+    //
+    // What this does NOT do is close the window, and the doc must not claim it
+    // does. The signal is the heartbeat's NOTICE of the takeover, up to one
+    // heartbeat period (`LOCK_HEARTBEAT_MS`, 5s) behind the takeover itself, so
+    // a successor quick enough to finish and record inside that lag can still
+    // be overwritten by this boundary arriving after it — narrowed from
+    // "always" to "at most one heartbeat" (PR #225 review, Codex P2). What
+    // survives is observability only: `last_consolidate_attempt` is reported by
+    // `getConsolidationStatus` and nothing branches on it. Closing it would take
+    // a synchronous ownership check at commit time or self-ordering telemetry,
+    // both out of #211's scope (idea #189).
     if (params.lockSignal?.aborted) return;
     try {
       writeLastConsolidateAttempt(params.projectId, {
