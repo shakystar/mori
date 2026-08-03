@@ -31,18 +31,82 @@ import globals from "globals";
 //     generated from the same regex so the two cannot drift apart.
 //   - globs matched too much. `**/services/**` matches the *specifier text*,
 //     so an unrelated external package (`@vendor/services/client`) was rejected
-//     for merely having "services" in its path. The layer regexes below anchor
-//     to a relative specifier (`../services/...`) or to an explicit in-repo
-//     path, which no external package subpath can look like.
+//     for merely having "services" in its path. Every boundary regex below
+//     anchors to a relative specifier (`^\.{1,2}/...`) or to an explicit
+//     in-repo path (a `packages/...` segment), which no external package
+//     subpath can look like — an npm specifier can't start with a dot, and
+//     "packages/" isn't a plausible package-name prefix. (#161 tightened
+//     NOT_KERNEL_INTERNALS/NOT_MORI to this same shape after finding they'd
+//     regressed to matching `/kernel/src/` or `/mori/src/` anywhere in the
+//     specifier — e.g. `@vendor/kernel/src/client` — the same unanchored
+//     mistake the glob had.)
 // Known limit: only literal specifiers are visible to either gate —
 // `import(someVariable)` is not statically analyzable and is not covered.
+// Known limit: matching is case-insensitive on both gates (`no-restricted-imports`
+// defaults to it, and the dynamic selector below opts into the same via the
+// `i` flag) — a case-varied specifier that resolves differently on a
+// case-sensitive filesystem (`../Services/x.js` vs `../services/x.js`) is
+// still caught, but so would a same-cased path that happens not to exist;
+// this rule doesn't distinguish the two (#161).
 
 // Layer reaches are written relative (`../services/x.js`) inside a package;
 // the `packages/<pkg>/src/<layer>/` alternative keeps the in-repo path form
 // covered too, mirroring how NOT_MORI already spells out `packages/mori/`.
+//
+// The relative alternative tolerates interleaved no-op segments
+// (`x/../` cancels itself out under path resolution) so a specifier like
+// `../domain/../services/x.js` — which Node/TypeScript resolve to
+// `../services/x.js` — is caught the same as the direct form (#161). This is
+// an approximation, not true resolved-path matching: it catches the common
+// case where a cancelling pair precedes the forbidden segment, but gets it
+// wrong when the cancellation instead consumes the forbidden segment itself
+// — see the fail-closed Known limit below. Each `(?:(?!\.\./)[^/]+/)?\.\./`
+// repetition consumes AT MOST ONE non-`..` segment immediately followed by
+// its own cancelling `../` — never more.
+// This is deliberate, not an arbitrary tightening: path resolution cancels
+// exactly one segment per `../`, so a repetition that could swallow several
+// segments before its `../` (the original `(?:[^/]+/)*\.\./` shape) would
+// accept `../foo/bar/../services/x.js` too — which resolves to
+// `../foo/services/x.js`, NOT into `services/`, and so must stay unmatched
+// (#161 PR #186 review: that broader shape was a real false positive, not a
+// hypothetical). One-segment-per-repetition also collapses the regex engine's
+// split ambiguity — `(?:[^/]+/)*` nested inside the outer `*` let the same
+// input be partitioned exponentially many ways on a non-matching specifier,
+// e.g. `"../" + "x/../".repeat(24)` took ~680ms; the `(?!\.\./)`-guarded,
+// one-segment shape stays flat (<1ms) at the same input size because each
+// repetition's split is now unique. The lookahead itself only rules out a
+// segment that is literally `..` (which would make the segment ambiguous
+// with the cancelling `../` that must follow it) — plain segment names are
+// unaffected.
+// Known limit: only a SINGLE cancelling segment per `../` is recognized, so
+// a multi-hop cancellation like `../x/y/../../services/x.js` (`x/y/../../`
+// resolves away to nothing) is not caught — regexes can't express balanced,
+// arbitrary-depth cancellation. This is fail-open (a real reach could slip
+// through), same direction as the case-insensitivity limit below; it is not
+// fail-closed like the single-segment form this fixes.
+// Known limit (#161 PR #186 review, fail-closed — the opposite direction
+// from the limit above): a FORBIDDEN layer segment that is itself cancelled
+// by a later `../` still matches as the terminus, because on a failed
+// attempt to consume it as a cancelling pair the engine backtracks to a
+// parse that instead ends the match there. Two examples for
+// DOMAIN_NOT_UPPER_LAYERS (dirs = storage|projections|services), both of
+// which resolve to `../domain/types.js` — a same-layer, legitimate import —
+// yet both are FLAGGED:
+//   `../services/../domain/types.js`
+//   `../x/../services/../domain/types.js`
+// This blocks a legitimate import rather than letting a violation through,
+// so it is fail-closed, unlike the multi-hop limit above. The minimal form
+// (`../services/../domain/types.js`) is not new: it already matched under
+// main's pre-#161 `(?:\.\./)*` shape; this PR's one-segment narrowing only
+// extends the false positive to variants with a leading cancelling pair
+// (`../x/../services/../domain/types.js`). Not fixed: excluding a cancelled
+// segment from matching as a terminus needs an atomic/possessive group (a
+// `(?=(X))\1` lookahead-capture at best), which JS regex has no native
+// support for and which #161's scope excludes adding (no new dependency, no
+// new CI step) to hold the ~1min CI budget (#47/#69).
 const layerReach = (pkg, dirs) => {
   const alt = dirs.join("|");
-  return `^\\.{1,2}/(?:\\.\\./)*(?:${alt})/|(?:^|/)packages/${pkg}/src/(?:${alt})/`;
+  return `^\\.{1,2}/(?:(?:(?!\\.\\./)[^/]+/)?\\.\\./)*(?:${alt})/|(?:^|/)packages/${pkg}/src/(?:${alt})/`;
 };
 
 const NOT_KERNEL_INTERNALS = {
@@ -50,14 +114,34 @@ const NOT_KERNEL_INTERNALS = {
   // does not. The second alternative closes the relative reach Codex found:
   // `../../../kernel/dist/services/...` resolves to the same internals but
   // matched no pattern. It requires the `src`/`dist` segment so mori's own
-  // local wiring dir (`../kernel/index.js`) is untouched.
-  regex: "^@mori/kernel/|(?:^|/)(?:packages/)?kernel/(?:src|dist)/",
+  // local wiring dir (`../kernel/index.js`) is untouched. Both the relative
+  // and explicit-repo-path alternatives require a relative start (`./`/`../`)
+  // or a `packages/` segment respectively — an external package subpath
+  // (`@vendor/kernel/src/client`) can spell neither, so it no longer matches
+  // (#161; it used to, via an unanchored `(?:^|/)`).
+  // Known limit (#161 PR #186 review): the narrowing's structural cost is an
+  // ABSOLUTE in-repo path with a cancelling segment ahead of `packages/`,
+  // e.g. `/workspace/mori/packages/mori/../kernel/src/index.js` — the
+  // relative alternative doesn't apply (no `./`/`../` start) and the
+  // `packages/` alternative requires the literal substring
+  // `packages/kernel/(src|dist)/`, which the `mori/../` in the middle
+  // breaks. This used to match (unanchored) and no longer does. Not
+  // reimplemented: absolute specifiers aren't used in this repo, and
+  // un-anchoring the `packages/` alternative to close it would reopen the
+  // external-subpath false positive #161 exists to close.
+  regex:
+    "^@mori/kernel/|^\\.{1,2}/(?:[^/]+/)*kernel/(?:src|dist)/|(?:^|/)packages/kernel/(?:src|dist)/",
   message:
     "Import the kernel's public entry point (`@mori/kernel`) only — internal paths (`@mori/kernel/src/...`, or a relative reach like `../../kernel/dist/...`) are not a stable surface.",
 };
 
 const NOT_MORI = {
-  regex: "^@shakystar/mori(?:/|$)|(?:^|/)packages/mori/|(?:^|/)mori/(?:src|dist)/",
+  // Same narrowing as NOT_KERNEL_INTERNALS above, for the same reason: an
+  // external package subpath (`@vendor/mori/src/client`) can't spell a
+  // relative start or a `packages/` segment, so it's no longer caught by the
+  // in-repo-path alternatives (#161). Same absolute-path known limit as
+  // NOT_KERNEL_INTERNALS above applies here too.
+  regex: "^@shakystar/mori(?:/|$)|(?:^|/)packages/mori/|^\\.{1,2}/(?:[^/]+/)*mori/(?:src|dist)/",
   message:
     "kernel must not depend on mori (the host harness) — the dependency is host -> kernel only, never the reverse.",
 };
@@ -115,10 +199,16 @@ const KERNEL_NO_NETWORK_SYNTAX = [
   },
 ];
 
-// esquery reads `/.../` as a regex literal terminated by the first unescaped
-// slash, so path separators have to be escaped going in.
+// esquery reads `/.../flags` as a regex literal terminated by the first
+// unescaped slash, so path separators have to be escaped going in. The `i`
+// flag matches `no-restricted-imports`' own default: its `regex` patterns run
+// case-insensitive unless `caseSensitive: true` is set (neither gate sets it
+// here), and without `i` here the two gates disagreed on a case-varied
+// specifier like `await import("../Services/x.js")` (#161; esquery's grammar
+// accepts `[imsu]` after the closing slash — confirmed against esquery 1.7.0's
+// parser — so the flag is expressible, not just desired).
 const asDynamicImport = ({ regex, message }) => ({
-  selector: `ImportExpression[source.value=/${regex.replace(/\//g, "\\/")}/]`,
+  selector: `ImportExpression[source.value=/${regex.replace(/\//g, "\\/")}/i]`,
   message,
 });
 

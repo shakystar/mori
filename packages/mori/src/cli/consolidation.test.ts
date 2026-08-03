@@ -118,16 +118,35 @@ describe("consolidateExplicit", () => {
     expect(opts).toEqual([{ boundary: "manual", signal: controller.signal }]);
   });
 
-  it("reports cancelled, not failed, when kernel.consolidate rejects with an AbortError (#141)", async () => {
+  it("reports cancelled, not failed, when kernel.consolidate rejects with an AbortError AND this call's signal aborted (#141, #167)", async () => {
     const kernel = spyKernel(async () => {
       const error = new Error("aborted");
+      error.name = "AbortError";
+      throw error;
+    });
+    const controller = new AbortController();
+    controller.abort();
+
+    const outcome = await consolidateExplicit(kernel, stubLlm(), controller.signal);
+
+    expect(outcome).toEqual({ kind: "cancelled" });
+  });
+
+  it("reports failed, not cancelled, for an AbortError when this call's own signal never aborted (#167)", async () => {
+    // #167: once the kernel forwards `signal` into the extraction request, a provider's OWN
+    // transport-level abort (timeout, connection reset) can reject with the same `AbortError`
+    // name without the user ever cancelling anything. Matching on the name alone would hide
+    // that as a clean cancellation instead of a real failure.
+    const kernel = spyKernel(async () => {
+      const error = new Error("upstream connection reset");
       error.name = "AbortError";
       throw error;
     });
 
     const outcome = await consolidateExplicit(kernel, stubLlm(), new AbortController().signal);
 
-    expect(outcome).toEqual({ kind: "cancelled" });
+    expect(outcome.kind).toBe("failed");
+    expect(outcome.kind === "failed" && outcome.error).toBeInstanceOf(Error);
   });
 });
 
