@@ -176,7 +176,12 @@ export class RuleBasedConsolidator implements Consolidator {
     const edits = input.observations.filter((o) => o.signal === "write-tool");
     if (edits.length > 0) {
       // #113: never echo a write-tool observation's `summary`/`filePath` into
-      // the memory body. The kernel-level contract for what `toolInputText`
+      // the memory body. This is "category 2" of the storage-boundary
+      // forbidden list — docs/storage-boundary-secrets.md (#188 C) — never
+      // read the raw value, rather than pattern-matching it, since arbitrary
+      // file content is no less sensitive than a credential shape and a
+      // pattern list can't claim completeness over it.
+      // The kernel-level contract for what `toolInputText`
       // contains (path, per #109/PR #127 — see capture-service.ts) is
       // enforced by the harness wiring layer, NOT by this package's own
       // types (`CaptureObservationParams.toolInputText` is a plain string) —
