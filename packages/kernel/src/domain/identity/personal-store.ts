@@ -14,7 +14,11 @@ const PERSONAL_STORE_PREFIX = "personal_";
  * `personal_self`; every other account → `personal_<accountId>`. Path isolation
  * (accounts/<id>/personal, see path-resolver) plus a DISTINCT id per account keep
  * accounts' personal memory apart, and mirror Hub's server-minted `psm_` (one per
- * account, Hub SoT H050) so a later sync binding (W1) is purely additive.
+ * account, Hub SoT H050) so a later sync binding (W1) is purely additive. The
+ * default account is the one exception to the accounts/<id>/personal nesting —
+ * it keeps the legacy flat `personal/` path (see `getPersonalRoot`) so existing
+ * on-disk data needs no re-keying; `accountOfPersonalStore` rejects any other
+ * spelling that would alias that flat default-account path (#155).
  */
 export function getPersonalStoreId(accountId: string): string {
   return isDefaultAccount(accountId) ? PERSONAL_STORE_ID : `${PERSONAL_STORE_PREFIX}${accountId}`;
@@ -35,8 +39,22 @@ export function isPersonalStoreId(id: unknown): boolean {
  * legacy `personal_self` maps back to the default account; `personal_<accountId>`
  * strips the prefix. Lets path resolution derive the account from the store id
  * alone, with no ambient active-account coupling.
+ *
+ * Rejects `personal_local_default` (and any other spelling that strips down to
+ * the default account id): `getPersonalStoreId` never mints that spelling — the
+ * default account's ONLY valid id is the legacy `personal_self` — so accepting
+ * it here would let it alias the same on-disk store (both resolve to the
+ * default account's `getPersonalRoot()`) while callers still treat the two
+ * distinct ids as separate identities, reproducing the #155 cross-lane
+ * contamination this function exists to prevent.
  */
 export function accountOfPersonalStore(personalStoreId: string): string {
   if (personalStoreId === PERSONAL_STORE_ID) return DEFAULT_ACCOUNT_ID;
-  return personalStoreId.slice(PERSONAL_STORE_PREFIX.length);
+  const accountId = personalStoreId.slice(PERSONAL_STORE_PREFIX.length);
+  if (isDefaultAccount(accountId)) {
+    throw new Error(
+      `Invalid personal-store id: ${JSON.stringify(personalStoreId)} aliases the default account's canonical id ${JSON.stringify(PERSONAL_STORE_ID)}; use ${JSON.stringify(PERSONAL_STORE_ID)} instead`,
+    );
+  }
+  return accountId;
 }
