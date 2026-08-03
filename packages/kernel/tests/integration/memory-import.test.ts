@@ -1016,4 +1016,161 @@ describe("importMemories — supersede hints (#114 ③)", () => {
     });
     expect(listValidMemories(projectId).map((row) => row.memory.text)).not.toContain("old truth");
   });
+
+  /** Seeds the #206 chain's four memories and returns their ids by text. */
+  async function seedChainMemories(texts: string[]): Promise<Map<string, string>> {
+    await importMemories({
+      projectId,
+      actor: "test",
+      source: "docs",
+      itemsJson: JSON.stringify(texts.map((text) => ({ kind: "decision", text, salience: 7 }))),
+    });
+    return new Map(listValidMemories(projectId).map((row) => [row.memory.text, row.memory.id]));
+  }
+
+  // c1: "m" retires T · c2: "n" retires M · c3: "o" retires N. Only O is not
+  // itself replaced, so the chain unwinds from there: c3 is honored and N dies,
+  // which kills c2 (its author is gone), which means M LIVES — so c1's author
+  // is alive after all and T must be retired. The previous implementation
+  // excluded c1 in the first round on the strength of a retirement (M's) that
+  // its own second round undid, and never reconsidered: only c3 was honored and
+  // T stayed valid with nobody the wiser.
+  it.each([
+    ["input order", [0, 1, 2]],
+    ["reversed", [2, 1, 0]],
+    ["rotated", [1, 2, 0]],
+  ])(
+    "#206: a 3-link folded chain unwinds end to end and the result is order-independent (%s)",
+    async (_label, order) => {
+      const byText = await seedChainMemories(["m", "n", "o", "t"]);
+      const mId = byText.get("m")!;
+      const nId = byText.get("n")!;
+      const tId = byText.get("t")!;
+
+      const hints = [
+        { kind: "decision", text: "m", salience: 7, supersedesMemoryId: tId },
+        { kind: "decision", text: "n", salience: 7, supersedesMemoryId: mId },
+        { kind: "decision", text: "o", salience: 7, supersedesMemoryId: nId },
+      ];
+
+      const result = await importMemories({
+        projectId,
+        actor: "test",
+        source: "docs",
+        itemsJson: JSON.stringify(order.map((index) => hints[index]!)),
+      });
+
+      expect(result).toEqual({
+        imported: 0,
+        skippedDuplicates: 3,
+        droppedByCap: 0,
+        honoredSupersedes: 2,
+        droppedSupersedesByCap: 0,
+      });
+      const superseded = (await readEvents(projectId)).filter(
+        (event) => event.type === "memory.superseded",
+      );
+      // T retired by M (whose own would-be successor N is dead, so M survives)
+      // and N retired by O. M is never named as retired.
+      expect(
+        superseded.map((event) => (event.payload as { supersedes: string }).supersedes).sort(),
+      ).toEqual([nId, tId].sort());
+      expect(
+        listValidMemories(projectId)
+          .map((row) => row.memory.text)
+          .sort(),
+      ).toEqual(["m", "o"]);
+    },
+  );
+
+  it("#206: mutually superseding folded hints (a 2-cycle) honor neither and still terminate", async () => {
+    const byText = await seedChainMemories(["a", "b"]);
+    const aId = byText.get("a")!;
+    const bId = byText.get("b")!;
+
+    // A's hint retires B and B's hint retires A: each one's author dies exactly
+    // when the other is honored, so no assignment is stable. Dropping both is
+    // the standing contract, and the resolution must reach it by settling —
+    // an implementation that revokes exclusions without a settled starting
+    // point oscillates here and never returns (a synchronous spin no test
+    // timeout can interrupt, so a hang IS this test failing).
+    const result = await importMemories({
+      projectId,
+      actor: "test",
+      source: "docs",
+      itemsJson: JSON.stringify([
+        { kind: "decision", text: "a", salience: 7, supersedesMemoryId: bId },
+        { kind: "decision", text: "b", salience: 7, supersedesMemoryId: aId },
+      ]),
+    });
+
+    expect(result).toEqual({
+      imported: 0,
+      skippedDuplicates: 2,
+      droppedByCap: 0,
+      honoredSupersedes: 0,
+      droppedSupersedesByCap: 0,
+    });
+    expect(
+      (await readEvents(projectId)).filter((event) => event.type === "memory.superseded"),
+    ).toHaveLength(0);
+    expect(
+      listValidMemories(projectId)
+        .map((row) => row.memory.text)
+        .sort(),
+    ).toEqual(["a", "b"]);
+  });
+
+  it("#206 ②: a hint the cap could not apply does not exclude the hint that depended on it", async () => {
+    const byText = await seedChainMemories(["u", "x", "m", "n", "t"]);
+    const xId = byText.get("x")!;
+    const mId = byText.get("m")!;
+    const tId = byText.get("t")!;
+
+    // IMPORT_MAX_ITEMS - 1 fresh items leave room for exactly ONE folded hint,
+    // and the unrelated "u retires X" hint takes it. That leaves c2 ("n"
+    // retires M) unwritten — so M is NOT retired, and c1 ("m" retires T) is
+    // eligible on the merits. Judging eligibility before the budget made c1
+    // vanish from the return value entirely: not honored, and not counted as a
+    // cap drop either, because it had been excluded on the strength of a
+    // retirement the cap then refused to write.
+    const result = await importMemories({
+      projectId,
+      actor: "test",
+      source: "docs",
+      itemsJson: JSON.stringify([
+        ...Array.from({ length: IMPORT_MAX_ITEMS - 1 }, (_, i) => ({
+          kind: "decision",
+          text: `fresh ${i}`,
+          salience: 5,
+        })),
+        { kind: "decision", text: "u", salience: 7, supersedesMemoryId: xId },
+        { kind: "decision", text: "n", salience: 7, supersedesMemoryId: mId },
+        { kind: "decision", text: "m", salience: 7, supersedesMemoryId: tId },
+      ]),
+    });
+
+    expect(result).toEqual({
+      imported: IMPORT_MAX_ITEMS - 1,
+      skippedDuplicates: 3,
+      droppedByCap: 0,
+      honoredSupersedes: 1,
+      droppedSupersedesByCap: 2,
+    });
+    const superseded = (await readEvents(projectId)).filter(
+      (event) => event.type === "memory.superseded",
+    );
+    expect(superseded).toHaveLength(1);
+    expect(superseded[0]!.payload).toMatchObject({ supersedes: xId });
+    // Only X is retired: M and T are both still valid, and both hints that
+    // would have retired them are reported as cap drops for the caller to
+    // re-run rather than silently discarded.
+    const stillValid = new Set(listValidMemories(projectId).map((row) => row.memory.text));
+    expect([...["u", "x", "m", "n", "t"].filter((text) => stillValid.has(text))]).toEqual([
+      "u",
+      "m",
+      "n",
+      "t",
+    ]);
+  });
 });
