@@ -115,6 +115,12 @@ PR 게이트 워크플로(`.github/workflows/ci.yml`의 `build-and-test`) 전체
   파일 전부 + `tsconfig.base.json` 등 전역 의존이라, 테스트 파일 한 줄만 고쳐도 다시 돈다.
   패키지 **밖**에 새 입력(공유 픽스처 디렉터리 등)을 두면 이 키에 안 잡혀 stale 캐시가
   false-green을 만든다 — 그런 것이 필요하면 `turbo.json`의 `globalDependencies`에 함께 넣는다.
+- CI에서는 여기에 **러너 이미지**(`ImageOS`/`ImageVersion`)가 하나 더 붙는다. turbo의 해시에는
+  이미지 식별자가 없고 `runner.os`는 이미지가 굴러도 `Linux` 그대로라, `.github/workflows/ci.yml`이
+  `actions/cache` 키와 restore-keys 접두사 양쪽에 이미지를 넣어 스코프를 가른다. 이 리포의
+  테스트가 시스템 셸(`/bin/bash`)과 리눅스 `/proc`을 실제로 건드리기 때문이다 — 빼놓으면 옛
+  이미지에서 만든 "통과"가 새 이미지에서 그대로 재생된다. 대가는 이미지가 굴 때 캐시가 한 번
+  콜드가 되는 것뿐이다.
 
 `pnpm test`는 **자기충족이다** — 깨끗한 체크아웃에서 이것만 불러도 통과한다. `test` 태스크가
 `dependsOn: ["^build", "build"]`로 의존 패키지와 **자기 패키지**의 빌드를 먼저 돌리기 때문이다
