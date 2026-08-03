@@ -143,6 +143,14 @@ export interface MemoryImportResult {
    * which converges (the items minted this round fold next round, freeing the
    * budget for the hints).
    *
+   * #206 ②: a hint the budget cannot cover retires nothing, so hints that were
+   * only ineligible BECAUSE of it become eligible and are counted here too.
+   * That can exceed the number an unbounded budget would have honored (a
+   * 3-link chain with no room reports 3, where room would honor 2) — deliberate:
+   * every hint this call left unapplied is visible to the caller, and a re-run
+   * settles the chain. Under-reporting would hide a retirement that did not
+   * happen; over-reporting only asks for a re-run that converges.
+   *
    * Not part of the `imported + skippedDuplicates + droppedByCap` partition —
    * these items are counted in `skippedDuplicates`; this refines WHY nothing
    * further happened for them.
@@ -223,6 +231,18 @@ interface FoldedSupersedeCandidate {
   target: string;
 }
 
+/** What {@link resolveFoldedHints} decided about the batch's folded hints. */
+interface FoldedSupersedeResolution {
+  /** Hints to write, in input order. */
+  honored: FoldedSupersedeCandidate[];
+  /**
+   * Hints that won their target and whose author is alive, left unwritten
+   * because the invocation budget was already spent — see
+   * {@link MemoryImportResult.droppedSupersedesByCap}.
+   */
+  droppedByCap: number;
+}
+
 /**
  * #165: the folded-hint loop used to honor hints in a single sequential pass,
  * checking each one's `supersededBy` against only the retirements that had
@@ -234,30 +254,83 @@ interface FoldedSupersedeCandidate {
  * retirement to be visible yet). The same batch must not honor or dangle
  * depending on incidental item order.
  *
- * This resolves the whole set to a fixed point instead of one pass:
+ * #206: the first fix resolved that with a monotone EXCLUSION set — each round
+ * dropped every survivor whose author was among that round's retired targets,
+ * and a dropped candidate never came back. But a candidate's author is retired
+ * only if the hint retiring it is itself honored, and that can stop being true
+ * later in the same resolution (the hint gets excluded in turn, or the cap
+ * below leaves it unwritten). Judging on "provisional survivors" and never
+ * revisiting cost correctness in two ways:
+ *
+ * - a 3-link chain (c1: m retires t, c2: n retires m, c3: o retires n) excluded
+ *   both c1 and c2 in round 1, and c2's exclusion means m LIVES — so c1 should
+ *   have been honored and t retired. It stayed valid instead, silently.
+ * - a hint dropped by the cap still counted as retiring its author's memory,
+ *   so the candidate it excluded appeared in NEITHER the honored set nor
+ *   `droppedSupersedesByCap` — an effect the caller could not see at all.
+ *
+ * So this resolves the whole set by DECIDING candidates outward from the ones
+ * whose fate is already settled, instead of provisionally excluding them:
  *
  * 1. Build the candidate list from static facts only (target validity,
  *    self-reference, and anything already retired BEFORE the folded loop
  *    runs — i.e. by a new item's own hint, `staticRetired`). This part has
  *    no order dependency to begin with.
- * 2. Repeatedly: pick the first surviving candidate per target (same
- *    "first attribution wins" rule as before, now recomputed every round
- *    instead of frozen at first pass), then drop any survivor whose
- *    `supersededBy` is itself one of this round's retired targets. Dropping
- *    a candidate can free its target back up for a competitor that lost the
- *    dedup earlier — recomputing dedup from the full remaining candidate set
- *    every round (not just the previous survivors) is what lets that
- *    competitor be picked up.
+ * 2. Repeatedly sweep the undecided candidates in input order and decide the
+ *    ones that can be decided. A candidate's author is known to SURVIVE when
+ *    no candidate targets it at all (a freshly minted memory, or the `o` at
+ *    the head of a chain), or when every candidate that targets it has already
+ *    been decided against retiring it; it is known to be RETIRED once a hint
+ *    targeting it is honored. With a surviving author, the candidate takes its
+ *    target if no earlier rival for the same target is still pending (the same
+ *    "first attribution wins" rule, now applied over decided rivals) — subject
+ *    to the budget, see below. With a retired author it is ignored, which is
+ *    what frees ITS target for the next sweep.
+ * 3. A sweep that decides nothing does not mean the work is done: it proves
+ *    that every candidate still open is either in an irreducible cycle (no
+ *    sweep will ever settle its author) or is queued behind one for a target.
+ *    Settle that CYCLE CORE — every open candidate whose author's fate is
+ *    unknowable — as ignored, all of it at once, and resume sweeping. The loop
+ *    ends only when a stalled sweep leaves no such core.
  *
- * The exclusion set only ever grows and is bounded by the candidate count, so
- * this always terminates — there is no oscillation to guard against.
+ * Both halves of step 3 are load-bearing. Settling the core TOGETHER is what
+ * keeps a mutual cycle (`a→b`, `b→a`) dropping both hints, which is the
+ * standing contract: settling one at a time would leave `b→a` as the only
+ * rival for a's target already decided, "proving" that a survives, and half of
+ * a cycle with no stable assignment would get honored. And settling only the
+ * CORE — not every open candidate — is what keeps an independent later rival
+ * alive: with `b→a`, `a→b`, `c→a` in a batch, c is not in the cycle and its
+ * author plainly survives, so once the core is out of the way c retires a
+ * exactly as it did before this rewrite. Dropping the whole stalled set would
+ * lose it in the return value entirely — neither honored nor a cap drop, the
+ * very hole ② below closes.
+ *
+ * **What guarantees termination:** a decision is never revisited, and every
+ * iteration makes at least one — either the sweep decides a candidate, or the
+ * stall settles a non-empty cycle core. A stall with candidates still open
+ * always has one: a candidate blocked purely by an earlier rival is blocked by
+ * an OPEN rival, and the first open rival for a target cannot itself be
+ * blocked that way, so it is open only because its author is unknowable. Hence
+ * at most `candidates.length` iterations. Nothing is ever un-decided, which is
+ * exactly what the old exclusion set bought and this keeps without paying in
+ * correctness.
+ *
+ * **Budget (#206 ②).** The cap is applied HERE rather than to the returned
+ * list, because eligibility depends on which hints are actually written: a hint
+ * the cap leaves unwritten retires nothing, so its author lives and the
+ * candidates that would have been excluded by it stay eligible. A candidate
+ * that wins its target with no budget left is therefore recorded as a cap drop
+ * (visible to the caller, re-run converges it) and does NOT retire its target.
+ * Statically ineligible hints never reach that point, so they are still not
+ * miscounted as cap drops.
  */
-function resolveFoldedHintsFixedPoint(
+function resolveFoldedHints(
   foldedHints: ReadonlyArray<{ textKey: string; item: ExtractedMemory }>,
   memoryIdByTextKey: ReadonlyMap<string, string>,
   validIds: ReadonlySet<string>,
   staticRetired: ReadonlySet<string>,
-): FoldedSupersedeCandidate[] {
+  budget: number,
+): FoldedSupersedeResolution {
   const candidates: FoldedSupersedeCandidate[] = [];
   for (const folded of foldedHints) {
     const supersededBy = memoryIdByTextKey.get(folded.textKey);
@@ -275,29 +348,76 @@ function resolveFoldedHintsFixedPoint(
     candidates.push({ item: folded.item, supersededBy, target });
   }
 
-  const excluded = new Set<FoldedSupersedeCandidate>();
-  let survivors = new Set<FoldedSupersedeCandidate>();
-  for (;;) {
-    const retiredTargets = new Set<string>();
-    survivors = new Set();
-    for (const candidate of candidates) {
-      if (excluded.has(candidate) || retiredTargets.has(candidate.target)) continue;
-      retiredTargets.add(candidate.target);
-      survivors.add(candidate);
-    }
-
-    let changed = false;
-    for (const candidate of survivors) {
-      if (retiredTargets.has(candidate.supersededBy)) {
-        excluded.add(candidate);
-        survivors.delete(candidate);
-        changed = true;
-      }
-    }
-    if (!changed) break;
+  /** Rivals for the same target, in input order — "first attribution wins". */
+  const rivalsByTarget = new Map<string, FoldedSupersedeCandidate[]>();
+  for (const candidate of candidates) {
+    const rivals = rivalsByTarget.get(candidate.target);
+    if (rivals) rivals.push(candidate);
+    else rivalsByTarget.set(candidate.target, [candidate]);
   }
 
-  return candidates.filter((candidate) => survivors.has(candidate));
+  const decisions = new Map<FoldedSupersedeCandidate, "honored" | "capped" | "ignored">();
+  /** Targets an honored hint actually retires. */
+  const retired = new Set<string>();
+  /** Targets whose winner is settled — honored OR capped; rivals lose either way. */
+  const claimed = new Set<string>();
+
+  /** true = author outlives this batch, false = retired by it, undefined = still open. */
+  const authorSurvives = (id: string): boolean | undefined => {
+    if (retired.has(id)) return false;
+    const rivals = rivalsByTarget.get(id);
+    if (!rivals) return true;
+    return rivals.every((rival) => decisions.has(rival)) ? true : undefined;
+  };
+
+  let remaining = budget;
+  let droppedByCap = 0;
+  for (;;) {
+    let progressed = false;
+    for (const candidate of candidates) {
+      if (decisions.has(candidate)) continue;
+      const survives = authorSurvives(candidate.supersededBy);
+      if (survives === undefined) continue;
+      if (!survives || claimed.has(candidate.target)) {
+        decisions.set(candidate, "ignored");
+        progressed = true;
+        continue;
+      }
+      // An earlier rival that is still open may yet take this target.
+      if (
+        rivalsByTarget.get(candidate.target)?.find((rival) => !decisions.has(rival)) !== candidate
+      )
+        continue;
+      if (remaining > 0) {
+        remaining -= 1;
+        decisions.set(candidate, "honored");
+        retired.add(candidate.target);
+      } else {
+        decisions.set(candidate, "capped");
+        droppedByCap += 1;
+      }
+      claimed.add(candidate.target);
+      progressed = true;
+    }
+    if (progressed) continue;
+    // A sweep that decides nothing is not "done" — it is proof that every
+    // candidate still open is either in an irreducible cycle (no sweep will
+    // ever settle its author) or queued behind one for a target. Settle that
+    // cycle core as ignored and resume; only an empty core ends the loop.
+    // Both halves of "the core, all of it, at once" are load-bearing — see the
+    // function doc.
+    const cyclicCore = candidates.filter(
+      (candidate) =>
+        !decisions.has(candidate) && authorSurvives(candidate.supersededBy) === undefined,
+    );
+    if (cyclicCore.length === 0) break;
+    for (const candidate of cyclicCore) decisions.set(candidate, "ignored");
+  }
+
+  return {
+    honored: candidates.filter((candidate) => decisions.get(candidate) === "honored"),
+    droppedByCap,
+  };
 }
 
 async function runImport(
@@ -473,15 +593,9 @@ async function runImport(
   // hint retires), so this can't be a single sequential pass over
   // `foldedHints` — that only ever sees retirements that happened EARLIER in
   // iteration order, and the same batch content honors or dangles depending
-  // on which order the items happened to arrive in. Resolving to a fixed
-  // point first makes the result order-independent.
-  const eligibleFoldedHints = resolveFoldedHintsFixedPoint(
-    foldedHints,
-    memoryIdByTextKey,
-    validIds,
-    retiredInBatch,
-  );
-
+  // on which order the items happened to arrive in. Resolving the whole set
+  // at once makes the result order-independent.
+  //
   // A folded hint mints nothing, so it consumes none of the cap above — but it
   // still RETIRES a valid memory, and an all-duplicates batch produces no
   // `uniqueNewItems` at all. Left unbudgeted, a 5000-item dump of existing
@@ -489,19 +603,22 @@ async function runImport(
   // reporting `droppedByCap: 0`, defeating the very guard the cap exists for.
   // So folded hints spend the room the minted items left behind (both are
   // "items of this call that take effect"), and the overflow is reported.
-  // Eligibility (including the #165 fixed point above) is judged BEFORE the
-  // budget so hints that would have been ignored anyway are not miscounted as
-  // cap drops.
-  let supersedeBudget = IMPORT_MAX_ITEMS - items.length;
-  let droppedSupersedesByCap = 0;
-  for (const candidate of eligibleFoldedHints) {
-    if (supersedeBudget === 0) {
-      droppedSupersedesByCap += 1;
-      continue;
-    }
-    supersedeBudget -= 1;
+  // #206 ②: that budget is spent INSIDE the resolution rather than on its
+  // result, because a hint the cap cannot write retires nothing — the
+  // candidates it would have excluded are still live and must be reported
+  // rather than dropped on the floor. Statically ineligible hints are filtered
+  // before the budget is consulted, so they are still not counted as cap drops.
+  const foldedResolution = resolveFoldedHints(
+    foldedHints,
+    memoryIdByTextKey,
+    validIds,
+    retiredInBatch,
+    IMPORT_MAX_ITEMS - items.length,
+  );
+  for (const candidate of foldedResolution.honored) {
     honorSupersedeHint(candidate.item, candidate.supersededBy, candidate.target);
   }
+  const droppedSupersedesByCap = foldedResolution.droppedByCap;
 
   if (inputs.length > 0) {
     await appendEvents(params.projectId, inputs);
