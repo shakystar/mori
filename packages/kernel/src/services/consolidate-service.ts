@@ -272,6 +272,7 @@ export const EXTRACTION_SYSTEM_PROMPT = [
   "tags = 1-3 lowercase topic words.",
   "Return [] if there is no durable item.",
 ].join(" ");
+assertAsciiSystemPrompt(EXTRACTION_SYSTEM_PROMPT);
 
 /**
  * #143 item② — chars-per-token used to translate a `ConsolidatorLlm`'s
@@ -321,18 +322,53 @@ export const EXPECTED_MAX_OUTPUT_CHARS = 2_500;
  * {@link EXTRACTION_SYSTEM_PROMPT}'s length into a token deduction inside
  * {@link extractionCharBudget}. Unlike user content (CJK-heavy, unbounded,
  * needs `CONSERVATIVE_CHARS_PER_TOKEN`'s 1-char-per-3-tokens worst case), the
- * system prompt is a FIXED, MEASURED, ASCII/English-only string — assuming
- * CJK worst-case token density for it was the bug this issue fixes: it
- * inflated a ~2.1KB prompt to ~6,400 "tokens" (vs. an actual ~530 for English
- * text at the standard ~4 chars/token rule of thumb), eating the entire
- * budget on any context window below ~7,400 tokens before a single character
- * of user content was considered. `3` chars/token keeps a deliberate margin
- * below that ~4 chars/token reality (over-counting real English tokens by
- * roughly 33%) so the deduction stays conservative — safe if the prompt grows
- * or the true ratio drifts a bit — without re-imposing the ~12x CJK-worst-case
- * penalty that doesn't apply to this string.
+ * system prompt is a FIXED, MEASURED, ASCII-only string — assuming CJK
+ * worst-case token density for it was the bug #174 fixed: it inflated a
+ * ~2.1KB prompt to ~6,400 "tokens", eating the entire budget on any context
+ * window below ~7,400 tokens before a single character of user content was
+ * considered.
+ *
+ * #212 (PR #196 Codex P1) — `3` (an English-BPE rule-of-thumb, ~4 chars/token
+ * with a margin) replaced the CJK-worst-case blowup with an UNDER-count for a
+ * byte-level tokenizer instead: that tokenizer's worst case for an ASCII
+ * string is 1 BYTE = 1 TOKEN (every ASCII char is exactly 1 byte), not the
+ * ~4x-fewer tokens the BPE rule of thumb assumes. Undercounting the fixed
+ * prompt lets the derived input+output total exceed the declared context
+ * window — the provider then rejects the request for length on every
+ * boundary, the same permanent-stall failure #174 fixed on the other axis (a
+ * regression test below reproduces the exact overshoot on a 4,000-token
+ * window). `1` chars/token is that byte-level worst case: exact for ASCII,
+ * still far below `CONSERVATIVE_CHARS_PER_TOKEN`'s CJK-worst-case penalty
+ * (which doesn't apply to this string, per `assertAsciiSystemPrompt` below),
+ * and the same "1 char <= N bytes <= N tokens" principle user content already
+ * uses, applied to the byte width of THIS string's alphabet (1) instead of
+ * CJK's (3). Re-adopting `CONSERVATIVE_CHARS_PER_TOKEN` itself for this
+ * constant was rejected in the #174/#212 review chain — that reintroduces the
+ * CJK-string blowup for a string that is never CJK; a separate,
+ * alphabet-appropriate byte-level constant is what closes the gap without
+ * reopening it.
  */
-const SYSTEM_PROMPT_CHARS_PER_TOKEN = 3;
+const SYSTEM_PROMPT_CHARS_PER_TOKEN = 1;
+
+/**
+ * #212 — `SYSTEM_PROMPT_CHARS_PER_TOKEN`'s exactness (1 byte = 1 token, no
+ * BPE margin) is only a safe worst case if {@link EXTRACTION_SYSTEM_PROMPT}
+ * stays ASCII (1 char = 1 byte). A future edit adding non-ASCII text (e.g. a
+ * translated instruction) would silently undercount again — the same failure
+ * this issue fixes, reintroduced through the precondition instead of the
+ * constant. Runs once at module load so a violation fails immediately (build,
+ * test, and runtime), not only if a token-budget test happens to catch it.
+ */
+function assertAsciiSystemPrompt(prompt: string): void {
+  for (let i = 0; i < prompt.length; i++) {
+    if (prompt.charCodeAt(i) > 0x7f) {
+      throw new Error(
+        "mori: EXTRACTION_SYSTEM_PROMPT must stay ASCII-only — SYSTEM_PROMPT_CHARS_PER_TOKEN's " +
+          "1-byte-per-token worst case assumes 1 char = 1 byte, which only holds for ASCII.",
+      );
+    }
+  }
+}
 
 /**
  * #143 item② — output tokens reserved out of a declared `contextWindowTokens`
@@ -347,9 +383,9 @@ const SYSTEM_PROMPT_CHARS_PER_TOKEN = 3;
  */
 export const RESERVED_OUTPUT_TOKENS = estimateTokens(EXPECTED_MAX_OUTPUT_CHARS);
 
-// #174 — the system prompt is fixed English text, not CJK-heavy user
-// content, so it gets its own (still conservative) chars-per-token ratio
-// instead of `CONSERVATIVE_CHARS_PER_TOKEN`'s CJK worst case. See
+// #174/#212 — the system prompt is fixed ASCII text, not CJK-heavy user
+// content, so it gets its own byte-level chars-per-token ratio instead of
+// `CONSERVATIVE_CHARS_PER_TOKEN`'s CJK worst case. See
 // `SYSTEM_PROMPT_CHARS_PER_TOKEN`'s doc for why that constant doesn't apply
 // to it.
 function systemPromptTokens(): number {
