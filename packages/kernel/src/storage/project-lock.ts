@@ -105,6 +105,40 @@
  *   request is cancelled too), before the raw-segment write, and before the
  *   `memory.consolidated` append.
  *
+ * ### Where the check points stop, and what covers the rest (#211)
+ *
+ * "Ends at the next check point" is true only where a next check point can
+ * exist, and at a boundary it runs out before the section does. The last one is
+ * the `memory.consolidated` append; everything after it — the projection
+ * rebuild, `ensureEmbeddings`, `detectContradictions`, `ensureSegmentEmbeddings`,
+ * then the cursor commit and the attempt telemetry — has none, and that TAIL
+ * holds most of a boundary's wall-clock (three external calls). A holder
+ * dispossessed inside it therefore runs to the end, and the doc must not read
+ * as though it stopped.
+ *
+ * There is no fifth check point to add, and that is a consequence of the rule
+ * above rather than an omission: past the append, the memories ARE on disk, so
+ * stopping there would leave them distilled with the cursor unmoved and hand
+ * the same window to the next boundary — a rare race traded for a certain
+ * duplicate. What guards the tail instead is that its two remaining writes stop
+ * needing the lock:
+ *
+ * - `commitBoundaryCursors` is MONOTONIC. Each cursor is compared against what
+ *   is stored (the event watermark by its `events.seq`, the conversation offset
+ *   by value) inside the commit transaction, and a target that is not ahead is
+ *   dropped. A loser waking up late finds the winner's cursor already past its
+ *   own and writes nothing, so the watermark cannot roll back and no third
+ *   boundary is handed the gap (PR #210 Codex P1).
+ * - `recordAttempt` does not write once this holder's signal has fired. The
+ *   `last_consolidate_attempt` row is single and shared, so the loser's verdict
+ *   would otherwise overwrite the winner's and report a failure the store never
+ *   had (PR #210 Codex P2). A boundary that still holds its lock records every
+ *   outcome exactly as before.
+ *
+ * Neither asks who owns the lock at commit time — one orders the write, the
+ * other declines it — which is why neither reintroduces the half-commit the
+ * check-point rule exists to forbid.
+ *
  * What did NOT change is ⑤: the signal is a way out from INSIDE `fn`, never a
  * way to settle the wait around it. `withProjectLock` still returns only once
  * `fn` has settled, for exactly the reason below.
