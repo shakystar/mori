@@ -61,16 +61,20 @@
  * `onCaptureError` (one dropped observation); a boundary propagates it. Both
  * beat the silence this module exists to end.
  *
- * That notice is a REPORT, not a brake, and this module is careful not to act
- * as if it were one. A running promise cannot be cancelled from outside, so
- * `withProjectLock` still waits for `fn` to settle and only then fails with
- * {@link ProjectLockCompromisedError}. Settling the wait early — racing the
- * signal against `fn` — would hand the caller a finished call while the work
- * went on running, and the caller that suffers most is the kernel's own capture
- * chain: `enqueue` reads a settled task as "that capture is done" and starts
- * the next one on top of a replace-all projection rebuild still in flight. That
- * is this issue's ① reproduced INSIDE one process, in the one place that had
- * always been safe from it (PR #156 review, Codex P1 ⑤).
+ * That notice reaches `fn` as an `AbortSignal` (#158) — a way for the critical
+ * section to bail out of its own accord at a point where bailing out is safe.
+ * It is emphatically not a brake this module may pull from outside, and the
+ * distinction is the whole of ⑤. A running promise cannot be cancelled from
+ * outside, so `withProjectLock` still waits for `fn` to settle and only then
+ * fails with {@link ProjectLockCompromisedError}. Settling the wait early —
+ * racing the signal against `fn` — would hand the caller a finished call while
+ * the work went on running, and the caller that suffers most is the kernel's
+ * own capture chain: `enqueue` reads a settled task as "that capture is done"
+ * and starts the next one on top of a replace-all projection rebuild still in
+ * flight. That is this issue's ① reproduced INSIDE one process, in the one
+ * place that had always been safe from it (PR #156 review, Codex P1 ⑤). A
+ * section that ignores the signal is therefore still correct — it just holds
+ * the overlap open for as long as it runs, which is where this started.
  *
  * ## The overlap that remains
  *
@@ -84,12 +88,26 @@
  * locks whose local owner is alive, so reaching the restore path at all takes a
  * lock turning over between the filter and the `rename`.
  *
- * How long it lasts is the honest part. The dispossessed holder learns within
- * one heartbeat, but learning is not stopping: with no cooperative cancellation
- * in the critical sections, the overlap ends when the dispossessed `fn` ends.
- * Passing an `AbortSignal` down to the projection swap and the boundary append
- * would shorten it to the next check point; it changes service signatures and
- * is deliberately left out of this module.
+ * How long it lasts is the honest part, and #158 shortened it. The dispossessed
+ * holder still learns within one heartbeat, but learning is now also STOPPING:
+ * `withProjectLock` hands `fn` an `AbortSignal` that {@link lose} aborts, and
+ * the critical sections check it at named points. The overlap therefore ends at
+ * the dispossessed section's next check point rather than when its `fn` ends —
+ * which matters most at a consolidation boundary, where `fn` can sit inside an
+ * extraction LLM call for minutes. The check points, each chosen so that
+ * nothing the section meant to commit has reached disk yet:
+ *
+ * - `capture-service.ts`'s `captureObservation` — before the
+ *   `observation.captured` append, and again before the replace-all projection
+ *   rebuild.
+ * - `consolidate-service.ts`'s `consolidate` — before the watermark-only noop
+ *   commit, before the extraction call (and forwarded INTO it, so an in-flight
+ *   request is cancelled too), before the raw-segment write, and before the
+ *   `memory.consolidated` append.
+ *
+ * What did NOT change is ⑤: the signal is a way out from INSIDE `fn`, never a
+ * way to settle the wait around it. `withProjectLock` still returns only once
+ * `fn` has settled, for exactly the reason below.
  *
  * That is still the better failure. The overlap this module exists to end is
  * unbounded, unconditional and SILENT — every pair of processes, every capture,
@@ -193,13 +211,17 @@ export class ProjectLockTimeoutError extends MemorizeError {
 /**
  * Thrown when the lock was taken away from us while we were inside it.
  *
- * A verdict on work that has already happened, not a brake on it. The critical
- * section is running by the time the heartbeat notices and it runs to
- * completion — `withProjectLock` waits for it and reports afterwards, because
- * settling the call while the work continues is its own corruption (see the
- * module doc). What this buys is that the span cannot be MISTAKEN for a guarded
- * one: an overlap that would otherwise have committed in silence reaches the
- * caller.
+ * A verdict on the span, and — since #158 — also the reason carried by the
+ * `AbortSignal` handed to `fn`, so a critical section that stops itself at a
+ * check point rejects with the very error `withProjectLock` would have thrown
+ * after it. The two paths are deliberately indistinguishable to a caller: what
+ * differs is how much of the section ran, never what the failure is called.
+ *
+ * `withProjectLock` still waits for `fn` to settle and reports afterwards,
+ * because settling the call while the work continues is its own corruption (see
+ * the module doc). What this error buys is that the span cannot be MISTAKEN for
+ * a guarded one: an overlap that would otherwise have committed in silence
+ * reaches the caller.
  */
 export class ProjectLockCompromisedError extends MemorizeError {
   constructor(projectId: string) {
@@ -209,6 +231,33 @@ export class ProjectLockCompromisedError extends MemorizeError {
     );
     this.name = "ProjectLockCompromisedError";
   }
+}
+
+/**
+ * Cooperative cancellation check point (#158) — throw if this section's lock is
+ * already gone, otherwise return and carry on.
+ *
+ * Rethrows the signal's own `reason`, which for every signal `withProjectLock`
+ * hands out is a {@link ProjectLockCompromisedError}. That is what unifies the
+ * two exits: #132 fixed the rule that `withProjectLock` never overwrites `fn`'s
+ * rejection, and this needs no exception to it — `fn`'s rejection simply IS the
+ * lock's verdict.
+ *
+ * Every call site must satisfy one condition, and it is the entire safety
+ * argument for this feature: **nothing the section meant to commit may already
+ * be on disk.** Stopping halfway through a commit would manufacture exactly the
+ * damage #132 removed — a projection replaced from a stale snapshot, a
+ * watermark advanced past a window nothing distilled. What HAS reached disk at
+ * each check point is spelled out at the check point itself.
+ */
+export function throwIfDispossessed(signal: AbortSignal | undefined): void {
+  if (!signal?.aborted) return;
+  const reason: unknown = signal.reason;
+  // Defensive: a signal from anywhere but `lose()` still means stop, it just
+  // cannot claim to be a lock verdict, so it is reported as what it is.
+  throw reason instanceof Error
+    ? reason
+    : new MemorizeError(`Critical section aborted: ${String(reason)}`);
 }
 
 interface OwnerRecord {
@@ -372,10 +421,16 @@ async function detachAndJudge(
  * project — see `SqliteMemoryKernel.consolidateWithResult`, which drains its
  * capture queue OUTSIDE the lock precisely because those queued captures take
  * it themselves.
+ *
+ * `fn` receives an `AbortSignal` that fires the moment this holder is
+ * dispossessed (#158). Honouring it is OPTIONAL — a zero-argument `fn` is still
+ * a valid one and behaves exactly as it did — and it is only ever a way out
+ * from inside; see {@link throwIfDispossessed} for the rule every check point
+ * obeys, and the module doc for why the wait around `fn` is never raced.
  */
 export async function withProjectLock<T>(
   projectId: string,
-  fn: () => Promise<T>,
+  fn: (signal: AbortSignal) => Promise<T>,
   options: ProjectLockOptions = {},
 ): Promise<T> {
   const acquireTimeoutMs = options.acquireTimeoutMs ?? LOCK_ACQUIRE_TIMEOUT_MS;
@@ -395,6 +450,11 @@ export async function withProjectLock<T>(
   // racing promise on purpose — see "How a holder notices it was dispossessed".
   let dispossessed = false;
 
+  // #158: the same verdict, delivered INWARD. Never raced against `fn` — the
+  // only thing that can act on it is `fn` itself, at a check point of its own
+  // choosing (⑤).
+  const dispossession = new AbortController();
+
   const heartbeat = setInterval(() => {
     void beat();
   }, heartbeatMs);
@@ -403,6 +463,9 @@ export async function withProjectLock<T>(
   function lose(): void {
     dispossessed = true;
     clearInterval(heartbeat);
+    // The reason is the error the caller would get anyway, so a section that
+    // stops itself and one that runs to the end fail identically.
+    dispossession.abort(new ProjectLockCompromisedError(projectId));
   }
 
   async function beat(): Promise<void> {
@@ -423,7 +486,7 @@ export async function withProjectLock<T>(
   }
 
   try {
-    const result = await fn();
+    const result = await fn(dispossession.signal);
     // Only here, with `fn` settled: a caller who is told this call is over must
     // be able to believe that the work it guarded is over too.
     //

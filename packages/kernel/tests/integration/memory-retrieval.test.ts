@@ -176,8 +176,8 @@ describe("reinforceInjectedMemories", () => {
     await rebuildProjectProjection(projectId);
 
     const { memories } = retrieveMemoryContext(projectId, { nowIso: NOW });
-    const injected = memories.filter((m) => m.memory.id === "mem_a");
-    reinforceInjectedMemories(projectId, injected);
+    const injectedIds = memories.filter((m) => m.memory.id === "mem_a").map((m) => m.memory.id);
+    reinforceInjectedMemories(projectId, injectedIds);
 
     const rows = new Map(listValidMemories(projectId).map((r) => [r.memory.id, r]));
     expect(rows.get("mem_a")!.lastAccessedAt).toBeDefined();

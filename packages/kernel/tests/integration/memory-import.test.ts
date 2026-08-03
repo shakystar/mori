@@ -812,6 +812,111 @@ describe("importMemories — supersede hints (#114 ③)", () => {
     ).toEqual(["b truth", "replaces a"]);
   });
 
+  it("#165: a folded hint's author retired by a LATER folded hint in the same batch does not produce a dangling successor", async () => {
+    // Three pre-existing memories: T is what "m" claims to replace, and "n"
+    // later claims to replace "m" itself.
+    await importMemories({
+      projectId,
+      actor: "test",
+      source: "docs",
+      itemsJson: JSON.stringify([
+        { kind: "decision", text: "m", salience: 7 },
+        { kind: "decision", text: "n", salience: 7 },
+        { kind: "decision", text: "t", salience: 7 },
+      ]),
+    });
+    const byText = new Map(
+      listValidMemories(projectId).map((row) => [row.memory.text, row.memory.id]),
+    );
+    const mId = byText.get("m")!;
+    const tId = byText.get("t")!;
+
+    // Both items are duplicates of existing text, so both fold. The
+    // sequential guard only sees retirements EARLIER in this order — "m"
+    // retiring T is honored before anything has retired "m" — so before the
+    // fix this produced a `memory.superseded` for T naming M, and a second
+    // one for M naming N right after, leaving T's successor dead.
+    const result = await importMemories({
+      projectId,
+      actor: "test",
+      source: "docs",
+      itemsJson: JSON.stringify([
+        { kind: "decision", text: "m", salience: 7, supersedesMemoryId: tId },
+        { kind: "decision", text: "n", salience: 7, supersedesMemoryId: mId },
+      ]),
+    });
+
+    expect(result).toEqual({
+      imported: 0,
+      skippedDuplicates: 2,
+      droppedByCap: 0,
+      honoredSupersedes: 1,
+      droppedSupersedesByCap: 0,
+    });
+    const superseded = (await readEvents(projectId)).filter(
+      (event) => event.type === "memory.superseded",
+    );
+    // Only M's own retirement (by N) is honored — T is never named as
+    // retired, since its would-be successor (M) dies in this same batch.
+    expect(superseded).toHaveLength(1);
+    expect(superseded[0]!.payload).toMatchObject({ supersedes: mId });
+    expect(
+      listValidMemories(projectId)
+        .map((row) => row.memory.text)
+        .sort(),
+    ).toEqual(["n", "t"]);
+  });
+
+  it("#165: order symmetry — reversing the two chained folded hints yields the identical result", async () => {
+    await importMemories({
+      projectId,
+      actor: "test",
+      source: "docs",
+      itemsJson: JSON.stringify([
+        { kind: "decision", text: "m", salience: 7 },
+        { kind: "decision", text: "n", salience: 7 },
+        { kind: "decision", text: "t", salience: 7 },
+      ]),
+    });
+    const byText = new Map(
+      listValidMemories(projectId).map((row) => [row.memory.text, row.memory.id]),
+    );
+    const mId = byText.get("m")!;
+    const tId = byText.get("t")!;
+
+    // Same batch content as the previous test, items in the opposite order —
+    // this direction already passed under the sequential guard (N retires M
+    // before M's own hint is looked at), so it anchors what BOTH orders must
+    // now produce.
+    const result = await importMemories({
+      projectId,
+      actor: "test",
+      source: "docs",
+      itemsJson: JSON.stringify([
+        { kind: "decision", text: "n", salience: 7, supersedesMemoryId: mId },
+        { kind: "decision", text: "m", salience: 7, supersedesMemoryId: tId },
+      ]),
+    });
+
+    expect(result).toEqual({
+      imported: 0,
+      skippedDuplicates: 2,
+      droppedByCap: 0,
+      honoredSupersedes: 1,
+      droppedSupersedesByCap: 0,
+    });
+    const superseded = (await readEvents(projectId)).filter(
+      (event) => event.type === "memory.superseded",
+    );
+    expect(superseded).toHaveLength(1);
+    expect(superseded[0]!.payload).toMatchObject({ supersedes: mId });
+    expect(
+      listValidMemories(projectId)
+        .map((row) => row.memory.text)
+        .sort(),
+    ).toEqual(["n", "t"]);
+  });
+
   it("bounds folded supersede hints by the invocation cap and reports the overflow", async () => {
     // Seed the fold target plus IMPORT_MAX_ITEMS + 5 distinct supersede
     // targets. Two calls because seeding itself is capped.

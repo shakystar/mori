@@ -53,7 +53,25 @@ describe("bin entrypoint via symlink", () => {
       const env = { ...process.env };
       delete env.ANTHROPIC_API_KEY;
 
-      const result = spawnSync(process.execPath, [link, "hi"], { env, encoding: "utf8" });
+      // spawnSync is synchronous: it blocks this worker's event loop until the
+      // child returns, which also blocks the timer that would fire the `it`
+      // { timeout: 30000 } above — vitest can only judge that budget *after*
+      // this call returns. So the `timeout` here must be strictly less than
+      // 30000: it forces the child to be killed and spawnSync to return while
+      // vitest's own budget still has room, turning a would-be indefinite
+      // hang into a bounded, explicit failure instead of a stuck worker (#172,
+      // PR #171 Codex P2).
+      const result = spawnSync(process.execPath, [link, "hi"], {
+        env,
+        encoding: "utf8",
+        timeout: 20_000,
+      });
+
+      if (result.error) {
+        throw new Error(
+          `spawnSync did not complete cleanly (likely killed after exceeding its 20000ms timeout): ${result.error.message}`,
+        );
+      }
 
       expect(result.status).toBe(1);
       expect(result.stderr).toContain("ANTHROPIC_API_KEY");

@@ -34,6 +34,7 @@ import {
 } from "../services/consolidate-service.js";
 import { isEmptyMemoryContext } from "../services/context-render.js";
 import { buildMemoryContext, type MemoryContext } from "../services/context-service.js";
+import { reinforceInjectedMemories } from "../services/memory-retrieval-service.js";
 import {
   appendEvent,
   ensureProjectDirectories,
@@ -271,6 +272,23 @@ export class SqliteMemoryKernel<M, E> implements MemoryKernel<M, E> {
     } catch {
       return messages;
     }
+
+    // Reinforce AFTER render succeeded, never before (mori#176): stamping
+    // `last_accessed_at`/`injection_count` on a memory the model never saw
+    // (the render above throws for PR #175's "harness renderer throws" case)
+    // would corrupt future CLS ranking with retrieval telemetry for content
+    // that was never actually injected. Best-effort and isolated the same way
+    // — a reinforcement failure (e.g. a lock held by another process) must not
+    // undo the successful render computed above.
+    try {
+      reinforceInjectedMemories(
+        this.options.projectId,
+        context.consolidatedMemories?.map((memory) => memory.id) ?? [],
+      );
+    } catch {
+      // best-effort — see comment above.
+    }
+
     return [injected, ...messages];
   }
 
@@ -318,7 +336,12 @@ export class SqliteMemoryKernel<M, E> implements MemoryKernel<M, E> {
       // rejection, which `enqueue` routes to `onCaptureError` — the hot path's
       // no-throw contract holds, and the cost of a lock we cannot take is one
       // dropped observation, not a dead turn.
-      await withProjectLock(this.options.projectId, async () => {
+      // #158: the lock's dispossession signal goes straight into the capture,
+      // which stops itself before replacing the projection rather than
+      // committing a rebuild over a store that is no longer ours. Either way
+      // this rejects with `ProjectLockCompromisedError` and `enqueue` reports
+      // ONE `onCaptureError` — #132's capture contract, unchanged.
+      await withProjectLock(this.options.projectId, async (lockSignal) => {
         await this.ensureGenesis();
         await captureObservation({
           projectId: this.options.projectId,
@@ -327,6 +350,7 @@ export class SqliteMemoryKernel<M, E> implements MemoryKernel<M, E> {
           toolName: observed.toolName,
           toolInputText: observed.toolInputText,
           ...(observed.toolUseId ? { toolUseId: observed.toolUseId } : {}),
+          signal: lockSignal,
         });
       });
     });
@@ -352,6 +376,14 @@ export class SqliteMemoryKernel<M, E> implements MemoryKernel<M, E> {
    * and have each recorded under its own label instead of whichever one was
    * fixed at construction. `opts.signal` is forwarded as-is; see
    * `consolidate-service.ts` for where it is actually checked.
+   *
+   * #158 adds a SECOND cancellation source alongside it — the project lock's
+   * own dispossession signal — so a boundary whose lock is taken mid-flight
+   * stops at its next commit-adjacent check point instead of running to the end
+   * and appending into a window that is no longer this process's to distill.
+   * Either signal firing stops the boundary; they reject differently on
+   * purpose (`ConsolidateParams.lockSignal`). Propagation is unchanged: a
+   * boundary that never ran must be visible to whoever asked for it.
    */
   async consolidate(llm: ConsolidatorLlm, opts?: ConsolidateCallOptions): Promise<void> {
     await this.consolidateWithResult(llm, opts);
@@ -379,7 +411,7 @@ export class SqliteMemoryKernel<M, E> implements MemoryKernel<M, E> {
     // consolidates them instead — which is the point of the lock, not a gap.
     await this.drain();
     const boundary = opts?.boundary ?? this.options.boundary;
-    return withProjectLock(this.options.projectId, async () => {
+    return withProjectLock(this.options.projectId, async (lockSignal) => {
       await this.ensureGenesis();
       return consolidateBoundary({
         projectId: this.options.projectId,
@@ -388,6 +420,10 @@ export class SqliteMemoryKernel<M, E> implements MemoryKernel<M, E> {
         ...(this.options.sessionId ? { sessionId: this.options.sessionId } : {}),
         ...(boundary ? { boundary } : {}),
         ...(opts?.signal ? { signal: opts.signal } : {}),
+        // #158: the second, independent cancellation source — see
+        // `ConsolidateParams.lockSignal` for how the two combine and why they
+        // reject with different errors.
+        lockSignal,
         ...(this.options.embedder ? { embedder: this.options.embedder } : {}),
         ...(this.options.conversation ? { conversation: this.options.conversation } : {}),
       });
