@@ -24,6 +24,7 @@ import {
   readGenesisEventsSync,
   type AppendEventInput,
 } from "../storage/event-store.js";
+import { throwIfDispossessed } from "../storage/project-lock.js";
 import { detectContradictions, makeLlmJudge } from "./contradiction-service.js";
 import { ensureEmbeddings, ensureSegmentEmbeddings } from "./embeddings-service.js";
 import { listValidMemories, rebuildProjectProjection } from "./projection-store.js";
@@ -1086,6 +1087,29 @@ export function classifyConsolidateError(
   return "error";
 }
 
+/**
+ * OR two optional cancellation sources into the one signal `extract` takes
+ * (#158 over #167's seam).
+ *
+ * Returns the sole present signal UNCHANGED when there is only one, which is
+ * the property that keeps "cancellation not firing changes nothing" true by
+ * construction: a caller passing neither reaches `extract` with `undefined`
+ * exactly as before, and one passing only `params.signal` passes that very
+ * object — so `classifyConsolidateError(error, params.signal)` still compares
+ * against the same signal the request was made with. Only when BOTH exist is a
+ * derived signal built, via the node built-in (no new dependency — `#158`), and
+ * `AbortSignal.any` drops its listeners once the composite is garbage, so a
+ * long-lived caller signal does not accumulate them across boundaries.
+ */
+function combineSignals(
+  callerSignal: AbortSignal | undefined,
+  lockSignal: AbortSignal | undefined,
+): AbortSignal | undefined {
+  if (!callerSignal) return lockSignal;
+  if (!lockSignal) return callerSignal;
+  return AbortSignal.any([callerSignal, lockSignal]);
+}
+
 export function readLastConsolidateAttempt(projectId: string): ConsolidateAttempt | undefined {
   const value = readMeta(projectId, LAST_ATTEMPT_META_KEY);
   if (value === undefined) return undefined;
@@ -1447,6 +1471,32 @@ export interface ConsolidateParams {
    */
   signal?: AbortSignal;
   /**
+   * #158: the SECOND cancellation source, and a different one — the
+   * dispossession signal `withProjectLock` hands its `fn`, meaning "this
+   * boundary's lock now belongs to someone else". Absent ⇒ no lock
+   * cancellation, which is every caller that is not holding a project lock.
+   *
+   * The two signals are combined by OR — either one aborting stops the
+   * boundary — but they are kept as separate parameters rather than merged into
+   * one, because they must not reject with the same error:
+   *
+   * - `signal` (the caller's, #141) means "the user asked to stop", and rejects
+   *   with {@link ConsolidateAbortedError}.
+   * - `lockSignal` means "the store under you is no longer yours", and rejects
+   *   with `ProjectLockCompromisedError`, exactly as `withProjectLock` itself
+   *   would have once `fn` settled.
+   *
+   * Where both have fired, `lockSignal` wins: a user cancel is an intent that
+   * was going to be honoured anyway, while a lost lock is a fact about the
+   * store's safety and is the one of the two that must not be swallowed.
+   *
+   * Their REACH differs too, and deliberately. `signal` is checked only at the
+   * extraction-call edge (#141's scope, unchanged here); `lockSignal` is
+   * checked at every point where this boundary is about to commit — see the
+   * call sites in `run()`.
+   */
+  lockSignal?: AbortSignal;
+  /**
    * Override the raw-segment retention policy (tests only — production
    * always uses `pruneSegments`'s defaults). Exists so a test can force
    * `pruneSegments` to bite within a single boundary's own writes, to
@@ -1559,6 +1609,11 @@ export async function consolidate(params: ConsolidateParams): Promise<Consolidat
     // consumed observation window so it is not rescanned every boundary.
     if (observations.length === 0 && !transcriptTail) {
       if (rawObservationEvents.length > 0) {
+        // #158 check point ①. On disk from this boundary so far: nothing — the
+        // whole run to here is reads. The commit below is small but it is still
+        // a commit (a watermark this holder no longer has the right to move),
+        // so it gets the same guard as the big ones.
+        throwIfDispossessed(params.lockSignal);
         commitBoundaryCursors(params.projectId, {
           watermarkEventId: rawObservationEvents[rawObservationEvents.length - 1]!.id,
         });
@@ -1611,12 +1666,20 @@ export async function consolidate(params: ConsolidateParams): Promise<Consolidat
       },
     );
 
+    // #158 check point ②, and the one that pays for this issue. On disk from
+    // this boundary so far: still nothing. Checked BEFORE #141's caller signal
+    // for the precedence reason given on `ConsolidateParams.lockSignal`, and
+    // placed here because the call it guards is the long one — a dispossessed
+    // holder that skips it stops overlapping the new owner in milliseconds
+    // instead of after however many minutes an extraction takes.
+    throwIfDispossessed(params.lockSignal);
+
     // #141: the extraction-call edge is the one cancellation point this module
-    // recognizes. Checked here — after the noop short-circuit above (nothing
-    // was going to be extracted anyway) and immediately before the call it
-    // guards — so an already-aborted signal skips the extractor exactly like a
-    // transport failure would: propagate, leave the watermark alone, let the
-    // next boundary retry this same window.
+    // recognizes for the CALLER's signal. Checked here — after the noop
+    // short-circuit above (nothing was going to be extracted anyway) and
+    // immediately before the call it guards — so an already-aborted signal
+    // skips the extractor exactly like a transport failure would: propagate,
+    // leave the watermark alone, let the next boundary retry this same window.
     if (params.signal?.aborted) {
       throw new ConsolidateAbortedError();
     }
@@ -1626,15 +1689,36 @@ export async function consolidate(params: ConsolidateParams): Promise<Consolidat
     // boundary retries the same window. Callers at boundaries catch and degrade.
     // #167: `params.signal` is forwarded past the preflight check above so a
     // cancellation arriving mid-extraction can stop the in-flight request too,
-    // not just one arriving before it started.
-    const extracted = await consolidator.extract(
-      {
-        observations: bounded.observations,
-        ...(bounded.transcriptTail ? { transcriptTail: bounded.transcriptTail } : {}),
-        existingMemories: bounded.existingMemories,
-      },
-      params.signal ? { signal: params.signal } : undefined,
-    );
+    // not just one arriving before it started. #158 rides that same seam with
+    // the lock's signal, so a lock lost DURING the extraction cancels the
+    // request rather than waiting it out — the difference the issue exists for.
+    // `combineSignals` returns the sole signal unchanged when only one is
+    // present, so a caller passing neither, or only `params.signal`, reaches
+    // `extract` with byte-identical arguments to before.
+    const extractionSignal = combineSignals(params.signal, params.lockSignal);
+    let extracted: ExtractedMemory[];
+    try {
+      extracted = await consolidator.extract(
+        {
+          observations: bounded.observations,
+          ...(bounded.transcriptTail ? { transcriptTail: bounded.transcriptTail } : {}),
+          existingMemories: bounded.existingMemories,
+        },
+        extractionSignal ? { signal: extractionSignal } : undefined,
+      );
+    } catch (error) {
+      // A request the lock's signal killed rejects with whatever the transport
+      // raises for an abort — typically a bare `AbortError`, which says nothing
+      // about WHY it stopped. Re-checking here replaces it with the lock's own
+      // verdict, keeping the promise that every abort-shaped exit from a
+      // dispossessed section reaches the caller as the same error.
+      //
+      // `params.signal`'s path is left exactly as #141/#167 left it: no
+      // rewriting, so a caller cancel still surfaces as the extractor's own
+      // rejection and `classifyConsolidateError` still decides what it was.
+      throwIfDispossessed(params.lockSignal);
+      throw error;
+    }
 
     // Supersede only what the extractor was actually SHOWN — `bounded`, not the
     // full `existing` list. Budget-trimmed memories are valid but invisible to
@@ -1707,6 +1791,13 @@ export async function consolidate(params: ConsolidateParams): Promise<Consolidat
     // and self-healing. Writing events first would trade it for the opposite
     // failure mode — memories durably recorded while a later insertSegments
     // failure silently drops their raw detail — for no correctness gain.
+    // #158 check point ③. On disk from this boundary so far: STILL NOTHING —
+    // extraction is a network call, not a write. Placed before the segment
+    // insert rather than only before the append below so that a lock lost
+    // during a long extraction does not even grow the derived buffer, which is
+    // work the next boundary would have to redo (and prune) anyway.
+    throwIfDispossessed(params.lockSignal);
+
     let segmentsWritten = 0;
     // #139: ids of the rows THIS boundary just inserted, so the offset-advance
     // check below can tell "wrote N segments" apart from "this slice's own
@@ -1733,6 +1824,23 @@ export async function consolidate(params: ConsolidateParams): Promise<Consolidat
         // Derived buffer must never fail the consolidation boundary.
       }
     }
+
+    // #158 check point ④ — the one the issue names, and the last one that can
+    // still matter. On disk from this boundary at this instant: the raw
+    // conversation SEGMENTS written just above, if the buffer is on, and
+    // nothing else. That is the whole exposure, and it is the bounded,
+    // self-healing kind already documented for the #103 ordering right above:
+    // segments are a derived, prunable buffer whose duplicates the next
+    // boundary's `pruneSegments` caps. No `memory.consolidated` event exists,
+    // and neither cursor has moved — `commitBoundaryCursors` is at the very end
+    // of this function, so the watermark stays exactly where `run()` found it
+    // and the next boundary re-processes this same window, which is the
+    // property the issue's acceptance criteria ask for.
+    //
+    // Continuing past here is what this issue exists to prevent: appending
+    // `memory.consolidated` for a window that now belongs to another process
+    // leaves the duplicate distillation #132 set out to remove.
+    throwIfDispossessed(params.lockSignal);
 
     if (inputs.length > 0) {
       await appendEvents(params.projectId, inputs);
