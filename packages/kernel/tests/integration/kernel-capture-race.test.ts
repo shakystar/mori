@@ -18,6 +18,12 @@
  * The delay is injected into `readEvents` rather than simulated with a fake
  * clock because the window being tested IS that await — a fake clock would
  * remove exactly the thing under test.
+ *
+ * `vi.mock` on an internal module is otherwise off-limits (TESTING.md) — this file is
+ * one of the documented exceptions ("예외: 타이밍 레이스·장애 주입"): running two
+ * `SqliteMemoryKernel` instances without controlling the interleaving is not deterministic
+ * (they step in lockstep and the bug hides), and the assertions below check the resulting
+ * projection state, not the mock's call log.
  */
 
 import { mkdtemp, rm } from "node:fs/promises";
