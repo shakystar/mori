@@ -1121,6 +1121,60 @@ describe("importMemories — supersede hints (#114 ③)", () => {
     ).toEqual(["a", "b"]);
   });
 
+  // cB ("b" retires A) and cA ("a" retires B) are the 2-cycle above, dropped as
+  // always. cC ("c" retires A) is not part of it — nobody targets C, so its
+  // author plainly survives — and it wins A the moment the cycle is out of the
+  // way. Deciding outward stalls here with all three open, and treating that
+  // stall as the end left cC in NEITHER the honored set nor the cap drops: the
+  // caller could not even tell there was something to re-run, which is the same
+  // invisibility ② closes at the cap boundary. Settling only the cycle core
+  // (cB, cA) and resuming is what gets cC its turn.
+  it.each([
+    ["input order", [0, 1, 2]],
+    ["reversed", [2, 1, 0]],
+    ["rotated", [1, 2, 0]],
+  ])(
+    "#206: a candidate behind a mutual cycle still wins its target once the cycle settles (%s)",
+    async (_label, order) => {
+      const byText = await seedChainMemories(["a", "b", "c"]);
+      const aId = byText.get("a")!;
+      const bId = byText.get("b")!;
+
+      const hints = [
+        { kind: "decision", text: "b", salience: 7, supersedesMemoryId: aId },
+        { kind: "decision", text: "a", salience: 7, supersedesMemoryId: bId },
+        { kind: "decision", text: "c", salience: 7, supersedesMemoryId: aId },
+      ];
+
+      const result = await importMemories({
+        projectId,
+        actor: "test",
+        source: "docs",
+        itemsJson: JSON.stringify(order.map((index) => hints[index]!)),
+      });
+
+      expect(result).toEqual({
+        imported: 0,
+        skippedDuplicates: 3,
+        droppedByCap: 0,
+        honoredSupersedes: 1,
+        droppedSupersedesByCap: 0,
+      });
+      const superseded = (await readEvents(projectId)).filter(
+        (event) => event.type === "memory.superseded",
+      );
+      expect(superseded).toHaveLength(1);
+      // C retires A. B is never retired: the only hint naming it belongs to the
+      // dropped cycle.
+      expect(superseded[0]!.payload).toMatchObject({ supersedes: aId });
+      expect(
+        listValidMemories(projectId)
+          .map((row) => row.memory.text)
+          .sort(),
+      ).toEqual(["b", "c"]);
+    },
+  );
+
   it("#206 ②: a hint the cap could not apply does not exclude the hint that depended on it", async () => {
     const byText = await seedChainMemories(["u", "x", "m", "n", "t"]);
     const xId = byText.get("x")!;

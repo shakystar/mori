@@ -286,16 +286,34 @@ interface FoldedSupersedeResolution {
  *    "first attribution wins" rule, now applied over decided rivals) — subject
  *    to the budget, see below. With a retired author it is ignored, which is
  *    what frees ITS target for the next sweep.
+ * 3. A sweep that decides nothing does not mean the work is done: it proves
+ *    that every candidate still open is either in an irreducible cycle (no
+ *    sweep will ever settle its author) or is queued behind one for a target.
+ *    Settle that CYCLE CORE — every open candidate whose author's fate is
+ *    unknowable — as ignored, all of it at once, and resume sweeping. The loop
+ *    ends only when a stalled sweep leaves no such core.
  *
- * **What guarantees termination:** every sweep either decides at least one
- * candidate or changes nothing and ends the loop, and a decision is never
- * revisited — so there are at most `candidates.length` sweeps. Nothing is ever
- * un-decided, which is exactly what the old exclusion set bought and this keeps
- * without paying in correctness. Mutual cycles (`a→b`, `b→a`) have no settled
- * starting point: neither author is ever known to survive or to be retired, no
- * sweep can decide either candidate, and the loop stops with both undecided —
- * so both hints are dropped, the same contract the previous implementation had
- * for that case.
+ * Both halves of step 3 are load-bearing. Settling the core TOGETHER is what
+ * keeps a mutual cycle (`a→b`, `b→a`) dropping both hints, which is the
+ * standing contract: settling one at a time would leave `b→a` as the only
+ * rival for a's target already decided, "proving" that a survives, and half of
+ * a cycle with no stable assignment would get honored. And settling only the
+ * CORE — not every open candidate — is what keeps an independent later rival
+ * alive: with `b→a`, `a→b`, `c→a` in a batch, c is not in the cycle and its
+ * author plainly survives, so once the core is out of the way c retires a
+ * exactly as it did before this rewrite. Dropping the whole stalled set would
+ * lose it in the return value entirely — neither honored nor a cap drop, the
+ * very hole ② below closes.
+ *
+ * **What guarantees termination:** a decision is never revisited, and every
+ * iteration makes at least one — either the sweep decides a candidate, or the
+ * stall settles a non-empty cycle core. A stall with candidates still open
+ * always has one: a candidate blocked purely by an earlier rival is blocked by
+ * an OPEN rival, and the first open rival for a target cannot itself be
+ * blocked that way, so it is open only because its author is unknowable. Hence
+ * at most `candidates.length` iterations. Nothing is ever un-decided, which is
+ * exactly what the old exclusion set bought and this keeps without paying in
+ * correctness.
  *
  * **Budget (#206 ②).** The cap is applied HERE rather than to the returned
  * list, because eligibility depends on which hints are actually written: a hint
@@ -354,8 +372,8 @@ function resolveFoldedHints(
 
   let remaining = budget;
   let droppedByCap = 0;
-  for (let progressed = true; progressed;) {
-    progressed = false;
+  for (;;) {
+    let progressed = false;
     for (const candidate of candidates) {
       if (decisions.has(candidate)) continue;
       const survives = authorSurvives(candidate.supersededBy);
@@ -381,6 +399,19 @@ function resolveFoldedHints(
       claimed.add(candidate.target);
       progressed = true;
     }
+    if (progressed) continue;
+    // A sweep that decides nothing is not "done" — it is proof that every
+    // candidate still open is either in an irreducible cycle (no sweep will
+    // ever settle its author) or queued behind one for a target. Settle that
+    // cycle core as ignored and resume; only an empty core ends the loop.
+    // Both halves of "the core, all of it, at once" are load-bearing — see the
+    // function doc.
+    const cyclicCore = candidates.filter(
+      (candidate) =>
+        !decisions.has(candidate) && authorSurvives(candidate.supersededBy) === undefined,
+    );
+    if (cyclicCore.length === 0) break;
+    for (const candidate of cyclicCore) decisions.set(candidate, "ignored");
   }
 
   return {
