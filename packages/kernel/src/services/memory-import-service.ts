@@ -216,6 +216,90 @@ export async function importMemories(params: ImportMemoriesParams): Promise<Memo
   return withProjectImportLock(params.projectId, () => runImport(params, source));
 }
 
+/** A folded duplicate's supersede hint, resolved to a concrete author + target. */
+interface FoldedSupersedeCandidate {
+  item: ExtractedMemory;
+  supersededBy: string;
+  target: string;
+}
+
+/**
+ * #165: the folded-hint loop used to honor hints in a single sequential pass,
+ * checking each one's `supersededBy` against only the retirements that had
+ * already happened EARLIER in that same pass. That misses the reverse
+ * order: hint A retires T naming M as successor, then a LATER hint B retires
+ * M itself — T ends up pointing at a dead successor, and swapping A/B's
+ * order in the input would have caught it (the existing guard is exactly
+ * `retiredInBatch.has(supersededBy)`, it just runs too early for B's
+ * retirement to be visible yet). The same batch must not honor or dangle
+ * depending on incidental item order.
+ *
+ * This resolves the whole set to a fixed point instead of one pass:
+ *
+ * 1. Build the candidate list from static facts only (target validity,
+ *    self-reference, and anything already retired BEFORE the folded loop
+ *    runs — i.e. by a new item's own hint, `staticRetired`). This part has
+ *    no order dependency to begin with.
+ * 2. Repeatedly: pick the first surviving candidate per target (same
+ *    "first attribution wins" rule as before, now recomputed every round
+ *    instead of frozen at first pass), then drop any survivor whose
+ *    `supersededBy` is itself one of this round's retired targets. Dropping
+ *    a candidate can free its target back up for a competitor that lost the
+ *    dedup earlier — recomputing dedup from the full remaining candidate set
+ *    every round (not just the previous survivors) is what lets that
+ *    competitor be picked up.
+ *
+ * The exclusion set only ever grows and is bounded by the candidate count, so
+ * this always terminates — there is no oscillation to guard against.
+ */
+function resolveFoldedHintsFixedPoint(
+  foldedHints: ReadonlyArray<{ textKey: string; item: ExtractedMemory }>,
+  memoryIdByTextKey: ReadonlyMap<string, string>,
+  validIds: ReadonlySet<string>,
+  staticRetired: ReadonlySet<string>,
+): FoldedSupersedeCandidate[] {
+  const candidates: FoldedSupersedeCandidate[] = [];
+  for (const folded of foldedHints) {
+    const supersededBy = memoryIdByTextKey.get(folded.textKey);
+    const target = folded.item.supersedesMemoryId;
+    if (
+      !supersededBy ||
+      !target ||
+      !validIds.has(target) ||
+      target === supersededBy ||
+      staticRetired.has(target) ||
+      staticRetired.has(supersededBy)
+    ) {
+      continue;
+    }
+    candidates.push({ item: folded.item, supersededBy, target });
+  }
+
+  const excluded = new Set<FoldedSupersedeCandidate>();
+  let survivors = new Set<FoldedSupersedeCandidate>();
+  for (;;) {
+    const retiredTargets = new Set<string>();
+    survivors = new Set();
+    for (const candidate of candidates) {
+      if (excluded.has(candidate) || retiredTargets.has(candidate.target)) continue;
+      retiredTargets.add(candidate.target);
+      survivors.add(candidate);
+    }
+
+    let changed = false;
+    for (const candidate of survivors) {
+      if (retiredTargets.has(candidate.supersededBy)) {
+        excluded.add(candidate);
+        survivors.delete(candidate);
+        changed = true;
+      }
+    }
+    if (!changed) break;
+  }
+
+  return candidates.filter((candidate) => survivors.has(candidate));
+}
+
 async function runImport(
   params: ImportMemoriesParams,
   source: string,
@@ -383,6 +467,21 @@ async function runImport(
   // "this text replaces `oldId`", and that text is already present as that
   // memory — re-minting a second copy just to carry the hint is exactly the
   // duplication the idempotency guard exists to prevent.
+  //
+  // #165: eligibility of one folded hint can depend on ANOTHER folded hint in
+  // the same batch (one hint's `supersededBy` can be the very memory a later
+  // hint retires), so this can't be a single sequential pass over
+  // `foldedHints` — that only ever sees retirements that happened EARLIER in
+  // iteration order, and the same batch content honors or dangles depending
+  // on which order the items happened to arrive in. Resolving to a fixed
+  // point first makes the result order-independent.
+  const eligibleFoldedHints = resolveFoldedHintsFixedPoint(
+    foldedHints,
+    memoryIdByTextKey,
+    validIds,
+    retiredInBatch,
+  );
+
   // A folded hint mints nothing, so it consumes none of the cap above — but it
   // still RETIRES a valid memory, and an all-duplicates batch produces no
   // `uniqueNewItems` at all. Left unbudgeted, a 5000-item dump of existing
@@ -390,21 +489,18 @@ async function runImport(
   // reporting `droppedByCap: 0`, defeating the very guard the cap exists for.
   // So folded hints spend the room the minted items left behind (both are
   // "items of this call that take effect"), and the overflow is reported.
-  // Eligibility is judged BEFORE the budget so hints that would have been
-  // ignored anyway are not miscounted as cap drops.
+  // Eligibility (including the #165 fixed point above) is judged BEFORE the
+  // budget so hints that would have been ignored anyway are not miscounted as
+  // cap drops.
   let supersedeBudget = IMPORT_MAX_ITEMS - items.length;
   let droppedSupersedesByCap = 0;
-  for (const folded of foldedHints) {
-    const supersededBy = memoryIdByTextKey.get(folded.textKey);
-    if (!supersededBy) continue;
-    const target = supersedeTargetFor(folded.item, supersededBy);
-    if (!target) continue;
+  for (const candidate of eligibleFoldedHints) {
     if (supersedeBudget === 0) {
       droppedSupersedesByCap += 1;
       continue;
     }
     supersedeBudget -= 1;
-    honorSupersedeHint(folded.item, supersededBy, target);
+    honorSupersedeHint(candidate.item, candidate.supersededBy, candidate.target);
   }
 
   if (inputs.length > 0) {
