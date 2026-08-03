@@ -12,8 +12,11 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "${DIR}/_test-lib.sh"
 
 BASE="1111111111111111111111111111111111111111"
+BRANCH_HEAD="2222222222222222222222222222222222222222"
 HEAD7="7777777777777777777777777777777777777777"
 HEAD8="8888888888888888888888888888888888888888"
+# BASE_SHA가 main에 포함돼 있을 때의 compare 응답 (main이 BASE_SHA보다 3커밋 앞섬).
+BASE_IN_MAIN='{"status":"ahead","ahead_by":3,"behind_by":0}'
 
 reset_scenario() {
   unset GH_ROUTES GH_FAIL
@@ -22,6 +25,10 @@ reset_scenario() {
   : >"$GITHUB_OUTPUT"
   : >"$GITHUB_STEP_SUMMARY"
   : >"$GH_LOG"
+  # BASE_SHA가 main에 포함된 커밋인지 확인하는 compare다. 각 케이스가 등록하는 넓은
+  # `compare/` 라우트보다 먼저 잡히도록 여기서 등록한다 (먼저 등록한 라우트가 이긴다).
+  # 인자를 주면 그 응답으로 바꾼다 — 포함 확인 자체를 검증하는 케이스가 쓴다.
+  route "compare/${BASE}...main" "${1:-$BASE_IN_MAIN}"
 }
 
 run_refresh() {
@@ -119,7 +126,8 @@ it "compare 조회가 실패하면 뒤처짐 여부를 단정하지 않고 분�
 reset_scenario
 route "pulls?state=open" '[{"number":7}]'
 route_pr 7 "$(pr_json true false blocked "$HEAD7")"
-fail_calls_matching "compare/"
+# 기준 base 확인용 compare가 아니라 **그 PR의** compare만 실패시킨다.
+fail_calls_matching "compare/${BASE}...${HEAD7}"
 run_refresh
 assert_eq "[]|[7]" "$(output_of refreshed)|$(output_of unresolved)"
 
@@ -173,6 +181,33 @@ route "pulls?state=open" '[{"number":7}]'
 route "compare/" "$(compare_json 1 diverged)"
 route_pr 7 "$(pr_json true false blocked "$HEAD7")"
 BASE_SHA="main" run_refresh
+assert_eq "|1" "$(output_of refreshed)|${REFRESH_STATUS}"
+
+it "모양은 SHA여도 main에 포함되지 않은 BASE_SHA면 아무 PR도 갱신하지 않고 실패한다"
+# 모양 검사는 40자 hex이기만 하면 통과하므로 **다른 브랜치의 head SHA**를 걸러내지 못한다.
+# 그 값을 기준 base로 쓰면 뒤처짐을 엉뚱한 자로 재게 되어 갱신/스킵이 뒤집힌다 (#195 리뷰 ①).
+reset_scenario
+route "pulls?state=open" '[{"number":7}]'
+route "compare/" "$(compare_json 1 diverged)"
+route_pr 7 "$(pr_json true false blocked "$HEAD7")"
+BASE_SHA="$BRANCH_HEAD" run_refresh
+assert_eq "|1" "$(output_of refreshed)|${REFRESH_STATUS}"
+
+it "BASE_SHA의 main 포함 여부를 확인하지 못하면 확인된 것으로 치지 않고 실패한다"
+reset_scenario
+route "pulls?state=open" '[{"number":7}]'
+route "compare/" "$(compare_json 1 diverged)"
+route_pr 7 "$(pr_json true false blocked "$HEAD7")"
+fail_calls_matching "compare/${BASE}...main"
+run_refresh
+assert_eq "|1" "$(output_of refreshed)|${REFRESH_STATUS}"
+
+it "포함 여부를 읽을 수 없는 compare 응답은 포함된 것으로 치지 않는다"
+reset_scenario '{"status":"ahead","ahead_by":3}'
+route "pulls?state=open" '[{"number":7}]'
+route "compare/" "$(compare_json 1 diverged)"
+route_pr 7 "$(pr_json true false blocked "$HEAD7")"
+run_refresh
 assert_eq "|1" "$(output_of refreshed)|${REFRESH_STATUS}"
 
 teardown_sandbox

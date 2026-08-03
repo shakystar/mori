@@ -14,7 +14,8 @@
 #
 # 입력(환경변수):
 #   REPO           owner/repo
-#   BASE_SHA       현재 main 커밋 (push 이벤트의 github.sha)
+#   BASE_SHA       현재 main 커밋 (push 이벤트의 github.sha). main에 포함된 커밋이어야 하며,
+#                  아래에서 compare API로 확인한 뒤에만 기준 base로 쓴다.
 #   GH_TOKEN       gh가 쓰는 토큰. 기본 GITHUB_TOKEN이 아니라 **App 설치 토큰**이어야 한다 —
 #                  GITHUB_TOKEN이 만든 synchronize run은 approval-required 상태로 생성돼
 #                  사람이 "Approve and run"을 누를 때까지 시작하지 않는다 (#195 실측 3).
@@ -57,6 +58,28 @@ to_json() {
 base_sha="${BASE_SHA:?BASE_SHA is required}"
 if [[ ! "$base_sha" =~ ^[0-9a-f]{40}$ ]]; then
   echo "BASE_SHA가 커밋 SHA 모양이 아닙니다: '${base_sha}'" >&2
+  exit 1
+fi
+
+# 모양 검사만으로는 부족하다 (#195 리뷰). 40자 hex이기만 하면 **다른 브랜치의 head SHA**도
+# 그대로 "기준 base"로 통과하는데, 그러면 뒤처짐을 엉뚱한 자로 재게 되어 갱신/스킵 판정이
+# 조용히 뒤집힌다 — 빈 값이 흘러갈 때와 같은 사고이고, 모양은 멀쩡하므로 더 안 보인다.
+# 그 값이 실제로 `main`에 포함된 커밋인지 확인한다. 같음이 아니라 포함으로 재는 이유: main이
+# 연달아 push되면 앞선 실행의 BASE_SHA는 이미 main의 head가 아니지만 여전히 main의 조상이고,
+# 그 실행이 내리는 판정은 (좁을 뿐) 틀리지 않는다. compare의 behind_by는 "head(main)에 없는
+# base(BASE_SHA) 커밋 수"이므로, 포함돼 있으면 0이다.
+if ! base_cmp=$(gh api "repos/${REPO}/compare/${base_sha}...main"); then
+  echo "BASE_SHA가 main에 포함된 커밋인지 확인하지 못했습니다: '${base_sha}'" >&2
+  exit 1
+fi
+base_behind=$(jq -r 'if (.behind_by | type) == "number" then (.behind_by | tostring) else "" end' <<<"$base_cmp" || true)
+if [ -z "$base_behind" ]; then
+  echo "compare 응답에서 BASE_SHA의 포함 여부를 읽지 못했습니다: '${base_sha}'" >&2
+  exit 1
+fi
+if [ "$base_behind" -ne 0 ]; then
+  echo "BASE_SHA가 main에 포함된 커밋이 아닙니다 (main에 없는 커밋 ${base_behind}개): '${base_sha}'" >&2
+  echo "이 워크플로는 main에서만 돌아야 합니다 — 다른 ref의 head를 기준 base로 쓰면 뒤처짐 판정이 뒤집힙니다." >&2
   exit 1
 fi
 
