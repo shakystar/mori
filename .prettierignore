@@ -1,2 +1,6 @@
 dist
 pnpm-lock.yaml
+
+# 전신 memorize의 SoT 계승 사본 (규격 아님) — 원본과 바이트 단위 대조 가능해야 하므로
+# 포맷터로 재배치하지 않는다. 앞으로 추가되는 계승 문서도 같은 이유로 여기 덮인다.
+docs/inherited/
