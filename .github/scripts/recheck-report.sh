@@ -24,7 +24,8 @@
 #                  discover 실패 폴백 경로가 자기 원인으로 덮어쓴다.
 #   AUTHORITATIVE  이 보고가 실제로 검증을 시도한 잡의 것인가 (기본 1).
 #                  discover 실패 폴백 경로만 0을 준다 — 그 잡은 어떤 head·base를 검증할지조차
-#                  정하지 못한 채 돌기 때문이다 (#152, is_decided 참조).
+#                  정하지 못한 채 돌기 때문이다 (#152). 0이면 게이트 코멘트가 이미 있는 한
+#                  판정 종류와 무관하게 PATCH하지 않는다 (#183 — report_one 참조).
 #   RUN_URL        워크플로 실행 URL
 #   BOT_LOGIN      게이트 코멘트의 작성자로 인정할 로그인 (기본 github-actions[bot])
 set -euo pipefail
@@ -62,35 +63,61 @@ log() {
 # "나중에 달린 아무 일치 코멘트가 항상 이긴다"는 뜻이었다.
 #
 # 출력은 `<코멘트 id><TAB><판정 종류>` 한 줄이고, 없으면 아무것도 출력하지 않는다.
-# 판정 종류를 읽는 순서 (#152 — 폴백이 확정 판정을 덮지 않으려면 이 값이 필요하다):
-#   1. 본문의 `<!-- recheck-verdict:<종류> -->` 마커 (build_body가 심는다)
-#   2. 그 마커가 없는 옛 코멘트는 **헤드라인의 이모지**로 읽는다. 헤드라인 = 게이트 마커 줄의
-#      나머지, 비어 있으면 그 다음의 첫 비주석·비공백 줄. 본문 전체를 훑지 않는 이유는 레드
-#      본문이 체크 출력 마지막 3000바이트를 그대로 싣기 때문이다 — 로그에 섞인 이모지가
-#      판정으로 읽히면 안 된다.
-#   3. 둘 다 실패하면 `unknown`. 확정 판정일 수 있으므로 덮지 않는 쪽으로 다룬다(is_decided).
+# 판정 종류는 report_one이 폴백(AUTHORITATIVE=0) 판단에 더는 쓰지 않는다(#183 항목 ① —
+# 게이트 존재 자체로 가른다) — 여기서 읽는 값은 이제 알림 코멘트에 "기존 판정이 무엇이었는지"
+# 사람에게 보여주는 표시용이다. 그래도 오독은 여전히 피해야 한다(오독된 라벨이 알림에 실린다).
+# 읽는 순서 (#152):
+#   1. 게이트 마커 **바로 다음 줄**의 `<!-- recheck-verdict:<종류> -->` 마커 (build_body가
+#      심는다). 이 줄만 본다 — 본문 전체를 `scan`하면 레드 본문 뒤쪽에 실리는 체크 출력
+#      꼬리(마지막 3000바이트)에 우연히 같은 모양의 문자열이 섞였을 때 그것을 마커로
+#      오인한다(#183 항목 ②, 이 리포의 체크 출력엔 recheck-report.test.sh의 픽스처
+#      문자열이 실릴 수 있다). 값은 build_body의 5종(green|red|conflict|stale|error)
+#      화이트리스트로 걸러 벗어나면 `unknown`으로 정규화한다 — 화이트리스트가 없으면
+#      임의의 철자가 판정 종류로 그대로 통과했다.
+#   2. 마커가 없는 옛 코멘트는 **헤드라인의 이모지**로 읽는다. 헤드라인 = 게이트 마커 줄의
+#      나머지, 비어 있으면 그 다음의 첫 비주석·비공백 줄. 본문 전체를 훑지 않는 이유는
+#      1번과 같다.
+#   3. 둘 다 실패하면 `unknown`.
 find_existing() {
   local pr="$1" marker="$2"
   gh api --paginate "repos/${REPO}/issues/${pr}/comments?per_page=100" |
     jq -s -r --arg m "$marker" --arg bot "$BOT_LOGIN" '
       def trim: sub("^\\s+"; "") | sub("\\s+$"; "");
-      def headline($b):
+      def marker_lines($b):
         ($b | split("\n")) as $ls
-        | ([$ls | to_entries[] | select(.value | contains($m))] | first) as $mk
+        | {ls: $ls, mk: ([$ls | to_entries[] | select(.value | contains($m))] | first)};
+      def headline($ml):
+        ($ml.mk) as $mk
         | if $mk == null then ""
           else
             (($mk.value | split($m) | .[1] // "") | trim) as $rest
             | if $rest != "" then $rest
               else
-                ([$ls[($mk.key + 1):][] | select((trim != "") and (trim | startswith("<!--") | not))]
+                ([$ml.ls[($mk.key + 1):][] | select((trim != "") and (trim | startswith("<!--") | not))]
                  | first // "")
               end
           end;
-      def verdict_of($b):
-        ([$b | scan("<!-- recheck-verdict:([a-z]+) -->")] | first) as $tag
-        | if $tag != null then $tag[0]
+      # 판정 마커는 게이트 마커 **바로 다음 줄**만 본다(build_body가 그 자리에 심는다).
+      # 본문 전체를 scan하면 레드 본문 뒤쪽의 체크 출력 꼬리(마지막 3000바이트)에 우연히
+      # 같은 모양의 문자열이 섞였을 때 그것을 마커로 오인한다 (#183 항목 ②).
+      def verdict_marker($ml):
+        ($ml.mk) as $mk
+        | if $mk == null then null
           else
-            (headline($b)) as $h
+            ($ml.ls[$mk.key + 1] // "") as $next
+            | ([$next | scan("<!-- recheck-verdict:([a-zA-Z0-9_-]+) -->")] | first) as $cap
+            | if $cap == null then null else $cap[0] end
+          end;
+      def verdict_of($b):
+        marker_lines($b) as $ml
+        | (verdict_marker($ml)) as $tag
+        | if $tag != null then
+            # build_body가 심는 값은 5종뿐이다. 그 밖의 철자(오타·미래에 추가된 종류 등)를
+            # 그대로 판정 종류로 통과시키면 안 된다 — 화이트리스트를 벗어나면 unknown으로
+            # 정규화한다 (#183 항목 ②).
+            (if ($tag | test("^(green|red|conflict|stale|error)$")) then $tag else "unknown" end)
+          else
+            (headline($ml)) as $h
             | if ($h | contains("🟢")) then "green"
               elif ($h | contains("🔴")) then "red"
               elif ($h | contains("⚠️")) then "conflict"
@@ -106,22 +133,12 @@ find_existing() {
         end'
 }
 
-# 확정 판정인가 — 그린·레드·충돌은 "판정한 잡이 남긴 결과"다. stale·error는 그 자체가
-# 판정 불가이므로 폴백이 갱신해도 잃는 것이 없다. unknown(판독 실패)은 확정 판정일 수
-# 있으므로 확정 쪽으로 다룬다 — 덮지 않는 편이 보수적이고, 알림 코멘트가 남으므로
-# 침묵하지도 않는다.
-is_decided() {
-  case "$1" in
-    green | red | conflict | unknown) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
 verdict_label() {
   case "$1" in
     green) echo "🟢 그린" ;;
     red) echo "🔴 레드" ;;
     conflict) echo "⚠️ 충돌" ;;
+    stale | error) echo "⛔ 판정 불가" ;;
     unknown) echo "판독하지 못함 (확정 판정일 수 있어 그대로 두었습니다)" ;;
     *) echo "확인하지 못함 (기존 코멘트 조회 실패)" ;;
   esac
@@ -377,8 +394,19 @@ report_one() {
   #   T2 PR N에 synchronize → 그 실행의 discover가 죽는다
   #   T3 폴백이 같은 마커를 ⛔ 판정 불가로 PATCH   ← 여기를 막는다
   # 대신 침묵하지 않는다 — 게이트 마커가 없는 별도 알림 코멘트를 남긴다 (#125 항목 3).
-  # 기존 코멘트가 없거나 이미 판정 불가면 폴백도 종전대로 마커 코멘트에 보고한다.
-  if [ "$AUTHORITATIVE" != "1" ] && { [ "$force_new" -eq 1 ] || is_decided "$existing_class"; }; then
+  #
+  # 예전에는 이 판단을 existing_class(위에서 읽은 판정 종류)가 "확정"인지로 갈랐다
+  # (green|red|conflict|unknown 이면 지키고, stale|error면 종전대로 덮었다). 그런데
+  # existing_class는 **이 GET 시점의 스냅샷**이다. GET 당시 stale/error였다가 그 직후
+  # 겹친 authoritative 실행이 같은 코멘트를 확정 판정(red 등)으로 PATCH하면, 이 폴백은
+  # 자신이 든 낡은 스냅샷(stale/error)을 근거로 그 확정 판정을 다시 덮어써 버린다 — T1-T3와
+  # 같은 재전개다 (#183 항목 ①). 판정 종류로 가르는 한 이 창은 구조적으로 남는다.
+  #
+  # 그래서 판정 종류를 아예 보지 않는다: 게이트 코멘트가 **존재하기만 하면**(판정 종류
+  # 무관, 조회 실패로 유무를 모를 때도) 폴백은 그것을 절대 PATCH하지 않고 알림만 남긴다.
+  # 게이트가 **없을 때만** 아래로 내려가 처음 코멘트를 남긴다 — 그 경로엔 덮어쓸 기존
+  # 판정이 없으므로 이 레이스가 성립하지 않는다.
+  if [ "$AUTHORITATIVE" != "1" ] && { [ "$force_new" -eq 1 ] || [ -n "$existing" ]; }; then
     notify_not_authoritative "$pr" "$existing" "$existing_class" "$detail"
     return $?
   fi
