@@ -138,6 +138,26 @@ CI run 시각과 `main` HEAD 시각을 대조한다.
 알림을 남긴 실행이 확인한 것이 아니므로 재검증을 다시 돌리거나 PR head를 갱신해 최신
 판정을 받은 뒤 판단한다.
 
+#### 낡은 레드 체크 해소 (`refresh-armed-prs.yml`)
+
+위가 낡은 **그린**을 다룬다면 이쪽은 낡은 **레드**를 다룬다. `build-and-test`는 PR head 커밋에
+붙은 결론으로 평가되는데, `main`이 앞서 나가도 head SHA는 그대로라 그 결론도 그대로다.
+그래서 **PR 자기 diff와 무관한 이유로(원인이 `main`에 있어서) 레드가 박힌 PR**은 스스로 할 수
+있는 일이 없고, `--auto`가 걸려 있어도 조건 미충족으로 영원히 대기한다 (#195 — #190이 이
+상태를 armed PR 7건에 동시에 만들었다).
+
+`main` push마다 도는 `refresh-armed-prs.yml`이 이 구멍을 메운다 — **`--auto`가 걸려 있고 ·
+충돌이 아니며 · 현재 `main`을 아직 포함하지 않은** 열린 PR의 head를
+`PUT /pulls/{n}/update-branch`로 갱신한다. 그 갱신이 `synchronize`를 일으켜 기존 `ci.yml`이
+현재 `main`을 포함한 head에서 새 `build-and-test`를 남기므로, **required check의 생산 주체는
+`ci.yml` 하나로 유지된다.** 대상을 좁게 거는 이유는 매 push마다 열린 PR 전부의 CI를 다시
+돌리지 않기 위해서다.
+
+**이 잡은 App 설치 토큰을 쓴다.** 기본 `GITHUB_TOKEN`이 만든 `synchronize` run은
+approval-required 상태로 생성돼 사람이 "Approve and run"을 눌러야 시작하기 때문이다.
+시크릿(`MERGE_REFRESH_APP_ID` / `MERGE_REFRESH_APP_PRIVATE_KEY`)이 없으면 이 잡은 이유를
+잡 요약에 남기고 **no-op**한다 — 그때는 종전대로 owner가 수동으로 head를 갱신하거나 머지한다.
+
 ## 사람이 개입하는 지점
 
 플릿은 기본적으로 자율 동작한다. 다음 세 가지만 사람 몫이다.
