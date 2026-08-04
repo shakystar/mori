@@ -287,9 +287,13 @@ export const PER_ITEM_MAX_CHARS = Math.floor(
  * `PER_ITEM_MAX_CHARS` directly — the budget is a parameter now (PR #231
  * review 1), and a floor pinned to the extraction constant would silently
  * outgrow a smaller caller-supplied cap.
+ *
+ * Never below 1. Half of a caller-supplied budget small enough to floor to 0
+ * would hand back the empty `text` this floor exists to prevent — the same
+ * defect, re-entered through the parameter instead of the constant.
  */
 function minTruncatedTextChars(maxItemChars: number): number {
-  return Math.floor(maxItemChars / 2);
+  return Math.max(1, Math.floor(maxItemChars / 2));
 }
 
 /**
@@ -1110,14 +1114,15 @@ function truncateToItemBudget(
   // one cut point: between the UTF-16 halves of a supplementary character.
   // The lone high surrogate left behind renders as a SIX-char `\udXXX` escape,
   // so dropping that unit GROWS the item instead of shrinking it, and stores
-  // U+FFFD where the user's character was. Step back one more unit so the pair
-  // leaves together and the one-pass premise holds again.
+  // U+FFFD where the user's character was. Move the cut off the pair: back one
+  // unit normally, FORWARD one when backing up would empty `text` (the floor
+  // already left that item over budget, so keeping the pair whole costs one
+  // char and avoids the blank `text` the parse step above rejects outright).
   if (
-    keptChars > 0 &&
     isHighSurrogate(item.text.charCodeAt(keptChars - 1)) &&
     isLowSurrogate(item.text.charCodeAt(keptChars))
   ) {
-    keptChars -= 1;
+    keptChars = keptChars > 1 ? keptChars - 1 : keptChars + 1;
   }
   return { ...item, text: item.text.slice(0, keptChars) };
 }
