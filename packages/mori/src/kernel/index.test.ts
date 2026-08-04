@@ -195,6 +195,16 @@ describe("createMoriKernel — project identity file (#217)", () => {
     expect(moriProjectId(root)).toBe(beforeFile);
   });
 
+  it("adopts a committed id from a project.json with a leading UTF-8 BOM, and leaves the file untouched (#241)", () => {
+    mkdirSync(join(root, ".mori"));
+    const withBom = "\uFEFF" + JSON.stringify({ id: "proj_committed0000000" });
+    writeFileSync(identityFile(), withBom);
+
+    expect(moriProjectId(root)).toBe("proj_committed0000000");
+    createMoriKernel({ root, env: {} });
+    expect(readFileSync(identityFile(), "utf8")).toBe(withBom);
+  });
+
   it("falls back to the path hash for a broken identity file and leaves it exactly as committed", () => {
     // The path hash this root resolves to absent any (usable) file — captured
     // before either broken file below exists, so it is the baseline both

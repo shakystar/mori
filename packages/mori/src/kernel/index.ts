@@ -21,6 +21,7 @@ import {
   projectStoreExists,
   renderMemoryContext,
   SqliteMemoryKernel,
+  stripBom,
   type Embedder,
   type MemoryContext,
   type ObservedToolCall,
@@ -236,7 +237,9 @@ function readIdentityFile(root: string): IdentityFileState {
     return { kind: "invalid" };
   }
   try {
-    const parsed: unknown = JSON.parse(raw);
+    // Tolerate a leading UTF-8 BOM: Windows editors and PowerShell 5.1 prepend
+    // one to a committed `project.json`; mori itself never writes it (#241).
+    const parsed: unknown = JSON.parse(stripBom(raw));
     const id =
       typeof parsed === "object" && parsed !== null ? (parsed as { id?: unknown }).id : undefined;
     // The `personal_` namespace is reserved for the kernel's own personal
