@@ -41,6 +41,7 @@ import {
   appendEvent,
   ensureProjectDirectories,
   hasGenesisEvent,
+  isDuplicateGenesisError,
   projectStoreExists,
 } from "../storage/event-store.js";
 import { withProjectLock } from "../storage/project-lock.js";
@@ -848,6 +849,17 @@ export class SqliteMemoryKernel<M, E> implements MemoryKernel<M, E> {
    * rather than the harness because the harness would have to reach past the
    * seam into the event log to do so — but the metadata (title, root path) is
    * the harness's, hence `options.project`.
+   *
+   * #236 (#189 B): `hasGenesisEvent` above and this `appendEvent` are not
+   * atomic across processes — `withProjectLock` (#132) runs its critical
+   * section to completion even after losing the lock, reporting the loss
+   * rather than pre-empting it, so two processes bootstrapping the same new
+   * store at once can both pass the check and both attempt the append. The
+   * database's `idx_events_genesis_once` unique index (db.ts v18) makes the
+   * loser's insert fail instead of silently duplicating the row, and that
+   * failure is caught here and treated as success: another process having
+   * already minted genesis is the expected outcome of losing this race, not
+   * a bootstrap failure.
    */
   private async ensureGenesis(): Promise<void> {
     this.genesis ??= (async () => {
@@ -862,16 +874,20 @@ export class SqliteMemoryKernel<M, E> implements MemoryKernel<M, E> {
         );
       }
       const project = createProject({ title: meta.title, rootPath: meta.rootPath });
-      await appendEvent({
-        type: "project.created",
-        projectId,
-        scopeType: "project",
-        scopeId: projectId,
-        actor: this.options.actor,
-        // The genesis id IS the store id — the projector treats a divergent one
-        // as an identity clobber (projections/projector.ts).
-        payload: { ...project, id: projectId },
-      });
+      try {
+        await appendEvent({
+          type: "project.created",
+          projectId,
+          scopeType: "project",
+          scopeId: projectId,
+          actor: this.options.actor,
+          // The genesis id IS the store id — the projector treats a divergent one
+          // as an identity clobber (projections/projector.ts).
+          payload: { ...project, id: projectId },
+        });
+      } catch (error) {
+        if (!isDuplicateGenesisError(error)) throw error;
+      }
     })().catch((error: unknown) => {
       // A failed bootstrap must be retryable: keeping the rejected promise
       // memoized would poison every later capture in this process.

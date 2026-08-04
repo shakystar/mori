@@ -441,3 +441,152 @@ describe("db v11 provenance columns", () => {
     }
   });
 });
+
+// v18 — #236 (#189 B): `idx_events_genesis_once` on an UNVIOLATED real-shape
+// store. The migration-safety gate for this issue: a v17 store with exactly
+// one `project.created` (the only shape any real store can be in, per this
+// issue's gate investigation) must upgrade losslessly, and the constraint
+// must actually be live afterward — asserted by the REJECTED BEHAVIOR the
+// issue's own completion criteria ask for, not by inspecting sqlite_master
+// (TESTING.md forbids implementation-coupled schema-snapshot assertions).
+describe("db v18 genesis uniqueness — migration safety", () => {
+  function buildV17Db(dbFile: string, projectId: string, duplicateGenesis = false): void {
+    const seed = new Database(dbFile);
+    seed.exec(`
+      CREATE TABLE events (
+        seq INTEGER PRIMARY KEY, id TEXT NOT NULL UNIQUE, schema_version TEXT NOT NULL,
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL, type TEXT NOT NULL,
+        project_id TEXT NOT NULL, scope_type TEXT NOT NULL, scope_id TEXT NOT NULL,
+        actor TEXT NOT NULL, writer TEXT, source_project_id TEXT, payload TEXT NOT NULL
+      );
+      CREATE INDEX idx_events_type  ON events(type);
+      CREATE INDEX idx_events_scope ON events(scope_type, scope_id);
+    `);
+    const insert = seed.prepare(
+      `INSERT INTO events
+         (id, schema_version, created_at, updated_at, type,
+          project_id, scope_type, scope_id, actor, writer, source_project_id, payload)
+       VALUES (?, '0.1.0', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z',
+               ?, ?, ?, ?, 'test', 'test', ?, ?)`,
+    );
+    insert.run(
+      "evt_genesis",
+      "project.created",
+      projectId,
+      "project",
+      projectId,
+      projectId,
+      JSON.stringify({ id: projectId, title: "existing store" }),
+    );
+    insert.run(
+      "evt_task",
+      "task.created",
+      projectId,
+      "task",
+      "task_1",
+      projectId,
+      JSON.stringify({ id: "task_1", title: "pre-existing task" }),
+    );
+    if (duplicateGenesis) {
+      // A store that already lost the race this issue closes: a SECOND
+      // project.created for the same identity, silently accepted back when
+      // nothing rejected it.
+      insert.run(
+        "evt_genesis_2",
+        "project.created",
+        projectId,
+        "project",
+        projectId,
+        projectId,
+        JSON.stringify({ id: projectId, title: "existing store" }),
+      );
+    }
+    seed.pragma("user_version = 17"); // fully migrated; only v18 runs on open
+    seed.close();
+  }
+
+  it("upgrades a real v17 store losslessly and the new index actually rejects a duplicate", () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "memorize-v18-"));
+    const dbFile = path.join(tmp, "memorize.db");
+    const projectId = "proj_v18_migrate";
+    try {
+      buildV17Db(dbFile, projectId);
+
+      const db = openDbAt(dbFile, projectId);
+      try {
+        expect(db.pragma("user_version", { simple: true })).toBeGreaterThanOrEqual(18);
+
+        // No data loss: both pre-existing rows survive the migration untouched.
+        const rows = db.prepare("SELECT id, type FROM events ORDER BY seq").all() as Array<{
+          id: string;
+          type: string;
+        }>;
+        expect(rows).toEqual([
+          { id: "evt_genesis", type: "project.created" },
+          { id: "evt_task", type: "task.created" },
+        ]);
+
+        // Behavioral proof the constraint is live post-upgrade (not a schema
+        // snapshot): a second genesis insert for the same store now fails.
+        expect(() =>
+          db
+            .prepare(
+              `INSERT INTO events
+                 (id, schema_version, created_at, updated_at, type,
+                  project_id, scope_type, scope_id, actor, writer, source_project_id, payload)
+               VALUES ('evt_genesis_dup', '0.1.0', '2026-01-01T00:00:00.000Z',
+                 '2026-01-01T00:00:00.000Z', 'project.created', ?, 'project', ?, 'test', 'test', ?, ?)`,
+            )
+            .run(projectId, projectId, projectId, JSON.stringify({ id: projectId })),
+        ).toThrow(/UNIQUE constraint failed/);
+      } finally {
+        db.close();
+      }
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  // The other side of the same gate (owner's added completion criterion): a
+  // store that ALREADY violates the constraint must fail readably. Sqlite's
+  // own `UNIQUE constraint failed: events.project_id` names neither the
+  // duplicated identity nor what to do about it, and the store does not open
+  // either way — so what is asserted here is the DIAGNOSIS, plus the fact
+  // that the migration left the duplicate rows exactly as it found them.
+  it("refuses to migrate a store with duplicate genesis, naming what is duplicated", () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "memorize-v18-dup-"));
+    const dbFile = path.join(tmp, "memorize.db");
+    const projectId = "proj_v18_dup";
+    try {
+      buildV17Db(dbFile, projectId, true);
+
+      let thrown: unknown;
+      try {
+        openDbAt(dbFile, projectId).close();
+      } catch (error) {
+        thrown = error;
+      }
+
+      const message = (thrown as Error | undefined)?.message ?? "";
+      expect(message).toContain(projectId); // WHICH identity
+      expect(message).toContain("2 project.created rows"); // HOW MANY it has
+      expect(message).toMatch(/human decision/); // and that this is not ours to make
+
+      // Diagnostic only: the offending rows are still there, and the store is
+      // still at v17 — the whole migration rolled back with the transaction.
+      const after = new Database(dbFile);
+      try {
+        expect(after.pragma("user_version", { simple: true })).toBe(17);
+        expect(
+          after
+            .prepare("SELECT COUNT(*) AS n FROM events WHERE type = 'project.created'")
+            .get() as { n: number },
+        ).toEqual({ n: 2 });
+      } finally {
+        after.close();
+      }
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
