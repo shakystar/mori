@@ -34,6 +34,17 @@ import {
   type NewSegmentRow,
   type PruneOptions,
 } from "./segment-store.js";
+import { CONSERVATIVE_CHARS_PER_TOKEN, estimateTokens } from "./token-estimate.js";
+
+/**
+ * The chars↔tokens approximation this service's budgets are derived from moved
+ * to `token-estimate.ts` when a second service (#238's injection budget) had to
+ * derive from the same numbers — see that module for why it is one constant and
+ * not two. Re-exported here because this service's callers and tests have
+ * imported them from this module since #143②, and the move is not a change in
+ * where the conversion is OWNED conceptually.
+ */
+export { CONSERVATIVE_CHARS_PER_TOKEN, estimateTokens };
 
 /**
  * CLS Phase 1 — boundary consolidation (the expensive half of D3, run ONCE
@@ -385,32 +396,12 @@ export const EXTRACTION_SYSTEM_PROMPT = [
 ].join(" ");
 assertAsciiSystemPrompt(EXTRACTION_SYSTEM_PROMPT);
 
-/**
- * #143 item② — chars-per-token used to translate a `ConsolidatorLlm`'s
- * declared `contextWindowTokens` into the character budget `run()` actually
- * hands `boundExtractionInput`. This is a MULTIPLIER (`chars = tokens *
- * CONSERVATIVE_CHARS_PER_TOKEN`), so lower is safer — it makes the derived
- * char budget UNDER-estimate how much text a given token count buys, which is
- * the conservative direction. `2`, then `1`, were both tried and rejected on
- * this PR (PR #168 review, two rounds): a Hangul syllable is 3 bytes in UTF-8,
- * and a byte-level BPE tokenizer's worst case is one token PER BYTE — so one
- * Hangul character can cost up to 3 tokens, not 1. `1` chars/token still
- * under-reserves by up to 3x for exactly the CJK-heavy content this project's
- * observations/conversation tails are substantially made of. The floor this
- * worst case implies is `1/3` chars/token (1 char <= 3 tokens, inverted).
- * Not a tokenizer — a fixed, documented approximation, per the issue's
- * explicit non-goal of adding one. Applies to USER content only — the fixed
- * English system prompt uses {@link SYSTEM_PROMPT_CHARS_PER_TOKEN} instead
- * (#174: reusing this CJK worst-case constant for it over-reserved so much
- * that small declared context windows derived a budget of 0).
- */
-export const CONSERVATIVE_CHARS_PER_TOKEN = 1 / 3;
-
-/** Chars → estimated tokens, using the same conservative constant throughout
- *  so a budget derived from it and a later check against it never disagree. */
-export function estimateTokens(chars: number): number {
-  return Math.ceil(chars / CONSERVATIVE_CHARS_PER_TOKEN);
-}
+// #143 item② — `CONSERVATIVE_CHARS_PER_TOKEN` (the multiplier that translates a
+// `ConsolidatorLlm`'s declared `contextWindowTokens` into the character budget
+// `run()` hands `boundExtractionInput`) and `estimateTokens` now live in
+// `token-estimate.ts`; they are imported and re-exported at the top of this
+// file. `SYSTEM_PROMPT_CHARS_PER_TOKEN` below stays here: it is about THIS
+// file's fixed ASCII system prompt, not a general conversion.
 
 /**
  * #174 (PR #168 follow-up) — chars-per-token used ONLY to translate the fixed
