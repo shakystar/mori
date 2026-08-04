@@ -1,5 +1,6 @@
 import type { StartupContextPayload } from "../domain/entities.js";
 import type { Embedder } from "../index.js";
+import { hasEmbeddings } from "./embeddings-store.js";
 import { fitInjectionBudget } from "./injection-budget.js";
 import {
   retrieveMemoryContext,
@@ -55,10 +56,28 @@ export async function buildMemoryContext(
   const embedder = opts.taskTitle ? opts.embedder : undefined;
   let queryVec: number[] | undefined;
   if (opts.taskTitle && embedder) {
+    // Local corpus probe (mori#237): a query vector only changes anything if
+    // semanticMemoryScores or retrieveSegments below has a same-model vector
+    // to compare it against — "memory" and "segment" are the only two kinds
+    // either consumer reads (search-service.ts / embeddings-store.ts). When
+    // neither corpus has one, skip the remote embed call entirely; it would
+    // burn the SESSION_START_EMBED_TIMEOUT_MS budget for a vector nothing
+    // downstream can use. A probe failure (store error) is not a reason to
+    // withhold embedding — it falls back to today's behavior and attempts it.
+    let corpusUsable: boolean;
     try {
-      [queryVec] = await embedder.embed([opts.taskTitle]);
+      corpusUsable =
+        hasEmbeddings(projectId, "memory", embedder.model) ||
+        hasEmbeddings(projectId, "segment", embedder.model);
     } catch {
-      queryVec = undefined; // best-effort — both channels fall back to FTS-only below.
+      corpusUsable = true;
+    }
+    if (corpusUsable) {
+      try {
+        [queryVec] = await embedder.embed([opts.taskTitle]);
+      } catch {
+        queryVec = undefined; // best-effort — both channels fall back to FTS-only below.
+      }
     }
   }
 

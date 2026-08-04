@@ -121,6 +121,20 @@ export function listEmbeddings(projectId: string, kind?: string, model?: string)
   return rows.map(parseRow);
 }
 
+/**
+ * Cheap existence probe: does this project's corpus hold at least one vector
+ * for `kind` under `model`? Unlike {@link listEmbeddings}, this never reads
+ * the `vector` column (a `SELECT 1 … LIMIT 1`), so a caller that only needs to
+ * know "is there anything to embed against" does not pay to load the corpus
+ * it is trying to avoid touching (mori#237).
+ */
+export function hasEmbeddings(projectId: string, kind: string, model: string): boolean {
+  const row = getDb(projectId)
+    .prepare("SELECT 1 FROM embeddings WHERE kind = ? AND model = ? LIMIT 1")
+    .get(kind, model);
+  return row !== undefined;
+}
+
 /** One embedding by entity id, or undefined. */
 export function getEmbedding(projectId: string, entityId: string): EmbeddingRow | undefined {
   const row = getDb(projectId)
