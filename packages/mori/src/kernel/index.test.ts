@@ -504,9 +504,13 @@ describe("mori turn -> sqlite store", () => {
     expect(seen).toHaveLength(2);
     expect(messageText(seen[0]!.messages[0]!)).toContain("# Project memory");
     expect(messageText(seen[0]!.messages[0]!)).toContain("notes.md");
-    // Only the FIRST request of the session — the second call in the same turn
-    // gets the untouched transcript (per-turn retrieval is #5 2/3).
-    expect(seen[1]!.messages.map(messageText).join("\n")).not.toContain("# Project memory");
+    // …and every request the turn makes, not just its first (#5 2/3-b). The
+    // block is not part of the conversation — `transformContext`'s return value
+    // is a local in pi's loop and the model keeps no state — so the second
+    // call, the one that carries the tool result, only has the project memory
+    // if this seam puts it there again.
+    expect(messageText(seen[1]!.messages[0]!)).toContain("# Project memory");
+    expect(messageText(seen[1]!.messages[0]!)).toContain("notes.md");
   });
 
   it("writes nothing at all for a turn that only reads", async () => {

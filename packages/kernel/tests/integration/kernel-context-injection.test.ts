@@ -406,10 +406,17 @@ describe("turn-level retrieval (#5 2/3-b)", () => {
       // The cache key is the whole TurnQuery, and each half earns its place.
       // The SAME turn asking again must not re-read — this seam runs before
       // every provider call, so a turn that uses twenty tools arrives here
-      // twenty more times, each one an FTS read and an embed for content
-      // duplicate suppression would discard.
-      await kernel.transformContext(["one", "two", "tool result"]);
+      // twenty more times, each one an FTS read and an embed for a context
+      // that cannot have moved.
+      const repeat = await kernel.transformContext(["one", "two", "tool result"]);
       expect(retrievals).toHaveBeenCalledTimes(2);
+      // …and the saving is the READ only. The block still rides this request:
+      // it lived in the previous one and nothing carried it forward, so a bare
+      // pass-through here would mean the turn works its tools without the
+      // context it just retrieved.
+      expect(injectedCount(repeat)).toBe(1);
+      expect(repeat[0]).toBe(second[0]);
+      expect(repeat.slice(1)).toEqual(["one", "two", "tool result"]);
 
       // A NEW turn that repeats the previous turn's words is not that case and
       // does read: `continue` twice is the most ordinary follow-up an agent
@@ -422,28 +429,42 @@ describe("turn-level retrieval (#5 2/3-b)", () => {
     }
   });
 
-  it("never injects the same memory twice, even when the later turn retrieves it again", async () => {
+  it("sends a memory again on the next turn, and reinforces it only the first time", async () => {
     await seedTopics();
     let turn: TurnQuery = { query: "zephyr", turnId: "turn-1" };
     const { kernel, rendered } = harness({ readQuery: () => turn });
+    const reinforce = vi.spyOn(memoryRetrievalService, "reinforceInjectedMemories");
 
-    const first = await kernel.transformContext(["one"]);
-    turn = { query: "gamma", turnId: "turn-2" };
-    const second = await kernel.transformContext(["one", "two"]);
+    try {
+      const first = await kernel.transformContext(["one"]);
+      turn = { query: "gamma", turnId: "turn-2" };
+      const second = await kernel.transformContext(["one", "two"]);
 
-    expect(first[0]).toContain("chose zephyr as the deploy target");
-    // Pin the premise: the second turn's retrieval DID find that memory
-    // again (the memory pool is ranked by the query, never filtered by it),
-    // so the assertions below are about the injection policy and not about a
-    // retrieval that happened to come back empty.
-    const retrieved = await buildMemoryContext(projectId, { taskTitle: "gamma" });
-    expect(retrieved.consolidatedMemories?.map((memory) => memory.id)).toEqual(["mem_a"]);
+      expect(first[0]).toContain("chose zephyr as the deploy target");
+      // Pin the premise: the second turn's retrieval DID find that memory
+      // again (the memory pool is ranked by the query, never filtered by it),
+      // so the assertions below are about the injection policy and not about a
+      // retrieval that happened to come back empty.
+      const retrieved = await buildMemoryContext(projectId, { taskTitle: "gamma" });
+      expect(retrieved.consolidatedMemories?.map((memory) => memory.id)).toEqual(["mem_a"]);
 
-    expect(rendered[1]?.consolidatedMemories).toBeUndefined();
-    expect(second[0]).not.toContain("chose zephyr as the deploy target");
-    // …and the turn still injects what IS new, rather than being suppressed
-    // wholesale by the memory it had already shown.
-    expect(second[0]).toContain("gamma indexer");
+      // …so the second turn shows it again. The first turn's block lived in
+      // that turn's provider request and nothing carried it forward — the
+      // model is stateless and pi never folds this seam's return value back
+      // into the conversation — so withholding it here would leave the model
+      // without the memory its own query just selected.
+      expect(rendered[1]?.consolidatedMemories?.map((memory) => memory.id)).toEqual(["mem_a"]);
+      expect(second[0]).toContain("chose zephyr as the deploy target");
+      expect(second[0]).toContain("gamma indexer");
+
+      // Reinforcement is what does NOT repeat: its stamp (`last_accessed_at`)
+      // is an input to the ranking that selected this memory, so a stamp every
+      // turn would let an injected memory refresh its own recency and pin
+      // itself to the top of the pool for the rest of the session.
+      expect(reinforce.mock.calls.map((call) => call[1])).toEqual([["mem_a"], []]);
+    } finally {
+      reinforce.mockRestore();
+    }
   });
 
   it("passes the turn through untouched when the query seam throws, and spends nothing", async () => {
@@ -482,9 +503,10 @@ describe("turn-level retrieval (#5 2/3-b)", () => {
     // now meet it.
     expect(injected).toHaveLength(2);
     expect(injected[0]?.payload).toEqual({ memoryIds: ["mem_a"] });
-    // The second turn showed a segment and no memory it had not already
-    // shown, so its event says so instead of re-listing mem_a.
-    expect(injected[1]?.payload).toEqual({ memoryIds: [] });
+    // The second turn sent that memory again, so its event lists it again:
+    // this payload records what the model saw on THIS turn, not what it saw
+    // for the first time (which is reinforcement's grain, not telemetry's).
+    expect(injected[1]?.payload).toEqual({ memoryIds: ["mem_a"] });
   });
 
   it("records nothing for a turn cancelled mid-retrieval, so a later turn still gets it", async () => {
@@ -522,9 +544,10 @@ describe("turn-level retrieval (#5 2/3-b)", () => {
     }
 
     // …and the cancelled turn took nothing from the turns after it. The same
-    // ask, unchanged, still retrieves (the attempt was refunded) and still
-    // injects (nothing entered the suppression set) — without both, content the
-    // model never saw would stay suppressed for the life of the process.
+    // ask, unchanged, still retrieves rather than being answered from a cache
+    // the cancelled call never filled: the attempt and the retrieval gate were
+    // both given back, so the content the model never saw is not stranded
+    // behind a read that "already happened".
     const next = await kernel.transformContext(messages);
     expect(injectedCount(next)).toBe(1);
     expect(next[0]).toContain("zephyr pipeline");
