@@ -335,6 +335,12 @@ export class SqliteMemoryKernel<M, E> implements MemoryKernel<M, E> {
    * A retrieval CANCELLED mid-flight gives it back, provided no later call has
    * claimed it since (see `transformContext`): nothing reached the model, so
    * the session-start read still has its work.
+   *
+   * CONVERSATION-scoped, not session-scoped: {@link resetConversation} clears
+   * it (#234). Without that, mori's `/clear` would leave it `true` forever —
+   * set by the conversation `/clear` just threw away — and the new
+   * conversation's first turn would silently skip the session-start read that
+   * `!readQuery` sessions depend on entirely.
    */
   private contextAttempted = false;
 
@@ -343,11 +349,25 @@ export class SqliteMemoryKernel<M, E> implements MemoryKernel<M, E> {
    * re-attaches its block instead of re-reading, while a genuinely new turn
    * reads again — see {@link TurnRetrieval} and {@link TurnQuery}. Undefined
    * until the first retrieval; a cancelled call restores what it found here.
+   *
+   * CONVERSATION-scoped, like {@link contextAttempted}: {@link resetConversation}
+   * clears it too (#234). Left alone, the previous conversation's last turn
+   * would still satisfy `isRepeatCall` for whatever the new conversation's
+   * first turn happens to be named, re-attaching a stale block instead of
+   * retrieving for a conversation the store has never been asked about.
    */
   private lastRetrieval: TurnRetrieval<M> | undefined;
 
   /**
-   * Ids of the memories this session has already REINFORCED.
+   * Ids of the memories this session (this KERNEL INSTANCE — one per mori CLI
+   * process) has already REINFORCED. SESSION-scoped, deliberately not touched by
+   * {@link resetConversation}: unlike {@link contextAttempted} and
+   * {@link lastRetrieval}, what this set gates (how often a stamp that feeds
+   * ranking gets written) has nothing to do with which conversation is asking,
+   * and clearing it on `/clear` would let a chatty session of short
+   * conversations re-stamp the same memory's recency once per conversation
+   * instead of once per process — the exact self-reinforcing loop the
+   * "once" below exists to prevent.
    *
    * This set does not decide what gets injected. A rendered block lives for one
    * provider request only ({@link TurnRetrieval}), so re-sending a memory the
@@ -602,6 +622,31 @@ export class SqliteMemoryKernel<M, E> implements MemoryKernel<M, E> {
     }
 
     return [injected, ...messages];
+  }
+
+  /**
+   * Tell this kernel the harness's CONVERSATION restarted — mori's `/clear`
+   * (#234), as opposed to the process ending. Clears exactly the two fields
+   * `transformContext` keys on "has THIS CONVERSATION already…": whether it
+   * has spent its untargeted session-start read ({@link contextAttempted})
+   * and what its last turn retrieved ({@link lastRetrieval}). A fresh
+   * conversation has asked neither question yet, so both go back to their
+   * constructor defaults.
+   *
+   * Left alone, on purpose: {@link reinforced} (recency stamps feed ranking,
+   * scoped to the process, not the conversation — see that field), `tail`
+   * (queued captures are observations the PROCESS made, not the conversation
+   * being cleared — `/clear` is not a request to un-observe them), `genesis`,
+   * and `sessionId`. None of those answer a "has this conversation…"
+   * question, so none of them are this method's to touch.
+   *
+   * NEVER THROWS: it only assigns fields, the same guarantee `transformContext`
+   * itself documents, and for the same reason — a harness command as ordinary
+   * as `/clear` must not be able to kill the REPL loop.
+   */
+  resetConversation(): void {
+    this.contextAttempted = false;
+    this.lastRetrieval = undefined;
   }
 
   /**

@@ -16,6 +16,7 @@ function spyKernel(
     transformContext: async (messages: AgentMessage[]) => messages,
     observe: () => {},
     drain: async () => {},
+    resetConversation: () => {},
     consolidate: onConsolidate,
   };
 }

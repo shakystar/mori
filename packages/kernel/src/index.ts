@@ -221,6 +221,13 @@ export interface MemoryKernel<M, E> {
   observe(event: E): void;
   /** Distill captured events into long-term memory via the injected LLM. */
   consolidate(llm: ConsolidatorLlm, opts?: ConsolidateCallOptions): Promise<void>;
+  /**
+   * Tell the kernel the harness's CONVERSATION restarted (mori's `/clear` — #234), as
+   * opposed to the process/session ending. Clears only conversation-scoped
+   * `transformContext` state — see {@link SqliteMemoryKernel.resetConversation} for
+   * exactly what that is and, just as importantly, what it deliberately leaves alone.
+   */
+  resetConversation(): void;
 }
 
 /**
@@ -248,4 +255,7 @@ export class BufferKernel<M, E> implements MemoryKernel<M, E> {
 
   /** Nothing to settle — `observe` finished the moment it returned. */
   async drain(): Promise<void> {}
+
+  /** No conversation-scoped state to clear — this double never retrieves. */
+  resetConversation(): void {}
 }

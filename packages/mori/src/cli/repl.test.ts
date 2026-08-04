@@ -7,7 +7,7 @@ import type {
 } from "@earendil-works/pi-ai";
 import { createAssistantMessageEventStream, InMemoryCredentialStore } from "@earendil-works/pi-ai";
 import { BufferKernel, type ConsolidatorLlm } from "@mori/kernel";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createMoriAgent, type MoriKernel } from "../agent/index.js";
 import type { ReplInputSource, ReplLine } from "./repl-input.js";
 import { runRepl, type ReplConsolidation } from "./repl.js";
@@ -239,6 +239,28 @@ describe("runRepl", () => {
     expect(agent.state.messages.map((message) => message.role)).toEqual(["user", "assistant"]);
   });
 
+  it("resets the kernel's conversation-scoped state on /clear, not just the agent's (#234)", async () => {
+    // A BufferKernel does not itself keep injection state, but the wiring bug this
+    // guards against is that `/clear` never reaches the kernel at all — a kernel
+    // seam added and never called (mori#177, #215 precedent). Spying on the real
+    // method (rather than swapping in a hand-written double) is what actually
+    // pins the production wiring: a `resetConversation` call that silently no-ops
+    // here would pass just as happily without ever reaching `repl.ts`'s `/clear`.
+    const provider = recordingProvider(["answer one"]);
+    const { agent, kernel } = testAgent(provider.streamFn);
+    const reset = vi.spyOn(kernel, "resetConversation");
+    const input = scriptedInput([
+      { type: "line", value: "question one" },
+      { type: "line", value: "/clear" },
+      { type: "eof" },
+    ]);
+
+    const exitCode = await runRepl(agent, input.source, captureOutput(), noConsolidation(kernel));
+
+    expect(exitCode).toBe(0);
+    expect(reset).toHaveBeenCalledTimes(1);
+  });
+
   it("ignores a blank line without calling the provider", async () => {
     const provider = recordingProvider([]);
     const input = scriptedInput([
@@ -337,6 +359,7 @@ describe("runRepl", () => {
         transformContext: (messages) => kernel.transformContext(messages),
         observe: (event) => kernel.observe(event),
         drain: () => kernel.drain(),
+        resetConversation: () => kernel.resetConversation(),
         consolidate: async (llm) => {
           await llm.complete("");
         },
@@ -369,6 +392,7 @@ describe("runRepl", () => {
         transformContext: (messages) => kernel.transformContext(messages),
         observe: (event) => kernel.observe(event),
         drain: () => kernel.drain(),
+        resetConversation: () => kernel.resetConversation(),
         consolidate: (_llm, opts) =>
           new Promise((_resolve, reject) => {
             opts?.signal?.addEventListener(

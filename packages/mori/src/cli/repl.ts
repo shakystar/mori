@@ -84,6 +84,12 @@ export async function runRepl(
 
       if (text === CLEAR_COMMAND) {
         agent.reset();
+        // The kernel's own conversation-scoped state (#234) — the untargeted
+        // session-start read it has already spent, the last turn it retrieved
+        // for — must reset alongside `agent.state.messages`, or the next
+        // conversation inherits the previous one's "already asked" bookkeeping
+        // and silently loses its session-start injection.
+        consolidation.kernel.resetConversation();
         stdout(replClearedMessage());
         continue;
       }
