@@ -1,6 +1,8 @@
 /**
- * Session-start injection (#149, #5 1/3): what `SqliteMemoryKernel.transformContext`
- * puts in front of the agent's first LLM call, and — mostly — what it refuses to.
+ * Context injection: what `SqliteMemoryKernel.transformContext` puts in front of
+ * an LLM call, and — mostly — what it refuses to. Two describes, because the
+ * seam has two modes: session-start only (#149, #5 1/3, no `readQuery`) and
+ * turn-level (#5 2/3-b, `readQuery` wired).
  *
  * Integration rather than unit because the behaviour under test is the seam
  * meeting the store: the same kernel captures an observation, projects it, and
@@ -30,7 +32,7 @@ import {
   listValidMemories,
   rebuildProjectProjection,
 } from "../../src/services/projection-store.js";
-import { closeAll } from "../../src/storage/db.js";
+import { closeAll, getDb } from "../../src/storage/db.js";
 import { appendEvent, readEvents } from "../../src/storage/event-store.js";
 import * as eventStore from "../../src/storage/event-store.js";
 import { getProjectDbFile } from "../../src/storage/path-resolver.js";
@@ -49,7 +51,14 @@ interface Harness {
   rendered: MemoryContext[];
 }
 
-function harness(options: { renderContext?: boolean; throwOnRender?: boolean } = {}): Harness {
+function harness(
+  options: {
+    renderContext?: boolean;
+    throwOnRender?: boolean;
+    /** The `readQuery` seam. Omitted ⇒ the session-start-only behaviour of #149. */
+    readQuery?: (messages: string[]) => string | undefined;
+  } = {},
+): Harness {
   const rendered: MemoryContext[] = [];
   const render = (context: MemoryContext): string => {
     rendered.push(context);
@@ -62,6 +71,7 @@ function harness(options: { renderContext?: boolean; throwOnRender?: boolean } =
     project: { title: "kernel injection", rootPath: sandbox },
     observeEvent: (event) => event,
     ...(options.renderContext === false ? {} : { renderContext: render }),
+    ...(options.readQuery ? { readQuery: options.readQuery } : {}),
   });
   return { kernel, rendered };
 }
@@ -334,5 +344,116 @@ describe("SqliteMemoryKernel.transformContext — session-start injection", () =
         spy.mockRestore();
       }
     });
+  });
+});
+
+describe("turn-level retrieval (#5 2/3-b)", () => {
+  /**
+   * Segments are the channel a QUERY actually selects (the memory pool is
+   * ranked by the query but not filtered by it), so two turns asking
+   * different things are only visibly different here. Inserted straight into
+   * the table for the same reason segment-retrieval.test.ts does: the write
+   * path belongs to consolidation, not to this seam.
+   */
+  function insertSegment(id: string, text: string): void {
+    getDb(projectId)
+      .prepare(
+        "INSERT INTO segments (id, session_id, created_at, ordinal, source, text) VALUES (?, ?, ?, ?, ?, ?)",
+      )
+      .run(id, "s1", "2026-01-01T00:00:00.000Z", 0, null, text);
+  }
+
+  /** Empty store + one memory + one segment per topic, all indexed. */
+  async function seedTopics(): Promise<void> {
+    await seedEmptyStore();
+    await seedMemory("mem_a", "chose zephyr as the deploy target");
+    insertSegment("seg_zephyr", "rolling the release out through the zephyr pipeline");
+    insertSegment("seg_gamma", "the gamma indexer rebuild took nine minutes");
+    await rebuildProjectProjection(projectId, { reindexSearch: true });
+  }
+
+  it("retrieves per turn, so two turns with different queries inject different content", async () => {
+    await seedTopics();
+    let query = "zephyr";
+    const { kernel, rendered } = harness({ readQuery: () => query });
+
+    const first = await kernel.transformContext(["one"]);
+    query = "gamma";
+    const second = await kernel.transformContext(["one", "two"]);
+
+    expect(injectedCount(first)).toBe(1);
+    expect(first[0]).toContain("zephyr pipeline");
+    expect(first[0]).not.toContain("gamma indexer");
+    expect(injectedCount(second)).toBe(1);
+    expect(second[0]).toContain("gamma indexer");
+    expect(second[0]).not.toContain("zephyr pipeline");
+    // Two retrievals, not one cached read: the seam ran again for the second
+    // query rather than replaying the first turn's context.
+    expect(rendered).toHaveLength(2);
+  });
+
+  it("never injects the same memory twice, even when the later turn retrieves it again", async () => {
+    await seedTopics();
+    let query = "zephyr";
+    const { kernel, rendered } = harness({ readQuery: () => query });
+
+    const first = await kernel.transformContext(["one"]);
+    query = "gamma";
+    const second = await kernel.transformContext(["one", "two"]);
+
+    expect(first[0]).toContain("chose zephyr as the deploy target");
+    // Pin the premise: the second turn's retrieval DID find that memory
+    // again (the memory pool is ranked by the query, never filtered by it),
+    // so the assertions below are about the injection policy and not about a
+    // retrieval that happened to come back empty.
+    const retrieved = await buildMemoryContext(projectId, { taskTitle: "gamma" });
+    expect(retrieved.consolidatedMemories?.map((memory) => memory.id)).toEqual(["mem_a"]);
+
+    expect(rendered[1]?.consolidatedMemories).toBeUndefined();
+    expect(second[0]).not.toContain("chose zephyr as the deploy target");
+    // …and the turn still injects what IS new, rather than being suppressed
+    // wholesale by the memory it had already shown.
+    expect(second[0]).toContain("gamma indexer");
+  });
+
+  it("passes the turn through untouched when the query seam throws, and spends nothing", async () => {
+    await seedTopics();
+    let explode = true;
+    const { kernel, rendered } = harness({
+      readQuery: () => {
+        if (explode) throw new Error("query derivation exploded");
+        return "zephyr";
+      },
+    });
+    const messages = ["one"];
+
+    await expect(kernel.transformContext(messages)).resolves.toEqual(messages);
+    expect(rendered).toEqual([]);
+
+    // The broken turn cost the session nothing — a later turn whose seam
+    // works still retrieves and injects.
+    explode = false;
+    expect(injectedCount(await kernel.transformContext(messages))).toBe(1);
+  });
+
+  it("appends one memory.injected per INJECTING turn, carrying that turn's memory ids", async () => {
+    await seedTopics();
+    let query = "zephyr";
+    const { kernel } = harness({ readQuery: () => query });
+
+    expect(injectedCount(await kernel.transformContext(["one"]))).toBe(1);
+    query = "gamma";
+    expect(injectedCount(await kernel.transformContext(["one", "two"]))).toBe(1);
+
+    const events = await readEvents(projectId);
+    const injected = events.filter((event) => event.type === "memory.injected");
+    // 2/3-a's append is per injection, and turn-level injection is what makes
+    // that plural — the condition (render succeeded) is unchanged, more turns
+    // now meet it.
+    expect(injected).toHaveLength(2);
+    expect(injected[0]?.payload).toEqual({ memoryIds: ["mem_a"] });
+    // The second turn showed a segment and no memory it had not already
+    // shown, so its event says so instead of re-listing mem_a.
+    expect(injected[1]?.payload).toEqual({ memoryIds: [] });
   });
 });
