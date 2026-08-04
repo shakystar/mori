@@ -468,18 +468,33 @@ export interface CreateMoriKernelOptions {
  * an existing directory symlink is a silent no-op and the writes below follow
  * it at the OS level. A blocked resolution degrades exactly like every other
  * failure here: warn and fall back to the in-memory path hash, no throw.
+ *
+ * Returns the id THIS session must build its kernel with. Usually that is
+ * just `id` echoed back, but a losing `link` (`EEXIST`) means some other
+ * writer's file is now on disk instead of this session's, and #217 round 3
+ * only fixed the file — the id handed back here still ignored that and let
+ * `createMoriKernel` open a store under the id it minted in memory, never the
+ * winner's (#240). So an `EEXIST` re-reads the winner via `readIdentityFile`
+ * and adopts it when usable; every other outcome (write failure, a guard
+ * rejection, an unusable or vanished winner) keeps `id`, matching what was
+ * already on disk or already decided before this call.
  */
-function persistProjectIdentity(root: string, id: string, warn?: (message: string) => void): void {
+function persistProjectIdentity(
+  root: string,
+  id: string,
+  warn?: (message: string) => void,
+): string {
   const guard = resolveWithinRoot(root, path.join(IDENTITY_DIR_NAME, IDENTITY_FILE_NAME));
   if (!guard.ok) {
     warn?.(`mori: .mori/project.json 기록을 건너뜁니다 — ${guard.reason}\n`);
-    return;
+    return id;
   }
   const targetPath = guard.resolved;
   const tempPath = path.join(
     path.dirname(targetPath),
     `.project.json.${randomBytes(6).toString("hex")}.mori-tmp`,
   );
+  let effectiveId = id;
   try {
     mkdirSync(path.dirname(targetPath), { recursive: true });
     writeFileSync(tempPath, `${JSON.stringify({ id }, null, 2)}\n`, "utf8");
@@ -489,8 +504,25 @@ function persistProjectIdentity(root: string, id: string, warn?: (message: strin
       if ((error as NodeJS.ErrnoException)?.code !== "EEXIST") throw error;
       // Another writer published `targetPath` first (#217 review round 3):
       // `link` never touches an existing target, so its file is exactly what
-      // that writer committed — this session just discards its own temp copy
-      // below and keeps running with the id it already resolved in memory.
+      // that writer committed. Read it back and adopt it — the file and the
+      // id this session opens its store under must never diverge (#240),
+      // or this session's observations land in a store no later run's
+      // identity resolution will ever find again.
+      const winner = readIdentityFile(root);
+      if (winner.kind === "valid") {
+        effectiveId = winner.id;
+      } else if (winner.kind === "invalid") {
+        // The file another writer published is unusable. Same never-overwrite
+        // rule as the top-level "invalid" branch below: this session keeps
+        // its own path hash and leaves the file exactly as it found it.
+        warn?.(
+          `mori: 경합에서 발행된 .mori/project.json을 읽을 수 없어 경로 해시를 유지합니다 — 파일은 그대로 둡니다.\n`,
+        );
+      }
+      // `winner.kind === "missing"`: the file this call just lost the race to
+      // has since vanished. Retrying `link` would be a race-retry loop this
+      // issue does not attempt — keep the path hash; the next run resolves
+      // identity from scratch and republishes it if still missing.
     }
   } catch (error) {
     warn?.(
@@ -503,6 +535,7 @@ function persistProjectIdentity(root: string, id: string, warn?: (message: strin
       // best-effort cleanup; tempPath may never have been created
     }
   }
+  return effectiveId;
 }
 
 /**
@@ -546,10 +579,14 @@ export type MoriKernelHandle = SqliteMemoryKernel<AgentMessage, AgentEvent> & {
  * reject) is left exactly as a person committed it — this only warns and
  * falls back to the path hash, it never overwrites.
  *
- * The returned handle's `projectId` (#230) is this function's `identity.id` —
- * the SAME value just wired into the kernel above — so a caller reading it
- * later never re-resolves identity from disk; it only ever reads back what
- * this call already decided.
+ * The returned handle's `projectId` (#230) is `effectiveId` below, not
+ * `identity.id` — the two can differ when `persistProjectIdentity` loses a
+ * publish race: the id it minted is a path hash, but another writer's file
+ * won the race and is what's on disk, so the kernel (and the id this handle
+ * reports) must be built from that winner instead (#240). Whichever value
+ * `effectiveId` ends up holding, it is the SAME one wired into the kernel
+ * above — a caller reading `projectId` later never re-resolves identity from
+ * disk; it only ever reads back what this call already decided.
  */
 export function createMoriKernel(options: CreateMoriKernelOptions = {}): MoriKernelHandle {
   const root = path.resolve(options.root ?? process.cwd());
@@ -557,8 +594,9 @@ export function createMoriKernel(options: CreateMoriKernelOptions = {}): MoriKer
   let warned = false;
 
   const identity = resolveProjectIdentity(root);
+  let effectiveId = identity.id;
   if (identity.fileState === "missing") {
-    persistProjectIdentity(root, identity.id, warn);
+    effectiveId = persistProjectIdentity(root, identity.id, warn);
   } else if (identity.fileState === "invalid") {
     warn?.(
       `mori: .mori/project.json을 읽을 수 없어 경로 해시로 대체합니다 — 파일은 그대로 둡니다.\n`,
@@ -577,7 +615,7 @@ export function createMoriKernel(options: CreateMoriKernelOptions = {}): MoriKer
   const contextEmbedder = options.embedder ?? getEmbedder(sessionStartEmbeddingsConfig(config));
 
   const kernel = new SqliteMemoryKernel<AgentMessage, AgentEvent>({
-    projectId: identity.id,
+    projectId: effectiveId,
     actor: MORI_ACTOR,
     project: { title: path.basename(root) || root, rootPath: root },
     sessionId: options.sessionId ?? createId("session"),
@@ -592,7 +630,7 @@ export function createMoriKernel(options: CreateMoriKernelOptions = {}): MoriKer
       warn(`mori: 메모리 캡처 실패 — 이번 세션의 관찰 기록은 남지 않습니다: ${errorText(error)}\n`);
     },
   });
-  return Object.assign(kernel, { projectId: identity.id });
+  return Object.assign(kernel, { projectId: effectiveId });
 }
 
 function errorText(error: unknown): string {
