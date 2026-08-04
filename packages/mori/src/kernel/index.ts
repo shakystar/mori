@@ -14,6 +14,7 @@ import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "
 import type { AgentEvent, AgentMessage } from "@earendil-works/pi-agent-core";
 import {
   createId,
+  isPersonalStoreId,
   isValidId,
   observedShell,
   observedWrite,
@@ -31,6 +32,7 @@ import {
   sessionStartEmbeddingsConfig,
 } from "../external/embeddings/index.js";
 import { BASH_TOOL_NAME } from "../tools/bash.js";
+import { resolveWithinRoot } from "../tools/paths.js";
 import { maskSecrets } from "./mask-secrets.js";
 
 /** Provenance recorded on every event this harness appends. */
@@ -216,17 +218,33 @@ function readIdentityFile(root: string): IdentityFileState {
   let raw: string;
   try {
     raw = readFileSync(identityFilePath(root), "utf8");
-  } catch {
-    return { kind: "missing" };
+  } catch (error) {
+    // Only ENOENT means "no file" — the missing branch is what lets
+    // `createMoriKernel` mint+persist the path hash. Any other read failure
+    // (EACCES, EISDIR, a `.mori` that is a broken symlink, ...) means a file
+    // is THERE and could be a person's commit, so it must fall to "invalid"
+    // and go through the never-overwrite path, not be silently replaced
+    // (#217 PR #229 review).
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return { kind: "missing" };
+    return { kind: "invalid" };
   }
   try {
     const parsed: unknown = JSON.parse(raw);
     const id =
       typeof parsed === "object" && parsed !== null ? (parsed as { id?: unknown }).id : undefined;
-    if (typeof id === "string" && isValidId(id)) return { kind: "valid", id };
+    // The `personal_` namespace is reserved for the kernel's own personal
+    // stores (`getProjectRoot` routes it to a per-account personal root, not
+    // `projects/<id>/`). A committed file cannot be allowed to mint that
+    // routing for a project: it would open a project checkout onto an
+    // account's personal memory (#155 is the same bug at the identity layer
+    // instead of the path layer — see #217 PR #229 review).
+    if (typeof id === "string" && isValidId(id) && !isPersonalStoreId(id)) {
+      return { kind: "valid", id };
+    }
   } catch {
     // Malformed JSON falls through to "invalid" below, same as a well-formed
-    // file whose id fails the kernel's ID_PATTERN.
+    // file whose id fails the kernel's ID_PATTERN or names a reserved
+    // namespace.
   }
   return { kind: "invalid" };
 }
@@ -332,15 +350,30 @@ export interface CreateMoriKernelOptions {
  * a usable id (the path hash), so a write that cannot land degrades to "try
  * again next run," not a broken session — the discipline #217 set for every
  * failure mode here.
+ *
+ * Guarded by `resolveWithinRoot` (the same lstat-based check `tools/paths.ts`
+ * uses for every tool that touches the working tree, #38) before any `mkdir`
+ * or write happens: if `.mori` is a symlink whose target resolves outside
+ * `root` — something a checked-in tree can carry just as easily as a
+ * `project.json` — a naive `mkdirSync`/`writeFileSync` would create/replace a
+ * file at that OUTSIDE location the moment mori starts, since `mkdirSync` on
+ * an existing directory symlink is a silent no-op and the writes below follow
+ * it at the OS level. A blocked resolution degrades exactly like every other
+ * failure here: warn and fall back to the in-memory path hash, no throw.
  */
 function persistProjectIdentity(root: string, id: string, warn?: (message: string) => void): void {
-  const targetPath = identityFilePath(root);
+  const guard = resolveWithinRoot(root, path.join(IDENTITY_DIR_NAME, IDENTITY_FILE_NAME));
+  if (!guard.ok) {
+    warn?.(`mori: .mori/project.json 기록을 건너뜁니다 — ${guard.reason}\n`);
+    return;
+  }
+  const targetPath = guard.resolved;
   const tempPath = path.join(
     path.dirname(targetPath),
     `.project.json.${randomBytes(6).toString("hex")}.mori-tmp`,
   );
   try {
-    mkdirSync(path.join(root, IDENTITY_DIR_NAME), { recursive: true });
+    mkdirSync(path.dirname(targetPath), { recursive: true });
     writeFileSync(tempPath, `${JSON.stringify({ id }, null, 2)}\n`, "utf8");
     renameSync(tempPath, targetPath);
   } catch (error) {

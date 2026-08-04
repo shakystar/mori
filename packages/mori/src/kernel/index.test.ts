@@ -7,6 +7,7 @@ import {
   readFileSync,
   realpathSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -229,6 +230,57 @@ describe("createMoriKernel — project identity file (#217)", () => {
 
     expect(warnings).toHaveLength(1);
     expect(existsSync(identityFile())).toBe(false);
+  });
+
+  it("rejects a committed id in the reserved personal_ namespace — falls back to the path hash and leaves the file untouched (#217 PR #229 review)", () => {
+    const pathHashId = moriProjectId(root);
+
+    mkdirSync(join(root, ".mori"));
+    const reserved = JSON.stringify({ id: "personal_self" });
+    writeFileSync(identityFile(), reserved);
+    const warnings: string[] = [];
+
+    expect(moriProjectId(root)).toBe(pathHashId);
+    createMoriKernel({ root, env: {}, warn: (message) => warnings.push(message) });
+    expect(readFileSync(identityFile(), "utf8")).toBe(reserved);
+    expect(warnings).toHaveLength(1);
+  });
+
+  it("classifies an unreadable identity file as invalid, not missing — a real chmod 0000, not a mock (#217 PR #229 review)", () => {
+    const pathHashId = moriProjectId(root);
+
+    mkdirSync(join(root, ".mori"));
+    const committed = JSON.stringify({ id: "proj_committed0000000" });
+    writeFileSync(identityFile(), committed);
+    chmodSync(identityFile(), 0o000);
+    const warnings: string[] = [];
+
+    try {
+      expect(moriProjectId(root)).toBe(pathHashId);
+      createMoriKernel({ root, env: {}, warn: (message) => warnings.push(message) });
+    } finally {
+      chmodSync(identityFile(), 0o600); // restore so afterEach's recursive rm can read/delete it
+    }
+
+    expect(warnings).toHaveLength(1);
+    expect(readFileSync(identityFile(), "utf8")).toBe(committed);
+  });
+
+  it("does not write through a `.mori` symlink that resolves outside root — a real symlink, not a mock (#217 PR #229 review)", () => {
+    const outside = realpathSync(mkdtempSync(join(tmpdir(), "mori-identity-outside-")));
+    try {
+      symlinkSync(outside, join(root, ".mori"));
+      const warnings: string[] = [];
+
+      expect(() =>
+        createMoriKernel({ root, env: {}, warn: (message) => warnings.push(message) }),
+      ).not.toThrow();
+
+      expect(warnings).toHaveLength(1);
+      expect(existsSync(join(outside, "project.json"))).toBe(false);
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
   });
 
   it("moriProjectId and moriStoreExists never create the identity file — only createMoriKernel writes", () => {
