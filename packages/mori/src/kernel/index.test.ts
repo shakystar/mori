@@ -184,6 +184,13 @@ describe("createMoriKernel — project identity file (#217)", () => {
     return join(root, ".mori", "project.json");
   }
 
+  const isRoot = typeof process.getuid === "function" && process.getuid() === 0;
+  // Windows ignores POSIX directory permission bits, so chmod 0o500 does not
+  // make the dir unwritable and the open would succeed. root ignores the
+  // read-only bit for the same reason — skip the chmod path on both (same
+  // shape as packages/kernel/tests/unit/db.test.ts, #241).
+  const cannotDenyDirWrite = isRoot || process.platform === "win32";
+
   it("adopts an existing checkout unchanged: writes today's path-hash id, and a later read gets that same id back", () => {
     const beforeFile = moriProjectId(root);
 
@@ -230,17 +237,20 @@ describe("createMoriKernel — project identity file (#217)", () => {
     expect(warnings).toHaveLength(1);
   });
 
-  it("does not throw when the root is unwritable — reproduced with a real chmod, not a mock", () => {
-    chmodSync(root, 0o500); // read+execute only: mkdir/write inside `root` now fails with EACCES
-    const warnings: string[] = [];
+  it.skipIf(cannotDenyDirWrite)(
+    "does not throw when the root is unwritable — reproduced with a real chmod, not a mock",
+    () => {
+      chmodSync(root, 0o500); // read+execute only: mkdir/write inside `root` now fails with EACCES
+      const warnings: string[] = [];
 
-    expect(() =>
-      createMoriKernel({ root, env: {}, warn: (message) => warnings.push(message) }),
-    ).not.toThrow();
+      expect(() =>
+        createMoriKernel({ root, env: {}, warn: (message) => warnings.push(message) }),
+      ).not.toThrow();
 
-    expect(warnings).toHaveLength(1);
-    expect(existsSync(identityFile())).toBe(false);
-  });
+      expect(warnings).toHaveLength(1);
+      expect(existsSync(identityFile())).toBe(false);
+    },
+  );
 
   it("rejects a committed id in the reserved personal_ namespace — falls back to the path hash and leaves the file untouched (#217 PR #229 review)", () => {
     const pathHashId = moriProjectId(root);
@@ -256,25 +266,28 @@ describe("createMoriKernel — project identity file (#217)", () => {
     expect(warnings).toHaveLength(1);
   });
 
-  it("classifies an unreadable identity file as invalid, not missing — a real chmod 0000, not a mock (#217 PR #229 review)", () => {
-    const pathHashId = moriProjectId(root);
+  it.skipIf(cannotDenyDirWrite)(
+    "classifies an unreadable identity file as invalid, not missing — a real chmod 0000, not a mock (#217 PR #229 review)",
+    () => {
+      const pathHashId = moriProjectId(root);
 
-    mkdirSync(join(root, ".mori"));
-    const committed = JSON.stringify({ id: "proj_committed0000000" });
-    writeFileSync(identityFile(), committed);
-    chmodSync(identityFile(), 0o000);
-    const warnings: string[] = [];
+      mkdirSync(join(root, ".mori"));
+      const committed = JSON.stringify({ id: "proj_committed0000000" });
+      writeFileSync(identityFile(), committed);
+      chmodSync(identityFile(), 0o000);
+      const warnings: string[] = [];
 
-    try {
-      expect(moriProjectId(root)).toBe(pathHashId);
-      createMoriKernel({ root, env: {}, warn: (message) => warnings.push(message) });
-    } finally {
-      chmodSync(identityFile(), 0o600); // restore so afterEach's recursive rm can read/delete it
-    }
+      try {
+        expect(moriProjectId(root)).toBe(pathHashId);
+        createMoriKernel({ root, env: {}, warn: (message) => warnings.push(message) });
+      } finally {
+        chmodSync(identityFile(), 0o600); // restore so afterEach's recursive rm can read/delete it
+      }
 
-    expect(warnings).toHaveLength(1);
-    expect(readFileSync(identityFile(), "utf8")).toBe(committed);
-  });
+      expect(warnings).toHaveLength(1);
+      expect(readFileSync(identityFile(), "utf8")).toBe(committed);
+    },
+  );
 
   it("does not write through a `.mori` symlink that resolves outside root — a real symlink, not a mock (#217 PR #229 review)", () => {
     const outside = realpathSync(mkdtempSync(join(tmpdir(), "mori-identity-outside-")));
