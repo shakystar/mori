@@ -7,11 +7,11 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createProject } from "../../src/domain/entities.js";
 import type { Embedder } from "../../src/index.js";
 import { ensureSegmentEmbeddings } from "../../src/services/embeddings-service.js";
-import { upsertEmbedding } from "../../src/services/embeddings-store.js";
+import { listEmbeddings, upsertEmbedding } from "../../src/services/embeddings-store.js";
 import { retrieveSegments } from "../../src/services/memory-retrieval-service.js";
 import { rebuildProjectProjection } from "../../src/services/projection-store.js";
 import { hybridSearchSegments, searchByKind } from "../../src/services/search-service.js";
-import { listSegments, listSegmentTexts } from "../../src/services/segment-store.js";
+import { listSegments, listSegmentTexts, pruneSegments } from "../../src/services/segment-store.js";
 import { closeAll, getDb } from "../../src/storage/db.js";
 import { appendEvent } from "../../src/storage/event-store.js";
 
@@ -115,6 +115,32 @@ describe("segment embeddings stay self-scoped (#72)", () => {
     expect(result.embedded).toBe(1);
     expect(seenTexts).toEqual(["self transcript text"]);
     expect(seenTexts.join(" ")).not.toContain("foreign");
+  });
+
+  // #255 defect 2: `ensureSegmentEmbeddings` snapshots `listSegments` before
+  // its `embedder.embed` await, then used to upsert by id with no recheck
+  // that the segment still exists. A concurrent process's `pruneSegments`
+  // (unguarded by the project lock) landing while that call is in flight
+  // used to resurrect an `embeddings` row for a segment `segments` no longer
+  // has — an orphan nothing downstream ever revisits. The stub embedder
+  // below calls the REAL `pruneSegments`, standing in for that second
+  // process, from inside the awaited `embed` call — the exact window the
+  // snapshot-then-upsert races.
+  it("does not resurrect an embeddings row for a segment a concurrent pruneSegments deleted mid-embed", async () => {
+    insertSegment("seg_live", "still here", "2026-01-01T00:00:00.000Z");
+
+    const stubEmbedder: Embedder = {
+      model: "stub-embedder",
+      embed: async (texts) => {
+        pruneSegments(projectId, { maxCount: 0 });
+        return texts.map(() => [1, 0]);
+      },
+    };
+
+    const result = await ensureSegmentEmbeddings(projectId, stubEmbedder);
+
+    expect(result.embedded).toBe(0);
+    expect(listEmbeddings(projectId, "segment")).toEqual([]);
   });
 
   it("hybridSearchSegments never returns a foreign segment, even with a leaked local embedding", async () => {
