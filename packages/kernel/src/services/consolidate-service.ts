@@ -1518,13 +1518,18 @@ export interface ConsolidateAttempt {
   /** memory.consolidated events appended (success only). */
   consolidated?: number;
   /** #113: set only when this boundary held its conversation cursor — see
-   *  `ConsolidateResult.conversationSliceHeld`. Absent means "did not happen",
-   *  so an old row without the field reads correctly. */
+   *  `ConsolidateResult.conversationSliceHeld`. Absent means "did not
+   *  happen", so an old row without the field reads correctly. #232: on a
+   *  FAILED attempt (`error` set), the same absence can also mean "unknown —
+   *  the boundary threw before this was computed"; `run()` mirrors the value
+   *  the instant it is known, so absent there is only reached by a failure
+   *  that preceded it. */
   conversationSliceHeld?: boolean;
   /** #213: set only when this boundary's extractor truncated ≥1 item to fit
    *  `PER_ITEM_MAX_CHARS` — see `ConsolidateResult.extractionTruncated`.
    *  Absent means "did not happen", so an old row without the field reads
-   *  correctly. */
+   *  correctly. #232: same failed-attempt caveat as `conversationSliceHeld`
+   *  above. */
   extractionTruncated?: boolean;
   /** Truncated failure message (failures only). */
   error?: string;
@@ -2036,6 +2041,20 @@ export async function consolidate(params: ConsolidateParams): Promise<Consolidat
   // -1 = the attempt failed before the count was taken.
   let pendingObservations = -1;
 
+  // #232: `conversationSliceHeld`/`extractionTruncated` are computed INSIDE
+  // `run()` and returned only on its success path. A boundary that fails
+  // AFTER one of them was computed (e.g. `appendEvents` lands but the
+  // subsequent `rebuildProjectProjection` or cursor commit throws) must not
+  // lose that signal — it is the case the field exists to surface, per the
+  // module doc above `ConsolidateAttempt`. `run()` mirrors each value into
+  // these outer cells the instant it computes them, so the `catch` below can
+  // read whatever was known at the moment of failure. `undefined` (not
+  // `false`) is the initial state so a failure that precedes the computation
+  // point leaves the attempt's field genuinely absent, not a false "did not
+  // happen" — see `ConsolidateAttempt`'s "absent means did not happen" doc.
+  let capturedConversationSliceHeld: boolean | undefined;
+  let capturedExtractionTruncated: boolean | undefined;
+
   // #51: record how EVERY attempt ended — success AND failure — so a store
   // with 0 memories can answer "why" instead of looking like "never ran".
   // Best-effort: a failing telemetry write must never mask the attempt's
@@ -2254,6 +2273,10 @@ export async function consolidate(params: ConsolidateParams): Promise<Consolidat
     // #213: keyed by the array THIS call got back, so concurrent boundaries
     // sharing one caller-supplied consolidator can't read each other's flag.
     const extractionTruncated = extractionTruncatedResults.has(extracted);
+    // #232: mirror immediately — everything from here to the `return` below
+    // (appendEvents, the projection rebuild, the cursor commit) can throw,
+    // and the value is already known by this point either way.
+    capturedExtractionTruncated = extractionTruncated;
 
     // Supersede only what the extractor was actually SHOWN — `bounded`, not the
     // full `existing` list. Budget-trimmed memories are valid but invisible to
@@ -2520,6 +2543,10 @@ export async function consolidate(params: ConsolidateParams): Promise<Consolidat
         conversationSliceHeld = true;
       }
     }
+    // #232: mirror immediately, same reasoning as `extractionTruncated` above
+    // — `commitBoundaryCursors` right below can still throw, and the value is
+    // already final by this point.
+    capturedConversationSliceHeld = conversationSliceHeld;
 
     // #139: commit both cursors atomically — see `commitBoundaryCursors`. A
     // crash (or thrown error) between the two writes can no longer leave one
@@ -2564,6 +2591,12 @@ export async function consolidate(params: ConsolidateParams): Promise<Consolidat
     const message = error instanceof Error ? error.message : String(error);
     recordAttempt(classifyConsolidateError(error, params.signal), {
       error: message.slice(0, ATTEMPT_ERROR_MAX_CHARS),
+      // #232: whatever `run()` had already computed before it threw — absent
+      // (not `false`) when the failure preceded the computation point, same
+      // "only record true" convention as the success path below so an old
+      // reader that has never heard of #232 still sees a valid row.
+      ...(capturedConversationSliceHeld ? { conversationSliceHeld: true } : {}),
+      ...(capturedExtractionTruncated ? { extractionTruncated: true } : {}),
     });
     throw error;
   }
