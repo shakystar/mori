@@ -252,4 +252,58 @@ describe("buildMemoryContext", () => {
 
     expect(embed).not.toHaveBeenCalled();
   });
+
+  it("mori#257: skips the remote embed when the only memory embedding belongs to an invalidated memory", async () => {
+    await seedMemory("mem_a", "chose zephyr as the deploy target", 9, NOW);
+    await rebuildProjectProjection(projectId, { reindexSearch: true });
+    seedEmbedding("mem_a", "memory", "fake-embed");
+
+    // Invalidate through the real write path (memory.retracted), not a direct
+    // UPDATE — `deleteEmbedding` has no caller in this repo, so the stale
+    // embedding row lingers exactly like it would in production; only
+    // `memories.invalid_at` (rebuilt from the event log) changes.
+    await appendEvent({
+      type: "memory.retracted",
+      projectId,
+      scopeType: "project",
+      scopeId: projectId,
+      actor: "test",
+      payload: { retracts: "mem_a", reason: "test" } as never,
+    });
+    await rebuildProjectProjection(projectId, { reindexSearch: true });
+
+    const embed = vi.fn(async (texts: string[]) => texts.map(() => [1, 0, 0]));
+    await buildMemoryContext(projectId, {
+      taskTitle: "zephyr deploy",
+      embedder: { embed, model: "fake-embed" },
+    });
+
+    expect(embed).not.toHaveBeenCalled();
+  });
+
+  it("mori#257: embeds when a live memory embedding exists alongside an invalidated one", async () => {
+    await seedMemory("mem_a", "chose zephyr as the deploy target", 9, NOW);
+    await seedMemory("mem_b", "picked kestrel for the message bus", 5, NOW);
+    await rebuildProjectProjection(projectId, { reindexSearch: true });
+    seedEmbedding("mem_a", "memory", "fake-embed");
+    seedEmbedding("mem_b", "memory", "fake-embed");
+
+    await appendEvent({
+      type: "memory.retracted",
+      projectId,
+      scopeType: "project",
+      scopeId: projectId,
+      actor: "test",
+      payload: { retracts: "mem_a", reason: "test" } as never,
+    });
+    await rebuildProjectProjection(projectId, { reindexSearch: true });
+
+    const embed = vi.fn(async (texts: string[]) => texts.map(() => [1, 0, 0]));
+    await buildMemoryContext(projectId, {
+      taskTitle: "zephyr deploy",
+      embedder: { embed, model: "fake-embed" },
+    });
+
+    expect(embed).toHaveBeenCalledTimes(1);
+  });
 });
