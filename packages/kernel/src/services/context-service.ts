@@ -1,6 +1,11 @@
 import type { StartupContextPayload } from "../domain/entities.js";
 import type { Embedder } from "../index.js";
-import { retrieveMemoryContext, retrieveSegments } from "./memory-retrieval-service.js";
+import { fitInjectionBudget } from "./injection-budget.js";
+import {
+  retrieveMemoryContext,
+  retrieveSegments,
+  type RetrievedSegment,
+} from "./memory-retrieval-service.js";
 import { semanticMemoryScores } from "./search-service.js";
 
 /**
@@ -91,7 +96,7 @@ export async function buildMemoryContext(
   // — no separate embed call — and, without one (no embedder, or the embed
   // above failed), leaves the embedder unset too so this channel degrades to
   // FTS instead of retrying the same embed that just failed.
-  let rawSegments: StartupContextPayload["rawSegments"] = [];
+  let rawSegments: RetrievedSegment[] = [];
   if (opts.taskTitle) {
     try {
       rawSegments = await retrieveSegments(projectId, {
@@ -103,28 +108,11 @@ export async function buildMemoryContext(
     }
   }
 
-  return {
-    ...(rawSegments && rawSegments.length > 0 ? { rawSegments } : {}),
-    ...(retrieved.memories.length > 0
-      ? {
-          consolidatedMemories: retrieved.memories.map(({ memory }) => ({
-            id: memory.id,
-            kind: memory.kind,
-            text: memory.text,
-            salience: memory.salience,
-            createdAt: memory.createdAt,
-          })),
-        }
-      : {}),
-    ...(retrieved.observations.length > 0
-      ? {
-          recentObservations: retrieved.observations.map((observation) => ({
-            signal: observation.signal,
-            ...(observation.toolName ? { toolName: observation.toolName } : {}),
-            ...(observation.summary ? { summary: observation.summary } : {}),
-            createdAt: observation.createdAt,
-          })),
-        }
-      : {}),
-  };
+  // #238 — the canonical injection ceiling, enforced ONCE, here, over the
+  // rendered block. The channel budgets applied above are retrieval-stage
+  // pre-trims on raw text; this is the judgement on what is actually sent, and
+  // assembling the payload is part of it (the trim drops entries, which changes
+  // which channels appear at all). Nothing downstream re-budgets — see
+  // `injection-budget.ts` for why the enforcement point is this one.
+  return fitInjectionBudget({ ranked: retrieved.ranked, segments: rawSegments });
 }

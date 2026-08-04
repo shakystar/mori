@@ -15,7 +15,15 @@
  *
  * Output is deterministic: no clock, no locale, no id ordering beyond what
  * retrieval already ranked. Nothing here re-ranks or re-budgets — the pool
- * arrives already trimmed (`memory-retrieval-service.ts`).
+ * arrives ranked (`memory-retrieval-service.ts`) and already fitted to the
+ * canonical injection ceiling (`injection-budget.ts`).
+ *
+ * That fitting is measured on THIS function's output, so the discipline runs
+ * both ways: this file must stay a pure function of its input, because the
+ * budget stage calls it to find out how large the block it is trimming
+ * actually is. Anything added to the framing here is charged to the budget
+ * automatically; anything that made the output depend on hidden state would
+ * make the measurement a lie.
  */
 
 import type { MemoryContext } from "./context-service.js";
