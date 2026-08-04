@@ -23,6 +23,7 @@ import {
   ExtractionParseError,
   MAX_EXTRACTION_INPUT_CHARS,
   MAX_MEMORIES_PER_BOUNDARY,
+  PER_ITEM_MAX_CHARS,
   RESERVED_OUTPUT_TOKENS,
   boundExtractionInput,
   buildExtractionUserContent,
@@ -219,6 +220,47 @@ describe("parseExtractedMemories", () => {
     expect(parseExtractedMemories(many, { maxItems: 25 })).toHaveLength(25);
   });
 
+  // #213 (PR #197 Codex P1, relayed): item COUNT alone doesn't bound output
+  // size — a single schema-valid, item-count-compliant item can still blow
+  // the per-item output budget on `text` length. Truncated (policy i), not
+  // dropped, and reported via `onTruncate` instead of silently.
+  it("truncates (not drops) an item whose rendered size exceeds PER_ITEM_MAX_CHARS, even though item count is within the boundary cap", () => {
+    const longText = "x".repeat(PER_ITEM_MAX_CHARS + 100);
+    let truncatedCount = 0;
+    const items = parseExtractedMemories(
+      JSON.stringify([{ kind: "decision", text: longText, salience: 5 }]),
+      {
+        maxItemChars: PER_ITEM_MAX_CHARS,
+        onTruncate: () => {
+          truncatedCount += 1;
+        },
+      },
+    );
+    expect(items).toHaveLength(1);
+    expect(items[0]!.text.length).toBeLessThan(longText.length);
+    expect(JSON.stringify(items[0]).length).toBeLessThanOrEqual(PER_ITEM_MAX_CHARS);
+    expect(truncatedCount).toBe(1);
+  });
+
+  // #213 (PR #231 review 1, Codex P1): the size cap protects the LLM OUTPUT
+  // reservation, so it belongs to the caller that spends it and to no one
+  // else. `memory-import` (#69/#95) parses agent-distilled items with no
+  // generation call behind them — it must come out the other side untouched,
+  // not silently shortened to a boundary-reply's per-item share. The
+  // "unchanged under the cap" test above cannot see this axis: it only covers
+  // items that were already small enough.
+  it("leaves oversized items intact when no maxItemChars is stated, as on the memory-import path", () => {
+    const longText = "x".repeat(PER_ITEM_MAX_CHARS + 100);
+    let truncateCalls = 0;
+    const items = parseExtractedMemories(
+      JSON.stringify([{ kind: "decision", text: longText, salience: 5 }]),
+      { maxItems: Number.POSITIVE_INFINITY, onTruncate: () => (truncateCalls += 1) },
+    );
+    expect(items).toHaveLength(1);
+    expect(items[0]!.text).toBe(longText);
+    expect(truncateCalls).toBe(0);
+  });
+
   it("sanitizes #57 evidence fields instead of failing the entry", () => {
     const [item] = parseExtractedMemories(
       JSON.stringify([
@@ -257,6 +299,45 @@ describe("EXTRACTION_SYSTEM_PROMPT — count cap stated at generation time (#169
     // the number some other way) — bumping MAX_MEMORIES_PER_BOUNDARY changes
     // this rendered prompt, which is the point: the two can never drift apart.
     expect(occurrences).toBeGreaterThan(0);
+  });
+});
+
+// #213 (PR #197 Codex P1, relayed): the count cap alone doesn't bound output
+// SIZE — the prompt must also state a per-item character cap and a
+// whole-reply character cap, both interpolated from the same derived
+// constants `parseExtractedMemories` enforces post-hoc, so the instruction
+// and the enforcement can never drift apart (same convention as
+// MAX_MEMORIES_PER_BOUNDARY above).
+describe("EXTRACTION_SYSTEM_PROMPT — output size cap stated at generation time (#213)", () => {
+  it("states PER_ITEM_MAX_CHARS and EXPECTED_MAX_OUTPUT_CHARS, not hardcoded numbers", () => {
+    const perItemOccurrences =
+      EXTRACTION_SYSTEM_PROMPT.split(String(PER_ITEM_MAX_CHARS)).length - 1;
+    const totalOccurrences =
+      EXTRACTION_SYSTEM_PROMPT.split(String(EXPECTED_MAX_OUTPUT_CHARS)).length - 1;
+    // Bumping either constant changes this rendered prompt — the numbers can
+    // never silently fall out of step with what the parser actually enforces.
+    expect(perItemOccurrences).toBeGreaterThan(0);
+    expect(totalOccurrences).toBeGreaterThan(0);
+  });
+});
+
+// #213: pins the arithmetic invariant PER_ITEM_MAX_CHARS relies on — an
+// honest reply that fills every one of MAX_MEMORIES_PER_BOUNDARY slots up to
+// the stated per-item cap must not, by construction, exceed the whole-reply
+// cap the kernel actually reserved output tokens for.
+describe("PER_ITEM_MAX_CHARS — derived per-item budget never overruns the whole-reply budget (#213)", () => {
+  it("MAX_MEMORIES_PER_BOUNDARY * PER_ITEM_MAX_CHARS stays within EXPECTED_MAX_OUTPUT_CHARS", () => {
+    expect(MAX_MEMORIES_PER_BOUNDARY * PER_ITEM_MAX_CHARS).toBeLessThanOrEqual(
+      EXPECTED_MAX_OUTPUT_CHARS,
+    );
+    // The sum of the items is not the reply: `[`, `]` and the commas between
+    // items are chars the model has to emit too. Asserted on a REAL rendered
+    // array so the derivation has to account for them rather than land the
+    // arithmetic just inside the budget and the actual reply just outside it.
+    const fullReply = JSON.stringify(
+      Array.from({ length: MAX_MEMORIES_PER_BOUNDARY }, () => "x".repeat(PER_ITEM_MAX_CHARS - 2)),
+    );
+    expect(fullReply.length).toBeLessThanOrEqual(EXPECTED_MAX_OUTPUT_CHARS);
   });
 });
 

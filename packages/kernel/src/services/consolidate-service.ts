@@ -1,4 +1,4 @@
-import { createId, nowIso } from "../domain/common.js";
+import { createId, MAX_ID_LENGTH, nowIso } from "../domain/common.js";
 import {
   clampSalience,
   createConsolidatedMemory,
@@ -224,6 +224,79 @@ export class RuleBasedConsolidator implements Consolidator {
 // --- LLM extractor ------------------------------------------------------------
 
 /**
+ * Upper end of the output size `MAX_MEMORIES_PER_BOUNDARY` (12) short
+ * one-sentence items renders to (see `MAX_EXTRACTION_INPUT_CHARS`'s doc:
+ * "roughly 2,000-2,500 output chars"). {@link RESERVED_OUTPUT_TOKENS} below
+ * is derived from this value instead of stating a separate token number by
+ * hand — PR #197 review (#169) found the two had drifted: the old
+ * hand-picked `1_300` was actually `2_500 * CONSERVATIVE_CHARS_PER_TOKEN`
+ * (roughly a third of 2,500 chars), the OPPOSITE of what its own doc
+ * comment claimed ("divided by `CONSERVATIVE_CHARS_PER_TOKEN`", i.e.
+ * `estimateTokens(2500)` = 7,500). A cap that small lets a legitimately
+ * full 12-item CJK-heavy reply still hit `stopReason: "length"` — exactly
+ * the failure #169 exists to prevent, just relocated from the input axis to
+ * the output axis.
+ *
+ * Declared here (moved up from its original spot near `RESERVED_OUTPUT_TOKENS`)
+ * so {@link PER_ITEM_MAX_CHARS} and `EXTRACTION_SYSTEM_PROMPT` below can both
+ * read it — the reservation math further down and the prompt text now derive
+ * from the exact same module-scope constant instead of two copies that could
+ * drift.
+ */
+export const EXPECTED_MAX_OUTPUT_CHARS = 2_500;
+
+/**
+ * #213 (PR #197 Codex P1, relayed) — `EXPECTED_MAX_OUTPUT_CHARS` bounds the
+ * FULL rendered reply, but until now nothing told the model (or enforced
+ * post-hoc) a PER-ITEM share of it — a schema-valid, item-count-compliant
+ * reply could still blow the output budget one long `text` at a time.
+ *
+ * PER-ITEM key/quote/comma overhead is NOT subtracted here — it is enforced
+ * instead: `parseExtractedMemories` measures each item's actual RENDERED JSON
+ * length (`JSON.stringify(item).length`, so `supersedeReason` and friends are
+ * counted too) against this constant rather than `text.length`. Guessing a
+ * fixed per-item margin would be strictly worse — the overhead varies with
+ * which optional fields an item carries, so a guess is wrong in both
+ * directions at once.
+ *
+ * The ARRAY scaffolding, unlike the per-item kind, is exactly known ahead of
+ * time — `[`, `]`, and one comma between each pair of items — so it IS
+ * subtracted, and that is what makes the whole-reply invariant true of the
+ * rendered array and not merely of the sum of its items. Interpolated into
+ * `EXTRACTION_SYSTEM_PROMPT` below and into `parseExtractedMemories`'s
+ * enforcement — never a literal in either place, for the same reason
+ * `MAX_MEMORIES_PER_BOUNDARY` isn't (#169).
+ */
+const EXTRACTION_ARRAY_SCAFFOLD_CHARS = "[]".length + (MAX_MEMORIES_PER_BOUNDARY - 1);
+
+export const PER_ITEM_MAX_CHARS = Math.floor(
+  (EXPECTED_MAX_OUTPUT_CHARS - EXTRACTION_ARRAY_SCAFFOLD_CHARS) / MAX_MEMORIES_PER_BOUNDARY,
+);
+
+/**
+ * #213 — floor on how far {@link truncateToItemBudget} may shorten `text`.
+ * Without it, an item whose NON-`text` fields alone overrun the budget (an
+ * unbounded `supersedeReason` next to a long `supersedesMemoryId` does it) has
+ * its `text` sliced to `""` — and `parseExtractedMemories` rejects blank
+ * `text` twenty lines earlier precisely because a memory with no content is
+ * worse than no memory. Half the per-item budget, derived rather than picked:
+ * the payload field is guaranteed the larger share of its own slot, and the
+ * passengers cannot squeeze it out entirely.
+ *
+ * Derived from the budget in force for THIS call rather than from
+ * `PER_ITEM_MAX_CHARS` directly — the budget is a parameter now (PR #231
+ * review 1), and a floor pinned to the extraction constant would silently
+ * outgrow a smaller caller-supplied cap.
+ *
+ * Never below 1. Half of a caller-supplied budget small enough to floor to 0
+ * would hand back the empty `text` this floor exists to prevent — the same
+ * defect, re-entered through the parameter instead of the constant.
+ */
+function minTruncatedTextChars(maxItemChars: number): number {
+  return Math.max(1, Math.floor(maxItemChars / 2));
+}
+
+/**
  * #169 — `MAX_MEMORIES_PER_BOUNDARY` is enforced today only AFTER the full
  * reply arrives (`parseExtractedMemories`'s post-hoc `slice(0, N)`, array
  * order in ⇒ array order out). Telling the model the cap up front does two
@@ -235,6 +308,35 @@ export class RuleBasedConsolidator implements Consolidator {
  * array-position cutoff (which cannot). The count is interpolated from
  * `MAX_MEMORIES_PER_BOUNDARY`, never written as a literal, so the two can
  * never drift apart.
+ *
+ * #213 (PR #197 Codex P1, relayed, owner-clarified 2026-08-03) — the same
+ * gap existed on the SIZE axis: the count cap says nothing about how long an
+ * item's `text` (or the whole reply) may be, so an honest model that writes
+ * full sentences per item can still exceed `EXPECTED_MAX_OUTPUT_CHARS` and
+ * hit `stopReason: "length"` — the exact failure #169 exists to prevent,
+ * just moved from "too many items" to "items too long". Owner adjudication:
+ * this does NOT need to scale with the per-window output clamp
+ * (`reservedOutputTokensFor`, #169/PR #197) the way the item COUNT might
+ * have seemed to — a narrow context window shrinks the INPUT budget by the
+ * same proportion (`extractionCharBudget`), so a window too narrow for 12
+ * durable items rarely has 12 durable items' worth of source material in it
+ * to begin with. The size cap stated here is intentionally the static
+ * worst-case ceiling (`EXPECTED_MAX_OUTPUT_CHARS`/`PER_ITEM_MAX_CHARS`), not
+ * a per-call value threaded through the prompt — the residual risk that
+ * survives is JSON-scaffolding overhead (fields like `supersedeReason`
+ * riding along with `text`), which `parseExtractedMemories` now enforces
+ * post-hoc regardless of window size.
+ *
+ * #212 constrains how much text may be added here, and the margin is thin.
+ * `SYSTEM_PROMPT_CHARS_PER_TOKEN = 1` makes this string's LENGTH its
+ * worst-case token count, and `extractionCharBudget` subtracts that off the
+ * top of the declared window before anything else — so at the narrowest
+ * window the repo tests (2,400 tokens) the prompt itself must stay under
+ * 2,400 CHARS or the input budget floors to 0 and the whole-window invariant
+ * fails. It sits around 2.4k today: roughly 80 chars of headroom, which is
+ * why #213's size instruction is one terse line rather than the paragraph the
+ * rest of this prompt would suggest. Adding to this prompt means checking
+ * that invariant, not just reading well.
  */
 export const EXTRACTION_SYSTEM_PROMPT = [
   "You are the memory kernel's consolidation extractor.",
@@ -257,6 +359,10 @@ export const EXTRACTION_SYSTEM_PROMPT = [
   `${MAX_MEMORIES_PER_BOUNDARY} candidates are durable, choose the`,
   `${MAX_MEMORIES_PER_BOUNDARY} most durable ones yourself and list them most`,
   "durable first, since only the first ones you list will be kept.",
+  // Deliberately ONE terse line: see this constant's doc for the char budget
+  // #212's narrowest declared window leaves the prompt. "item JSON" (not
+  // "text") is the wording that matches what `parseExtractedMemories` measures.
+  `Keep item JSON under ${PER_ITEM_MAX_CHARS} chars, the whole reply under ${EXPECTED_MAX_OUTPUT_CHARS}. Over is cut.`,
   "Kind: decision = commitment, rule, directive, chosen policy, or preference;",
   "rationale = why a choice was made, tradeoff, root cause, or rejected",
   "alternative; progress = completed work, current state, blocker, handoff,",
@@ -305,22 +411,6 @@ export const CONSERVATIVE_CHARS_PER_TOKEN = 1 / 3;
 export function estimateTokens(chars: number): number {
   return Math.ceil(chars / CONSERVATIVE_CHARS_PER_TOKEN);
 }
-
-/**
- * Upper end of the output size `MAX_MEMORIES_PER_BOUNDARY` (12) short
- * one-sentence items renders to (see `MAX_EXTRACTION_INPUT_CHARS`'s doc:
- * "roughly 2,000-2,500 output chars"). {@link RESERVED_OUTPUT_TOKENS} is
- * derived from this value below instead of stating a separate token number
- * by hand — PR #197 review (#169) found the two had drifted: the old
- * hand-picked `1_300` was actually `2_500 * CONSERVATIVE_CHARS_PER_TOKEN`
- * (roughly a third of 2,500 chars), the OPPOSITE of what its own doc
- * comment claimed ("divided by `CONSERVATIVE_CHARS_PER_TOKEN`", i.e.
- * `estimateTokens(2500)` = 7,500). A cap that small lets a legitimately
- * full 12-item CJK-heavy reply still hit `stopReason: "length"` — exactly
- * the failure #169 exists to prevent, just relocated from the input axis to
- * the output axis.
- */
-export const EXPECTED_MAX_OUTPUT_CHARS = 2_500;
 
 /**
  * #174 (PR #168 follow-up) — chars-per-token used ONLY to translate the fixed
@@ -861,6 +951,24 @@ function prefixClippedTo(tail: string, n: number): string {
  * injects. That is the whole point of #11: the kernel has no network and no
  * configuration access.
  */
+/**
+ * #213 — extractions that truncated ≥1 item to fit {@link PER_ITEM_MAX_CHARS}.
+ *
+ * `Consolidator.extract`'s return type is fixed at `Promise<ExtractedMemory[]>`
+ * (the interface every extractor — rule-based, LLM, custom — implements), so
+ * the fact can't ride back on the return VALUE. It rides on the return value's
+ * IDENTITY instead: `parseExtractedMemories` allocates a fresh array per call,
+ * so the array `consolidate()` is holding names exactly one extraction.
+ *
+ * An instance field on `LlmConsolidator` would have been simpler and wrong —
+ * `consolidate()` accepts a caller-supplied `params.consolidator`, so one
+ * instance can serve two boundaries at once, and their write-then-read pairs
+ * would interleave and swap flags. Keying on the per-call array removes the
+ * shared cell entirely rather than documenting a rule callers can't see.
+ * Weakly held, so an entry dies with the array it describes.
+ */
+const extractionTruncatedResults = new WeakSet<ExtractedMemory[]>();
+
 export class LlmConsolidator implements Consolidator {
   constructor(private readonly llm: ConsolidatorLlm) {}
 
@@ -869,7 +977,18 @@ export class LlmConsolidator implements Consolidator {
     opts?: ConsolidatorLlmCallOptions,
   ): Promise<ExtractedMemory[]> {
     const prompt = `${EXTRACTION_SYSTEM_PROMPT}\n\n${buildExtractionUserContent(input)}`;
-    return parseExtractedMemories(await this.llm.complete(prompt, opts));
+    let truncated = false;
+    const items = parseExtractedMemories(await this.llm.complete(prompt, opts), {
+      // The one caller that spends the output reservation `PER_ITEM_MAX_CHARS`
+      // is derived from, so the one caller that asks for the size cap (#213,
+      // PR #231 review 1).
+      maxItemChars: PER_ITEM_MAX_CHARS,
+      onTruncate: () => {
+        truncated = true;
+      },
+    });
+    if (truncated) extractionTruncatedResults.add(items);
+    return items;
   }
 }
 
@@ -927,6 +1046,87 @@ function sanitizeEvidenceTags(value: unknown): string[] | undefined {
   return tags.length > 0 ? tags : undefined;
 }
 
+function isHighSurrogate(code: number): boolean {
+  return code >= 0xd800 && code <= 0xdbff;
+}
+
+function isLowSurrogate(code: number): boolean {
+  return code >= 0xdc00 && code <= 0xdfff;
+}
+
+/**
+ * #213 (PR #197 Codex P1, relayed) — enforces {@link PER_ITEM_MAX_CHARS} on
+ * the RENDERED item (`JSON.stringify`), not just its raw `text`. `text` is
+ * usually the dominant contributor but it is not the only one: the evidence
+ * fields ride along on every item, and even capped individually at
+ * `MAX_EVIDENCE_CHARS` they add up — exactly the
+ * "kind/text/evidence/supersedeReason" scaffolding overhead the owner named
+ * as the residual risk once the prompt already asks for both an item cap and
+ * a whole-reply cap. Measuring the full rendered item (not just `text`)
+ * catches overflow regardless of which field caused it.
+ *
+ * Policy (i) from the issue: truncate, don't drop — a shortened memory beats
+ * losing the item outright, and mid-sentence truncation is accepted (this
+ * file already truncates transcript input the same blunt way — see
+ * `clippedTo`/`prefixClippedTo` — so this is consistent with how the module
+ * elsewhere trades a clean sentence boundary for a simple, predictable cut).
+ * `text` is the field shortened even when another field caused the overflow,
+ * because it is the one field guaranteed to be present and the one the
+ * prompt itself instructs the model to keep short. It is never shortened past
+ * {@link minTruncatedTextChars} though: an item can be left over budget, but it
+ * is never left with the empty `text` that this very function's parse step
+ * rejects outright. That leftover is REPORTED (`onTruncate` fires on overflow
+ * regardless of whether the floor bound the cut) and it is BOUNDED: every
+ * field an item can carry is now capped — the free-text ones at
+ * `MAX_EVIDENCE_CHARS` (`supersedeReason` included, as of #213) and
+ * `supersedesMemoryId` at `MAX_ID_LENGTH`. A floor justified by a bounded
+ * residual would not be justified at all if that residual were unbounded
+ * (PR #231 review 2).
+ *
+ * Cutting mid-sentence is accepted rather than backing up to a word or
+ * sentence boundary — `clippedTo`/`prefixClippedTo` above already cut the
+ * transcript the same blunt way, and one predictable rule per module beats a
+ * cleverer cut here that reads as an inconsistency there.
+ *
+ * Silent would repeat the exact bug this issue closes at one remove — a
+ * kept-but-mangled memory with no trace of why — so the caller learns via
+ * `onTruncate`, surfaced by `LlmConsolidator`/`consolidate()` on the existing
+ * `ConsolidateResult.extractionTruncated` / `ConsolidateAttempt` telemetry
+ * (#51) rather than a new reporting channel.
+ *
+ * `maxItemChars` is the budget in force, passed in rather than read from
+ * `PER_ITEM_MAX_CHARS` — see `parseExtractedMemories`'s `maxItemChars` doc for
+ * why this cap belongs only to the LLM-extraction caller.
+ */
+function truncateToItemBudget(
+  item: ExtractedMemory,
+  maxItemChars: number,
+  onTruncate?: () => void,
+): ExtractedMemory {
+  const overflow = JSON.stringify(item).length - maxItemChars;
+  if (overflow <= 0) return item;
+  onTruncate?.();
+  // Each dropped `text` char frees AT LEAST one rendered char (escapes render
+  // wider, never narrower), so one pass suffices — no re-measure loop.
+  let keptChars = Math.max(minTruncatedTextChars(maxItemChars), item.text.length - overflow);
+  if (keptChars >= item.text.length) return item;
+  // PR #231 review 3 — the "never narrower" premise above is false at exactly
+  // one cut point: between the UTF-16 halves of a supplementary character.
+  // The lone high surrogate left behind renders as a SIX-char `\udXXX` escape,
+  // so dropping that unit GROWS the item instead of shrinking it, and stores
+  // U+FFFD where the user's character was. Move the cut off the pair: back one
+  // unit normally, FORWARD one when backing up would empty `text` (the floor
+  // already left that item over budget, so keeping the pair whole costs one
+  // char and avoids the blank `text` the parse step above rejects outright).
+  if (
+    isHighSurrogate(item.text.charCodeAt(keptChars - 1)) &&
+    isLowSurrogate(item.text.charCodeAt(keptChars))
+  ) {
+    keptChars = keptChars > 1 ? keptChars - 1 : keptChars + 1;
+  }
+  return { ...item, text: item.text.slice(0, keptChars) };
+}
+
 /**
  * Defensive parse of the model's reply: locate the first JSON array, drop
  * malformed entries, clamp salience, cap count. A reply with NO parseable
@@ -937,12 +1137,28 @@ function sanitizeEvidenceTags(value: unknown): string[] | undefined {
  * `maxItems` defaults to the boundary noise guard; the memory-import path
  * (#64's remaining slice) raises it — an agent distilling weeks of docs
  * legitimately yields more than one boundary's worth.
+ *
+ * `maxItemChars` (#213) caps each item's RENDERED JSON size — see
+ * {@link truncateToItemBudget}. Unlike `maxItems` it has NO default: it exists
+ * to keep an LLM reply inside the output tokens the kernel reserved for it
+ * (`EXPECTED_MAX_OUTPUT_CHARS`), and only `LlmConsolidator.extract` spends that
+ * reservation. The memory-import path (#69/#95) parses items an agent distilled
+ * from documents — no generation call, no reservation, no reason for a
+ * ~200-char ceiling on weeks of context — so it passes nothing and this stage
+ * is skipped outright (PR #231 review 1; Codex P1 caught it truncating imports
+ * silently, with no `onTruncate` to even record the loss). Same shape as
+ * `maxItems`: the cap a caller wants is the cap a caller states.
+ *
+ * `onTruncate` (#213) fires once per item that `maxItemChars` shortened — see
+ * {@link truncateToItemBudget}. Optional and side-effect-only so existing
+ * callers (and their tests) that don't pass it see byte-identical behavior.
  */
 export function parseExtractedMemories(
   content: string,
-  opts: { maxItems?: number } = {},
+  opts: { maxItems?: number; maxItemChars?: number; onTruncate?: () => void } = {},
 ): ExtractedMemory[] {
   const maxItems = opts.maxItems ?? MAX_MEMORIES_PER_BOUNDARY;
+  const maxItemChars = opts.maxItemChars;
   const start = content.indexOf("[");
   const end = content.lastIndexOf("]");
   if (start === -1 || end <= start) {
@@ -959,7 +1175,11 @@ export function parseExtractedMemories(
   }
 
   const kinds: ConsolidatedMemoryKind[] = ["decision", "rationale", "progress"];
-  return parsed
+  // #213: the size cap runs AFTER the count cap (`slice`), never before — an
+  // item the count cap is about to discard has no reason to pay for, or
+  // report, truncation. Same cap-order invariant the rest of this file keeps:
+  // a size limit must not run ahead of the boundary that decides what is kept.
+  const parsedItems = parsed
     .filter(
       (item): item is Record<string, unknown> =>
         item !== null && typeof item === "object" && !Array.isArray(item),
@@ -978,18 +1198,37 @@ export function parseExtractedMemories(
       // stray reason on a non-misfit item would skew it.
       const kindMisfitReason = kindMisfit ? sanitizeEvidenceText(item.kindMisfitReason) : undefined;
       const supersedesNote = sanitizeEvidenceText(item.supersedesNote);
+      // #213: the one free-text field that was passed through uncapped, which
+      // is why the owner named it as the residual risk — an item can overrun
+      // its whole budget on `supersedeReason` alone. Capped here like its
+      // three sibling evidence fields rather than special-cased downstream.
+      const supersedeReason = sanitizeEvidenceText(item.supersedeReason);
       const tags = sanitizeEvidenceTags(item.tags);
+      // #213 (PR #231 review 2): the last unbounded field on the item, and the
+      // one that made `truncateToItemBudget`'s "left over budget but bounded"
+      // doc a false claim — a hallucinated 5,000-char id stores an item
+      // thousands of chars past the cap and the whole-reply invariant with it.
+      // DROPPED rather than sliced, unlike the free-text siblings: a truncated
+      // id is not a shorter id, it is a DIFFERENT id, and a prefix that happens
+      // to name another memory would supersede the wrong one. Nothing is lost
+      // by dropping — an over-length string cannot name a real memory, so
+      // resolution downstream (`memory-import-service`, `run()`) misses either
+      // way; this just bounds what gets stored on the way past.
+      const supersedesMemoryId =
+        typeof item.supersedesMemoryId === "string" &&
+        item.supersedesMemoryId.length <= MAX_ID_LENGTH
+          ? item.supersedesMemoryId
+          : undefined;
 
       return {
         kind: kind as ConsolidatedMemoryKind,
         text: text.trim(),
         salience: clampSalience(typeof item.salience === "number" ? item.salience : 5),
-        ...(typeof item.supersedesMemoryId === "string"
-          ? { supersedesMemoryId: item.supersedesMemoryId }
-          : {}),
-        ...(typeof item.supersedeReason === "string"
-          ? { supersedeReason: item.supersedeReason }
-          : {}),
+        // `!== undefined`, not truthiness: an empty-string id was passed
+        // through before this cap existed and still is — only the length
+        // behavior changes here.
+        ...(supersedesMemoryId !== undefined ? { supersedesMemoryId } : {}),
+        ...(supersedeReason ? { supersedeReason } : {}),
         ...(obsoleteWhen ? { obsoleteWhen } : {}),
         ...(kindMisfit ? { kindMisfit: true } : {}),
         ...(kindMisfitReason ? { kindMisfitReason } : {}),
@@ -999,6 +1238,8 @@ export function parseExtractedMemories(
     })
     .filter((item): item is ExtractedMemory => item !== undefined)
     .slice(0, maxItems);
+  if (maxItemChars === undefined) return parsedItems;
+  return parsedItems.map((item) => truncateToItemBudget(item, maxItemChars, opts.onTruncate));
 }
 
 // --- watermark ----------------------------------------------------------------
@@ -1280,6 +1521,11 @@ export interface ConsolidateAttempt {
    *  `ConsolidateResult.conversationSliceHeld`. Absent means "did not happen",
    *  so an old row without the field reads correctly. */
   conversationSliceHeld?: boolean;
+  /** #213: set only when this boundary's extractor truncated ≥1 item to fit
+   *  `PER_ITEM_MAX_CHARS` — see `ConsolidateResult.extractionTruncated`.
+   *  Absent means "did not happen", so an old row without the field reads
+   *  correctly. */
+  extractionTruncated?: boolean;
   /** Truncated failure message (failures only). */
   error?: string;
 }
@@ -1673,6 +1919,16 @@ export interface ConsolidateResult {
    * is pinned, so it stays on the result and on the attempt telemetry.
    */
   conversationSliceHeld: boolean;
+  /**
+   * #213 — true when `parseExtractedMemories` truncated ≥1 extracted item to
+   * fit `PER_ITEM_MAX_CHARS` (a schema-valid, item-count-compliant reply that
+   * still overran the per-item output budget). `rule-based` never reports it —
+   * only `LlmConsolidator` runs `parseExtractedMemories` — but the field stays
+   * on every outcome, same as `conversationSliceHeld`, so a store that always
+   * looks fine can be told apart from one quietly losing the tail of its
+   * memories.
+   */
+  extractionTruncated: boolean;
 }
 
 export interface ConsolidateParams {
@@ -1901,6 +2157,7 @@ export async function consolidate(params: ConsolidateParams): Promise<Consolidat
         outcome: "noop",
         segmentsWritten: 0,
         conversationSliceHeld: false,
+        extractionTruncated: false,
       };
     }
 
@@ -1993,6 +2250,10 @@ export async function consolidate(params: ConsolidateParams): Promise<Consolidat
       throwIfDispossessed(params.lockSignal);
       throw error;
     }
+
+    // #213: keyed by the array THIS call got back, so concurrent boundaries
+    // sharing one caller-supplied consolidator can't read each other's flag.
+    const extractionTruncated = extractionTruncatedResults.has(extracted);
 
     // Supersede only what the extractor was actually SHOWN — `bounded`, not the
     // full `existing` list. Budget-trimmed memories are valid but invisible to
@@ -2292,6 +2553,7 @@ export async function consolidate(params: ConsolidateParams): Promise<Consolidat
       outcome: observations.length > 0 || transcriptTail !== undefined ? "ok" : "noop",
       segmentsWritten,
       conversationSliceHeld,
+      extractionTruncated,
     };
   };
 
@@ -2314,6 +2576,9 @@ export async function consolidate(params: ConsolidateParams): Promise<Consolidat
     // #113: recorded on any outcome — a held slice is exactly the state an
     // operator needs to see, and it can coexist with a memory-0 boundary.
     ...(result.conversationSliceHeld ? { conversationSliceHeld: true } : {}),
+    // #213: same reasoning — truncation and a healthy-looking memory count
+    // can coexist, so it is recorded independent of outcome/consolidated.
+    ...(result.extractionTruncated ? { extractionTruncated: true } : {}),
   });
   return result;
 }
