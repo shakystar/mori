@@ -479,7 +479,11 @@ export interface CreateMoriKernelOptions {
  * rejection, an unusable or vanished winner) keeps `id`, matching what was
  * already on disk or already decided before this call.
  */
-function persistProjectIdentity(root: string, id: string, warn?: (message: string) => void): string {
+function persistProjectIdentity(
+  root: string,
+  id: string,
+  warn?: (message: string) => void,
+): string {
   const guard = resolveWithinRoot(root, path.join(IDENTITY_DIR_NAME, IDENTITY_FILE_NAME));
   if (!guard.ok) {
     warn?.(`mori: .mori/project.json 기록을 건너뜁니다 — ${guard.reason}\n`);
