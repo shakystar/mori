@@ -6,7 +6,12 @@ import {
 import type { ConsolidatorLlm, Embedder } from "../index.js";
 import { reduceProjectState, SELF_LANE } from "../projections/projector.js";
 import type { MemoryRecord } from "../projections/projector.js";
-import { appendEvents, readEvents, type AppendEventInput } from "../storage/event-store.js";
+import {
+  appendEvents,
+  isStaleHeadError,
+  readEvents,
+  type AppendEventInput,
+} from "../storage/event-store.js";
 import {
   ExtractionParseError,
   parseExtractedMemories,
@@ -202,16 +207,26 @@ function textKey(kind: string, text: string): string {
  * (`invalidAt` unset) and self-lane (a foreign writer's memory is not local
  * truth, SoT-040 — it must not silence a local import either).
  */
-async function readValidMemoriesFromLog(projectId: string): Promise<MemoryRecord[]> {
-  const state = reduceProjectState(await readEvents(projectId), projectId);
+async function readValidMemoriesFromLog(
+  projectId: string,
+): Promise<{ memories: MemoryRecord[]; head: string | null }> {
+  const events = await readEvents(projectId);
+  const state = reduceProjectState(events, projectId);
   if (!state.project) {
     // Same refusal the rebuild this replaced raised, kept so importing into a
     // project with no genesis event still fails BEFORE anything is appended.
     throw new Error(`Project ${projectId} has no project.created event`);
   }
-  return Object.values(state.memories).filter(
-    (memory) => !memory.invalidAt && (memory.sourceProjectId ?? SELF_LANE) === SELF_LANE,
-  );
+  return {
+    memories: Object.values(state.memories).filter(
+      (memory) => !memory.invalidAt && (memory.sourceProjectId ?? SELF_LANE) === SELF_LANE,
+    ),
+    // #253: the head OF THIS VERY READ, not a separate `readHeadEventId` call.
+    // The dedup snapshot and the head it is certified by then come from one
+    // array, so there is no ordering window between them at all — the two
+    // cannot disagree about which appends they saw.
+    head: events.at(-1)?.id ?? null,
+  };
 }
 
 export async function importMemories(params: ImportMemoriesParams): Promise<MemoryImportResult> {
@@ -221,8 +236,48 @@ export async function importMemories(params: ImportMemoriesParams): Promise<Memo
   }
 
   // Whole body serialized per-project — see withProjectImportLock + module doc.
-  return withProjectImportLock(params.projectId, () => runImport(params, source));
+  return withProjectImportLock(params.projectId, async () => {
+    // #253: `runImport` writes NOTHING before its `appendEvents` — it parses,
+    // reads the dedup snapshot from the log, and builds the batch in memory —
+    // so a compare-and-append refusal leaves the store byte-for-byte as it was
+    // found and re-running the whole body is a clean retry, not a partial
+    // redo. Retry (rather than propagate) is the right recovery HERE and not
+    // at the other two adopted spans because import pays no LLM round trip to
+    // rebuild its basis: the cost of losing the race is one more log replay.
+    //
+    // Bounded, not a `while (true)`: the head advancing forever means a writer
+    // is appending faster than this call can replay the log, and silently
+    // spinning on that would turn a contended store into a hang. Past the
+    // budget the refusal propagates like any other failure, and the caller
+    // (an agent invoking `memorize memory import`) can decide to try again.
+    for (let attempt = 0; ; attempt += 1) {
+      // "Nothing was written yet" is what makes the retry safe, so it is
+      // OBSERVED rather than assumed. `runImport` also runs a post-append tail
+      // (rebuild, embeddings, contradiction detection) and a stale-head
+      // refusal surfacing from THERE would mean re-running an import whose
+      // events are already durable — the dedup guard would fold them all and
+      // report a batch of skipped duplicates, quietly turning a real failure
+      // into a wrong-looking success. Retrying only before the append keeps
+      // that impossible no matter what the tail grows into later.
+      let appended = false;
+      try {
+        return await runImport(params, source, () => {
+          appended = true;
+        });
+      } catch (error) {
+        if (appended || attempt >= IMPORT_STALE_HEAD_RETRIES || !isStaleHeadError(error)) {
+          throw error;
+        }
+      }
+    }
+  });
 }
+
+/** Extra attempts `importMemories` spends re-deriving its dedup snapshot after
+ *  losing a compare-and-append race (#253). Two, because each retry costs one
+ *  log replay and a store contended enough to lose three in a row has a
+ *  problem a fourth replay will not solve. */
+const IMPORT_STALE_HEAD_RETRIES = 2;
 
 /** A folded duplicate's supersede hint, resolved to a concrete author + target. */
 interface FoldedSupersedeCandidate {
@@ -542,6 +597,9 @@ function resolveFoldedHints(
 async function runImport(
   params: ImportMemoriesParams,
   source: string,
+  /** Called the instant this call's batch is durable, so `importMemories` can
+   *  tell a pre-append failure (safely retryable) from a post-append one. */
+  onAppended: () => void,
 ): Promise<MemoryImportResult> {
   // Same defensive parser as the consolidation extractors: locates the JSON
   // array, drops malformed entries, sanitizes lifecycle-evidence fields.
@@ -566,7 +624,9 @@ async function runImport(
   // events but died before its own rebuild (a projection read would not know
   // about those memories and would re-import them) WITHOUT rewriting the
   // shared projection to get there — see readValidMemoriesFromLog.
-  const existingMemories = await readValidMemoriesFromLog(params.projectId);
+  const { memories: existingMemories, head: expectedHead } = await readValidMemoriesFromLog(
+    params.projectId,
+  );
   // Idempotency guard: imported memories have EMPTY sourceObservationIds,
   // which the projection dedup never groups — a re-run would silently
   // duplicate. Skip items whose kind+normalized text already exists as a
@@ -740,7 +800,15 @@ async function runImport(
   const droppedSupersedesByCap = foldedResolution.droppedByCap;
 
   if (inputs.length > 0) {
-    await appendEvents(params.projectId, inputs);
+    // #253: compare-and-append against the head the dedup snapshot above was
+    // read at. Import has NO cross-process lock (see module doc), so this is
+    // the only thing standing between a concurrent writer and a duplicate
+    // import: the guard's whole premise is that `existingMemories` still
+    // describes the log. A refusal is recovered by the retry in
+    // `importMemories` — nothing durable has been written at this point, so
+    // re-deriving the snapshot is both safe and free of any LLM cost.
+    await appendEvents(params.projectId, inputs, { expectedHead });
+    onAppended();
     // Same post-append duties as a consolidation boundary: make the new
     // memories searchable, embed them (best-effort), and let imported
     // decisions face contradiction detection against existing ones.

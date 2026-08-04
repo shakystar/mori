@@ -22,6 +22,7 @@ import {
   appendEvents,
   readEventsSince,
   readGenesisEventsSync,
+  readHeadEventId,
   type AppendEventInput,
 } from "../storage/event-store.js";
 import { throwIfDispossessed } from "../storage/project-lock.js";
@@ -2099,6 +2100,15 @@ export async function consolidate(params: ConsolidateParams): Promise<Consolidat
   };
 
   const run = async (): Promise<ConsolidateResult> => {
+    // #253 (#189 A): the head as of the instant this boundary starts reading
+    // what it will judge on. FIRST statement of `run()`, ahead of both basis
+    // reads below (the window and, further down, `listValidMemories`), because
+    // the safe ordering error is a spurious rejection, never a stale accept —
+    // see `AppendEventsOptions.expectedHead`. `withProjectLock` around this
+    // call does NOT make it redundant: #132's lock runs its critical section
+    // to completion even after losing it (it reports, it does not brake), and
+    // `memory-import-service` writes to the same log without taking it at all.
+    const expectedHead = (await readHeadEventId(params.projectId)) ?? null;
     const watermark = getConsolidateWatermark(params.projectId);
     const eventsSince = await readEventsSince(params.projectId, watermark);
     const rawObservationEvents = eventsSince.filter(
@@ -2392,7 +2402,18 @@ export async function consolidate(params: ConsolidateParams): Promise<Consolidat
     throwIfDispossessed(params.lockSignal);
 
     if (inputs.length > 0) {
-      await appendEvents(params.projectId, inputs);
+      // #253: compare-and-append against the head this boundary read its
+      // window and its supersede targets at. This is the check point ④ above
+      // made unconditional — ④ only fires when THIS holder's own signal has
+      // already fired, which lags the takeover by up to a heartbeat and never
+      // fires at all for a writer that took no lock. A refusal propagates:
+      // nothing but the derived, self-healing segment buffer is on disk at
+      // this instant and NEITHER cursor has moved, so the window stays
+      // unconsumed for whoever won and `recordAttempt` (the catch around
+      // `run()`) records the boundary as failed rather than as a silent
+      // no-memory success. That is exactly the shape ④'s own throw already
+      // has, so nothing downstream learns a new outcome.
+      await appendEvents(params.projectId, inputs, { expectedHead });
     }
 
     // Retention BEFORE the reindex: pruneSegments (#116) deletes its own

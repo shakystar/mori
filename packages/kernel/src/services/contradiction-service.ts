@@ -1,11 +1,12 @@
 import type { ConsolidatorLlm } from "../index.js";
 import type { Embedder } from "../index.js";
 import { createConflict, type Conflict, type MemorySupersededPayload } from "../domain/entities.js";
+import type { DomainEvent } from "../domain/events.js";
 import type { MemoryRecord } from "../projections/projector.js";
 import { cosineSimilarity } from "./embeddings-service.js";
 import { listEmbeddings } from "./embeddings-store.js";
 import { listValidMemories, rebuildProjectProjection } from "./projection-store.js";
-import { appendEvents } from "../storage/event-store.js";
+import { appendEvents, isStaleHeadError, readHeadEventId } from "../storage/event-store.js";
 
 /**
  * Semantic contradiction detection between `decision`-kind memories — an
@@ -147,12 +148,27 @@ function pickWinner(a: MemoryRecord, b: MemoryRecord): [MemoryRecord, MemoryReco
  * two different memories, both are applied here; only a memory that itself
  * loses stops being scanned further (a later call re-scans the post-supersede
  * valid set and only compares still-valid memories).
+ *
+ * #253: every append is a compare-and-append against the head this snapshot
+ * was taken at. A refusal means another writer moved the log while a judge was
+ * deciding, so the pass STOPS there and returns what it had already applied —
+ * see the catch site for why stopping beats retrying or throwing.
  */
 export async function detectContradictions(
   params: DetectContradictionsParams,
 ): Promise<DetectedContradiction[]> {
   const { projectId, embedder, judge, actor } = params;
   if (!embedder) return [];
+
+  // #253 (#189 A): the head as of the instant this pass's judgment basis was
+  // taken. Read BEFORE the snapshot below, never after — see
+  // `AppendEventsOptions.expectedHead` for why that order is the safe one.
+  // Every append in the loop carries it, so a verdict computed from this
+  // snapshot can no longer land on a log that moved while the judge was
+  // thinking (`project-lock.ts` classifies this whole call as UNSAFE tail
+  // work: it runs past the boundary's last dispossession check point, and one
+  // judge LLM round trip per compared pair is how long the window stays open).
+  let expectedHead = (await readHeadEventId(projectId)) ?? null;
 
   const decisions = listValidMemories(projectId)
     .map((row) => row.memory)
@@ -172,8 +188,14 @@ export async function detectContradictions(
 
   const alreadyResolved = new Set<string>();
   const results: DetectedContradiction[] = [];
+  // Set when an append is refused for a stale head: the snapshot every
+  // remaining pair would be judged against is now KNOWN stale, so the pass
+  // stops rather than spending more judge round trips on it. See the catch
+  // below for why giving up (rather than retrying or throwing) is the right
+  // recovery here.
+  let staleBasis = false;
 
-  for (let i = 0; i < decisions.length; i += 1) {
+  for (let i = 0; i < decisions.length && !staleBasis; i += 1) {
     const a = decisions[i]!;
     if (alreadyResolved.has(a.id)) continue;
     const vecA = vectorById.get(a.id);
@@ -211,28 +233,62 @@ export async function detectContradictions(
       // events go through appendEvents (one db.transaction) so a failure on
       // the second insert can never leave the loser durably superseded
       // without the conflict that explains why (#118 item 3).
-      await appendEvents<MemorySupersededPayload | Conflict>(projectId, [
-        {
-          type: "memory.superseded",
+      //
+      // #253: `expectedHead` makes that same transaction refuse the pair when
+      // the log moved while the judge was deciding. Without it the loser of a
+      // two-process race writes a permanent, non-idempotent verdict
+      // (`createConflict` mints a fresh random id, so the winner's and the
+      // loser's both survive) computed from memories that may already have
+      // been superseded out from under it.
+      let appended: DomainEvent<MemorySupersededPayload | Conflict>[];
+      try {
+        appended = await appendEvents<MemorySupersededPayload | Conflict>(
           projectId,
-          scopeType: "project",
-          scopeId: projectId,
-          actor,
-          payload: { supersedes: loser.id, supersededBy: winner.id, reason },
-        },
-        // scopeId = the conflict's OWN id (see conflict-service.ts comment):
-        // `state.conflicts` is keyed by `event.scopeId` in the projector, so a
-        // second conflict in the same boundary pass must not collide with the
-        // first.
-        {
-          type: "conflict.detected",
-          projectId,
-          scopeType: "project",
-          scopeId: conflict.id,
-          actor,
-          payload: conflict,
-        },
-      ]);
+          [
+            {
+              type: "memory.superseded",
+              projectId,
+              scopeType: "project",
+              scopeId: projectId,
+              actor,
+              payload: { supersedes: loser.id, supersededBy: winner.id, reason },
+            },
+            // scopeId = the conflict's OWN id (see conflict-service.ts comment):
+            // `state.conflicts` is keyed by `event.scopeId` in the projector, so a
+            // second conflict in the same boundary pass must not collide with the
+            // first.
+            {
+              type: "conflict.detected",
+              projectId,
+              scopeType: "project",
+              scopeId: conflict.id,
+              actor,
+              payload: conflict,
+            },
+          ],
+          { expectedHead },
+        );
+      } catch (error) {
+        if (!isStaleHeadError(error)) throw error;
+        // GIVE UP the rest of the pass; do NOT rethrow. This function is tail
+        // work for both its callers (a consolidation boundary and an import),
+        // and both run it BEFORE committing their cursors — throwing from here
+        // would leave a boundary's window unconsumed and hand the next boundary
+        // the same observations to distill a second time, buying a rare race
+        // with a certain duplicate. Retrying is not the answer either: the
+        // whole batch of verdicts came from a snapshot that is now known stale,
+        // so honest recovery means re-judging from a fresh one, and that is a
+        // fresh LLM round trip per pair. Contradiction detection is a repeated
+        // best-effort sweep — the next boundary or import runs it again over
+        // current data. What must not happen (and now cannot) is this pass's
+        // stale verdict landing anyway.
+        staleBasis = true;
+        break;
+      }
+      // Our own append IS the head now. The basis snapshot is deliberately
+      // kept (see this function's doc), so the next pair is still certified
+      // against everything EXCEPT what this pass itself just wrote.
+      expectedHead = appended.at(-1)?.id ?? expectedHead;
 
       alreadyResolved.add(loser.id);
       results.push({ winnerId: winner.id, loserId: loser.id, reason, conflict });
