@@ -337,7 +337,7 @@ export const EXTRACTION_SYSTEM_PROMPT = [
   `${MAX_MEMORIES_PER_BOUNDARY} candidates are durable, choose the`,
   `${MAX_MEMORIES_PER_BOUNDARY} most durable ones yourself and list them most`,
   "durable first, since only the first ones you list will be kept.",
-  `Keep each item under ${PER_ITEM_MAX_CHARS} characters of JSON — that is the`,
+  `Keep each item under ${PER_ITEM_MAX_CHARS} characters of JSON. That means the`,
   "whole item as you write it, keys and quotes and every optional field",
   `included, not the "text" value alone. Keep the ENTIRE reply under`,
   `${EXPECTED_MAX_OUTPUT_CHARS} characters. An item over its size is truncated,`,
