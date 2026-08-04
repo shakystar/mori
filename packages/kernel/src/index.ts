@@ -14,6 +14,13 @@ import type { ConsolidateBoundary } from "./services/consolidate-service.js";
 export * from "./domain/index.js";
 export * from "./kernel/sqlite-memory-kernel.js";
 export { projectStoreExists } from "./storage/event-store.js";
+/**
+ * Strip a leading UTF-8 BOM (0xFEFF). Windows editors and PowerShell 5.1
+ * prepend one to files they write; the kernel never writes it, but a host
+ * reading a committed file (e.g. mori's `.mori/project.json`) must tolerate
+ * one on the way in — `JSON.parse` otherwise rejects the whole file (#241).
+ */
+export { stripBom } from "./storage/fs-utils.js";
 export type { ConsolidateBoundary };
 /**
  * #169 — the output-token budget the kernel already reserves for the
