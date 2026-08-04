@@ -80,6 +80,31 @@ export function hasGenesisEvent(projectId: string): boolean {
   return row !== undefined;
 }
 
+/**
+ * True when `error` is the `idx_events_genesis_once` unique-index violation
+ * (db.ts v18, #236 / #189 B) — this store already has a `project.created`
+ * row and this insert just lost the race to mint a second one. `ensureGenesis`
+ * (kernel/sqlite-memory-kernel.ts) treats this as "another process already
+ * bootstrapped the store," the normal outcome of losing that race, not a
+ * failure — `hasGenesisEvent`'s own check-then-append gap (#132's lock does
+ * not close it once a critical section is entered, only reports the loss
+ * afterward) is exactly the window this index exists to backstop.
+ *
+ * SQLite's constraint-violation message names the INDEXED COLUMNS
+ * (`events.project_id`), not the index itself — better-sqlite3 does not
+ * surface the index name on the error at all, so that column list is the
+ * only thing available to match on. `project_id` alone is not indexed
+ * uniquely anywhere else in this schema (`events.id`'s own v1 UNIQUE is a
+ * separate column), so the message is unambiguous.
+ */
+export function isDuplicateGenesisError(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    (error as NodeJS.ErrnoException).code === "SQLITE_CONSTRAINT_UNIQUE" &&
+    /UNIQUE constraint failed: events\.project_id/.test(error.message)
+  );
+}
+
 /** Map a DomainEvent onto the `events` table columns. payload is JSON text. */
 function insertEvent(db: Database.Database, event: DomainEvent): void {
   db.prepare(
