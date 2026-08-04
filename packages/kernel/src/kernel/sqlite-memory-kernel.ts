@@ -9,10 +9,12 @@
  * - **Its event vocabulary.** `observe(event: E)` cannot know what `E` is, so the
  *   harness injects {@link SqliteMemoryKernelOptions.observeEvent}, mapping one
  *   loop event to an {@link ObservedToolCall} (or nothing).
- * - **Its message vocabulary.** `transformContext(messages: M[])` cannot build an
- *   `M` either, so session-start injection is split the same way: the kernel
- *   decides WHAT to inject (retrieval, emptiness, once-per-session), the harness
- *   turns it into a message through {@link SqliteMemoryKernelOptions.renderContext}.
+ * - **Its message vocabulary.** `transformContext(messages: M[])` can neither
+ *   build an `M` nor read one, so context injection is split the same way in
+ *   both directions: the kernel decides WHAT to inject (retrieval, emptiness,
+ *   duplicate suppression), the harness turns the conversation into a query
+ *   through {@link SqliteMemoryKernelOptions.readQuery} and the result into a
+ *   message through {@link SqliteMemoryKernelOptions.renderContext}.
  * - **Its configuration.** `projectId`, `actor`, and the `ConsolidatorLlm` /
  *   `Embedder` / `ConversationSource` seams arrive as parameters; nothing here
  *   reads env or config, and nothing here spawns a process.
@@ -130,29 +132,62 @@ export interface SqliteMemoryKernelOptions<M, E> {
   /**
    * The harness's retrieved-context → message mapping, symmetric with
    * {@link observeEvent}: `transformContext` cannot build an `M`, so the harness
-   * says what one looks like. Called at most ONCE per kernel, only with a
-   * non-empty context, and never with a context this kernel has already
-   * injected. `renderMemoryContext` (services/context-render.ts) is the default
-   * body for it — a harness normally only wraps that string in its own message
-   * shape.
+   * says what one looks like. Called only with a non-empty context, and never
+   * with content this kernel has already injected this session (see
+   * {@link readQuery} for the turn-level loop and its duplicate policy).
+   * `renderMemoryContext` (services/context-render.ts) is the default body for
+   * it — a harness normally only wraps that string in its own message shape.
    *
-   * ABSENT ⇒ no session-start injection at all, and no retrieval either: a
-   * harness that cannot represent the message must not pay for the read.
+   * ABSENT ⇒ no injection at all, and no retrieval either: a harness that
+   * cannot represent the message must not pay for the read.
    *
    * Must not throw. One that does is treated exactly like a failed retrieval
-   * (the turn proceeds with the original messages), but it burns the session's
-   * single injection.
+   * (the turn proceeds with the original messages), and the content it refused
+   * to render stays un-injected, so a later turn may offer it again.
    */
   renderContext?: (context: MemoryContext) => M;
+  /**
+   * The harness's conversation → retrieval-query mapping (#5 2/3-b), the exact
+   * mirror of {@link renderContext}: `transformContext(messages: M[])` cannot
+   * READ an `M` any more than it can build one, so the harness — which owns the
+   * message vocabulary — says what this turn is about. Returning undefined (or
+   * a blank string) means "nothing to ask this turn".
+   *
+   * SYNCHRONOUS on purpose. Two reasons, both structural rather than stylistic:
+   * it matches {@link observeEvent}, the other seam the kernel calls on the hot
+   * path, and it makes the expensive derivation this issue rules out of scope
+   * (an LLM call per turn) inexpressible instead of merely discouraged. The
+   * budget for talking to a network lives on the {@link contextEmbedder} side of
+   * this call, where it is already declared.
+   *
+   * ABSENT ⇒ today's behaviour exactly (#149): ONE untargeted retrieval at the
+   * start of the session, no query, no per-turn re-read. Given, retrieval runs
+   * on every turn except a repeat of the one already retrieved — the cache key
+   * is the whole {@link TurnQuery}, turn identity included, for the reason that
+   * type documents.
+   *
+   * DUPLICATE SUPPRESSION is the kernel's, not the harness's: content already
+   * injected this session is removed from the retrieved context before render,
+   * and a context that is left empty injects nothing. Repeating a memory would
+   * both waste context and tell the model, falsely, that the repeated thing
+   * matters more.
+   *
+   * Must not throw. One that does is treated as "no injection this turn" — the
+   * messages pass through untouched — and costs the session nothing: a later
+   * turn where the seam works still gets its retrieval.
+   */
+  readQuery?: (messages: M[]) => TurnQuery | undefined;
   /** Semantic index seam, forwarded to consolidation. Absent ⇒ FTS-only. */
   embedder?: Embedder;
   /**
-   * Semantic index seam for SESSION-START retrieval, separate from
-   * {@link embedder} because their latency budgets are opposites: consolidation
-   * embeds whole windows and wants the full HTTP budget, session start runs
-   * before the agent's first answer and is capped by
+   * Semantic index seam for CONTEXT retrieval, separate from {@link embedder}
+   * because their latency budgets are opposites: consolidation embeds whole
+   * windows and wants the full HTTP budget, context retrieval runs before an
+   * answer the user is waiting on and is capped by
    * `SESSION_START_EMBED_TIMEOUT_MS` (context-service.ts), which the harness
-   * bakes into the client it builds.
+   * bakes into the client it builds. With {@link readQuery} wired that budget
+   * is paid per retrieving turn rather than once, which is why an unchanged
+   * query does not re-retrieve.
    *
    * Deliberately NOT falling back to `embedder`: borrowing the consolidation
    * client would put a 20s network call in front of the first turn, which is the
@@ -170,6 +205,100 @@ export interface SqliteMemoryKernelOptions<M, E> {
    * throw into the agent loop either.
    */
   onCaptureError?: (error: unknown) => void;
+}
+
+/**
+ * What the harness's {@link SqliteMemoryKernelOptions.readQuery} says about one
+ * turn: what to retrieve, and which turn is asking.
+ *
+ * `turnId` is required, because the query alone cannot answer the question the
+ * kernel has to ask before spending a read — "have I already retrieved for
+ * this?". This seam runs before EVERY provider call, so one turn that uses
+ * twenty tools asks the same question twenty-one times, and re-reading each
+ * time costs an FTS query plus (with {@link SqliteMemoryKernelOptions.
+ * contextEmbedder} configured) a network embed, for content duplicate
+ * suppression then drops anyway. Keyed on the query ALONE, though, that same
+ * cache cannot tell those repeats apart from a user who typed `continue` twice:
+ * the second `continue` is a new turn, with the first one's observations now in
+ * the store, and it would silently retrieve nothing at all — turn-level
+ * retrieval switched off by the most ordinary follow-up an agent REPL has.
+ * Only the harness can tell the two cases apart (the kernel cannot read an
+ * `M` — the same premise this seam exists for), so the harness names the turn
+ * and the pair is the cache key.
+ *
+ * Any value that is CONSTANT within one turn and different in the next will do:
+ * the kernel only ever compares it for equality, and never parses, stores, or
+ * orders it.
+ */
+export interface TurnQuery {
+  /** What this turn is about. Blank or whitespace reads as "nothing to ask". */
+  readonly query: string;
+  /**
+   * Identity of the turn asking — see above. Blank names no turn, so every
+   * call retrieves: the cache degrades to off rather than to always-hit.
+   */
+  readonly turnId: string;
+}
+
+/**
+ * What {@link SqliteMemoryKernelOptions.readQuery} said, as `transformContext`
+ * branches on it. Three outcomes rather than `TurnQuery | undefined` because
+ * "the harness has nothing to ask" and "the harness broke" must not take the
+ * same branch: the first falls back to the untargeted session-start read, the
+ * second injects nothing at all.
+ */
+type DerivedQuery =
+  | { readonly kind: "absent" }
+  | { readonly kind: "query"; readonly turn: TurnQuery }
+  | { readonly kind: "failed" };
+
+/**
+ * A retrieval that has already run, as the calls after it see it: which turn
+ * asked (undefined for the untargeted session-start read), and the block that
+ * read rendered.
+ *
+ * The block is kept because a rendered injection lives for exactly ONE provider
+ * request. `transformContext`'s return value is a local in pi's agent loop —
+ * `context.messages` is never reassigned from it — so nothing this seam
+ * prepends survives into the next call, and the model has no state of its own
+ * to remember it by. A turn that uses twenty tools reaches this seam twenty-one
+ * times and must carry the block every one of them, or it loses its memory
+ * context the moment it starts working. Skipping the READ is the saving a
+ * repeat call can take; skipping the injection is not.
+ *
+ * Boxed rather than a bare `M | undefined`, because `M` is the harness's
+ * message type and may itself admit `undefined`: "this retrieval injected
+ * nothing" has to stay distinguishable from "it injected a message that is
+ * undefined".
+ */
+interface TurnRetrieval<M> {
+  readonly turn: TurnQuery | undefined;
+  injected: { readonly message: M } | undefined;
+}
+
+/**
+ * Whether this call is the SAME turn asking the SAME thing as the retrieval
+ * that already ran — the only case turn-level retrieval skips the STORE. It
+ * still injects: the skipped read's block is re-attached instead (see
+ * {@link TurnRetrieval}). Both halves must match: the turn alone would skip a
+ * genuine re-ask inside one turn, and the query alone would skip a new turn
+ * that repeats familiar words (`continue`).
+ */
+function isRepeatCall<M>(turn: TurnQuery, last: TurnRetrieval<M> | undefined): boolean {
+  // A blank `turnId` names no turn, so it can never establish that this is the
+  // same one — two unrelated turns would otherwise match on `"" === ""` and the
+  // cache would suppress the retrieval instead of the repeat. The two ways to
+  // be wrong here are not symmetric: erring toward re-reading costs one extra
+  // query, while a false match silently switches turn-level retrieval off,
+  // which is the failure this key exists to prevent.
+  if (!turn.turnId) return false;
+  const asked = last?.turn;
+  return asked !== undefined && asked.turnId === turn.turnId && asked.query === turn.query;
+}
+
+/** The memories in a context — what a turn that renders it puts in front of the model. */
+function injectedMemoryIds(context: MemoryContext): string[] {
+  return (context.consolidatedMemories ?? []).map((memory) => memory.id);
 }
 
 export class SqliteMemoryKernel<M, E> implements MemoryKernel<M, E> {
@@ -193,31 +322,95 @@ export class SqliteMemoryKernel<M, E> implements MemoryKernel<M, E> {
   private genesis: Promise<void> | undefined;
 
   /**
-   * Whether this kernel has already spent its one session-start retrieval —
-   * see {@link transformContext}. "Attempted", not "injected": a retrieval that
-   * failed or found nothing is not retried on the next turn, because retrying
-   * every turn IS turn-level retrieval (#5 2/3), not this seam.
+   * Whether this kernel has already spent its one UNTARGETED retrieval — the
+   * session-start read that runs without a query (#149). "Attempted", not
+   * "injected": a retrieval that failed or found nothing is not retried, since
+   * a second untargeted read would ask the store the identical question.
+   *
+   * Turn-level retrieval (#5 2/3-b) does not go through this flag — it is
+   * gated by {@link lastRetrieval} instead — but it does SET it: once any
+   * retrieval has run, the untargeted session-start read has no separate work
+   * left to do.
+   *
+   * A retrieval CANCELLED mid-flight gives it back, provided no later call has
+   * claimed it since (see `transformContext`): nothing reached the model, so
+   * the session-start read still has its work.
    */
   private contextAttempted = false;
+
+  /**
+   * The retrieval that has already run, so a repeat of the same provider call
+   * re-attaches its block instead of re-reading, while a genuinely new turn
+   * reads again — see {@link TurnRetrieval} and {@link TurnQuery}. Undefined
+   * until the first retrieval; a cancelled call restores what it found here.
+   */
+  private lastRetrieval: TurnRetrieval<M> | undefined;
+
+  /**
+   * Ids of the memories this session has already REINFORCED.
+   *
+   * This set does not decide what gets injected. A rendered block lives for one
+   * provider request only ({@link TurnRetrieval}), so re-sending a memory the
+   * model saw last turn is not a repetition — it is the only way that memory is
+   * present at all. What the set decides is how often a send is STAMPED.
+   *
+   * `reinforceInjectedMemories` writes `last_accessed_at`, which is an input to
+   * the very ranking that selected these memories (`buildMemoryContext` decays a
+   * memory from its last access, not its creation). Stamping every turn would
+   * close that loop on itself: an injected memory would reset its own recency
+   * each turn, outrank everything for the rest of the session, and — the stamp
+   * being a projection that survives the process — into the sessions after it.
+   * Stamped once per session per memory, reinforcement keeps saying what it
+   * reads as: this memory was surfaced on this occasion.
+   *
+   * `injection_count`, which `touchMemoryAccess` bumps in the same statement,
+   * therefore counts OCCASIONS as well — sessions in which a memory was
+   * surfaced. Not provider calls, and not turns.
+   *
+   * Grows only on a SUCCESSFUL render, for the same reason reinforcement and
+   * `memory.injected` do (#176): a memory the model never saw must stay free
+   * for the turn that does show it to stamp.
+   */
+  private readonly reinforced = new Set<string>();
 
   constructor(options: SqliteMemoryKernelOptions<M, E>) {
     this.options = options;
   }
 
   /**
-   * Session-start memory injection (#5 1/3).
+   * Memory injection before an LLM call: session start (#5 1/3) and, once the
+   * harness supplies {@link SqliteMemoryKernelOptions.readQuery}, every turn
+   * whose query is new (#5 2/3-b).
    *
-   * The FIRST call assembles this project's memory context and returns
-   * `[rendered, ...messages]`; every later call passes `messages` through
-   * untouched. One kernel is one session (mori builds one per CLI process), so
-   * "first call" and "session start" are the same moment. TURN-LEVEL retrieval —
-   * a fresh query per turn, driven by the conversation — is #5 2/3 and lands on
-   * this seam rather than replacing it.
+   * A retrieving call assembles this project's memory context and returns
+   * `[rendered, ...messages]`; every other call passes `messages` through
+   * untouched. Which calls retrieve:
+   *
+   * - **No `readQuery`** — the first call only. One kernel is one session (mori
+   *   builds one per CLI process), so "first call" and "session start" are the
+   *   same moment.
+   * - **`readQuery` given, no query this turn** — the session-start read, still
+   *   at most once: the first turn may well have nothing to ask with, and the
+   *   project context that turn injects is 1/3's behaviour, not a fallback.
+   * - **`readQuery` given, a query this turn** — retrieve, unless this same
+   *   turn already retrieved that same query (see {@link lastRetrieval}), in
+   *   which case that retrieval's block is re-attached without a second read.
+   *
+   * A CANCELLED call retrieves but records nothing: an aborted turn's messages
+   * never reach the model, so it must not consume the session's attempt, fill
+   * the block cache, stamp reinforcement, or claim an injection in telemetry.
+   *
+   * A turn injects everything its retrieval returned. Nothing is withheld for
+   * having been shown before, because nothing shown before is still there —
+   * see {@link TurnRetrieval} for the one-request lifetime that makes
+   * re-injection the norm rather than a duplicate.
    *
    * NEVER THROWS, for the same reason `observe` does not, only harder: this runs
    * immediately before every LLM call (`transformContext` in pi-agent-core's
    * agent loop, whose own contract is "must not throw or reject"). A failed
-   * retrieval degrades the answer; a thrown one kills the turn.
+   * retrieval degrades the answer; a thrown one kills the turn. That covers the
+   * two harness seams it calls too — a `readQuery` or `renderContext` that
+   * throws costs this turn its injection and nothing else.
    *
    * Head position is deliberate. The memory block is background for the whole
    * conversation, not a reply to the newest user message, and appending it last
@@ -229,15 +422,51 @@ export class SqliteMemoryKernel<M, E> implements MemoryKernel<M, E> {
     // No renderer ⇒ the harness cannot represent the message, so do not even
     // read: an injection nobody can express is pure cost.
     if (!render) return messages;
-    if (this.contextAttempted) return messages;
-    // An already-aborted turn starts nothing AND keeps the attempt: the
-    // retrieval never ran, so spending the session's one shot on a cancelled
-    // turn would cost the session its context for no work done.
+    // An already-aborted turn starts nothing AND spends nothing: the retrieval
+    // never ran, so charging a cancelled turn for it would cost the session
+    // context it never got.
     if (signal?.aborted) return messages;
+
+    const turn = this.deriveQuery(messages);
+    // A seam that threw is not a licence to substitute a different retrieval
+    // policy — the harness asked for a query-driven read and could not say
+    // what to read. Nothing is spent, so the next turn tries again.
+    if (turn.kind === "failed") return messages;
+    if (turn.kind === "absent") {
+      if (this.contextAttempted) return messages;
+    } else if (isRepeatCall(turn.turn, this.lastRetrieval)) {
+      // The SAME turn asking the same thing again: same store, same ranking
+      // inputs, so the READ is skipped. This seam runs before every provider
+      // call, and a tool-using turn would otherwise re-read (and re-embed) once
+      // per tool call for a context that cannot have moved.
+      //
+      // The INJECTION is not skipped. The block that read rendered is prepended
+      // again, because it is gone from everything else — it lived in one
+      // provider request and nothing carried it forward (see `TurnRetrieval`).
+      // Returning `messages` bare here would mean a turn had its project
+      // context for its first request and worked without it for the rest.
+      //
+      // A new turn with the same text is not this case and does retrieve — see
+      // `TurnQuery`.
+      const cached = this.lastRetrieval?.injected;
+      return cached ? [cached.message, ...messages] : messages;
+    }
     // Spend the attempt BEFORE the first await. The loop calls this
     // sequentially today, but the seam promises nothing of the sort, and two
-    // overlapping calls that both got past the check above would each inject.
+    // overlapping calls that both got past the checks above would each retrieve.
+    //
+    // `claim` is this call's identity as well as its state: the cancellation
+    // path below restores only while this exact object is still installed. The
+    // untargeted read takes one too, so that it can be told apart the same way;
+    // it names no turn, so it never satisfies `isRepeatCall`, and it can only
+    // run before any query read has spent `contextAttempted`.
+    const spent = { attempted: this.contextAttempted, retrieval: this.lastRetrieval };
+    const claim: TurnRetrieval<M> = {
+      turn: turn.kind === "query" ? turn.turn : undefined,
+      injected: undefined,
+    };
     this.contextAttempted = true;
+    this.lastRetrieval = claim;
 
     // Reading MUST NOT create the store. mori's disk contract is that a session
     // which only reads files leaves no trace on disk (`createMoriKernel`), and
@@ -247,10 +476,13 @@ export class SqliteMemoryKernel<M, E> implements MemoryKernel<M, E> {
 
     let context: MemoryContext;
     try {
-      // No `taskTitle` (#149 scope): the kernel has no path to one yet, and
-      // both channels are designed to degrade to FTS-only without it. Deriving
-      // a query from the conversation is 2/3's job.
+      // The derived query IS the `taskTitle` the retrieval services rank by —
+      // it turns on the semantic path in `retrieveMemoryContext` and the
+      // `rawSegments` channel, both of which degrade to FTS-only (or to
+      // nothing, for segments) without one. Absent, this is the untargeted
+      // session-start read #149 shipped.
       context = await buildMemoryContext(this.options.projectId, {
+        ...(turn.kind === "query" ? { taskTitle: turn.turn.query } : {}),
         ...(this.options.contextEmbedder ? { embedder: this.options.contextEmbedder } : {}),
       });
     } catch {
@@ -260,6 +492,40 @@ export class SqliteMemoryKernel<M, E> implements MemoryKernel<M, E> {
       // failed retrieval never reaches render, so it never reaches the
       // `memory.injected` append below either — nothing to observe about an
       // injection that didn't happen.
+      return messages;
+    }
+
+    // Cancellation is checked AGAIN here, on the far side of the retrieval,
+    // because everything below records that the model SAW this content — the
+    // block cache, reinforcement, `memory.injected` — while the array this call
+    // returns goes nowhere once the provider call it was built for is
+    // cancelled. The await it spans is a real window: an FTS read plus, with
+    // embeddings configured, a network embed against a multi-second budget, and
+    // (#5 2/3-b) it now opens on every retrieving turn rather than once, with
+    // Ctrl-C being ordinary rather than exceptional in a REPL.
+    //
+    // The attempt is REFUNDED rather than left spent, because the alternative
+    // lets a cancelled turn take context away from the turns after it: an
+    // untargeted read cancelled here would leave `contextAttempted` set and the
+    // session would never inject its project context at all. The refund costs
+    // at most one repeated read. It mirrors the pre-retrieval check above,
+    // which for the same reason refuses to spend rather than spending on a turn
+    // that already had nothing to gain.
+    //
+    // Refunded ONLY while the state is still this call's, though. An
+    // overlapping later call may have replaced it during the await, and a
+    // snapshot taken before that call started describes a world it has already
+    // moved past: restoring it would hand the live turn back a gate it has
+    // already passed, so its next provider call would re-read and re-embed for
+    // a retrieval that landed. Identity of `claim` is the whole test — the same
+    // discipline as spending before the first await, carried to the other end.
+    // The cache is not filled here either way, which is the same rule seen from
+    // the other side: a cancelled call leaves nothing for a later one to reuse.
+    if (signal?.aborted) {
+      if (this.lastRetrieval === claim) {
+        this.contextAttempted = spent.attempted;
+        this.lastRetrieval = spent.retrieval;
+      }
       return messages;
     }
 
@@ -274,6 +540,19 @@ export class SqliteMemoryKernel<M, E> implements MemoryKernel<M, E> {
       return messages;
     }
 
+    // Only NOW is this content "shown". A render that threw records nothing on
+    // purpose: it reached no model, so it leaves no block for the rest of the
+    // turn to reuse and no memory marked as stamped.
+    //
+    // Split → render → record runs with no await in between, so two calls that
+    // were inside `buildMemoryContext` at once cannot both count the same
+    // memory as first-shown: the first to come back finishes recording before
+    // the second resumes and splits.
+    claim.injected = { message: injected };
+    const memoryIds = injectedMemoryIds(context);
+    const firstShown = memoryIds.filter((id) => !this.reinforced.has(id));
+    for (const id of firstShown) this.reinforced.add(id);
+
     // Reinforce AFTER render succeeded, never before (mori#176): stamping
     // `last_accessed_at`/`injection_count` on a memory the model never saw
     // (the render above throws for PR #175's "harness renderer throws" case)
@@ -281,11 +560,13 @@ export class SqliteMemoryKernel<M, E> implements MemoryKernel<M, E> {
     // that was never actually injected. Best-effort and isolated the same way
     // — a reinforcement failure (e.g. a lock held by another process) must not
     // undo the successful render computed above.
+    //
+    // `firstShown`, not `memoryIds` (#5 2/3-b): reinforcement counts occasions,
+    // once per session per memory, because the stamp it writes feeds the very
+    // ranking that chose these — see `reinforced` for the loop that per-turn
+    // stamping would close.
     try {
-      reinforceInjectedMemories(
-        this.options.projectId,
-        context.consolidatedMemories?.map((memory) => memory.id) ?? [],
-      );
+      reinforceInjectedMemories(this.options.projectId, firstShown);
     } catch {
       // best-effort — see comment above.
     }
@@ -296,6 +577,17 @@ export class SqliteMemoryKernel<M, E> implements MemoryKernel<M, E> {
     // it. Best-effort and isolated the same way: a store that cannot take
     // this append (e.g. a lock held by another process) must not undo the
     // injection already computed and about to be returned below.
+    //
+    // One append per INJECTING TURN, not per session (#5 2/3-b) and not per
+    // provider call: the condition is unchanged, it is just that more turns now
+    // meet it, while a repeat call inside one turn returns from the cache above
+    // and never reaches here.
+    //
+    // The payload is `memoryIds` — everything this turn SENT, including what an
+    // earlier turn also sent. It is the opposite grain from reinforcement just
+    // above, deliberately: the event answers "what did the model see this
+    // turn", and a turn that re-sent a familiar memory reporting `[]` would
+    // deny an injection that actually happened.
     try {
       await appendEvent({
         type: "memory.injected",
@@ -303,15 +595,35 @@ export class SqliteMemoryKernel<M, E> implements MemoryKernel<M, E> {
         scopeType: "session",
         scopeId: this.options.sessionId ?? this.options.projectId,
         actor: this.options.actor,
-        payload: {
-          memoryIds: context.consolidatedMemories?.map((memory) => memory.id) ?? [],
-        },
+        payload: { memoryIds },
       });
     } catch {
       // best-effort — see comment above.
     }
 
     return [injected, ...messages];
+  }
+
+  /**
+   * Ask the harness what this turn is about, without letting it break the turn.
+   *
+   * Blank is the same as absent — a query of whitespace would turn on the
+   * relevance paths with nothing to match, which is strictly worse than the
+   * untargeted read it would displace.
+   */
+  private deriveQuery(messages: M[]): DerivedQuery {
+    const readQuery = this.options.readQuery;
+    if (!readQuery) return { kind: "absent" };
+    let asked: TurnQuery | undefined;
+    try {
+      asked = readQuery(messages);
+    } catch {
+      return { kind: "failed" };
+    }
+    const query = asked?.query.trim();
+    return asked && query
+      ? { kind: "query", turn: { turnId: asked.turnId, query } }
+      : { kind: "absent" };
   }
 
   /**

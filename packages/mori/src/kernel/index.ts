@@ -22,6 +22,7 @@ import {
   type MemoryContext,
   type ObservedToolCall,
   type ToolCallObserver,
+  type TurnQuery,
 } from "@mori/kernel";
 import {
   getEmbedder,
@@ -195,6 +196,83 @@ export function renderContextMessage(context: MemoryContext): AgentMessage {
 }
 
 /**
+ * Longest query mori will derive from a turn.
+ *
+ * The query is not a message — it is a retrieval key that reaches an FTS `MATCH`
+ * and (when embeddings are configured) one network embed against the kernel's
+ * `SESSION_START_EMBED_TIMEOUT_MS` budget, now once per retrieving turn rather
+ * than once per session. A pasted stack trace or file body as a query buys no
+ * relevance for either channel and costs both, so the head of the message —
+ * where a request states what it is about — is what gets used.
+ */
+export const MAX_QUERY_CHARS = 512;
+
+/**
+ * The kernel's `readQuery` seam, mori-side: this turn's conversation → the
+ * retrieval query (#5 2/3-b). The mirror of {@link renderContextMessage}, and
+ * split at the same place: the kernel decides what to do with a query, mori
+ * decides which part of ITS message vocabulary is one.
+ *
+ * The most recent user message is the whole derivation. It is the only message
+ * that states, in the user's own words, what is being asked right now —
+ * assistant turns and tool results describe what mori itself just did, so
+ * retrieving on them would ask memory about mori's own last move rather than
+ * about the task. No LLM (#215 non-scope), and nothing accumulated across
+ * turns: the kernel already treats a repeat of the same ask as "nothing new to
+ * retrieve", which only holds if the same question produces the same string.
+ *
+ * The `turnId` is what makes that cache safe to keep — see the kernel's
+ * `TurnQuery` for why one is required. Mori's is the pair (how many user
+ * messages exist, when the last one arrived), and each half covers the other's
+ * blind spot. Both are constant for the whole of one turn: pi appends tool
+ * results with role `toolResult`, and the message this seam's own injection
+ * produces never enters `Agent.messages` (`transformContext`'s return value is
+ * a local in pi's `streamAssistantResponse`), so nothing a turn does to itself
+ * changes either half. Across turns the count moves — except after a `/clear`
+ * or a context compaction, which reset or shrink it, and there the timestamp
+ * moves instead. The timestamp alone would tie only if two prompts landed in
+ * the same millisecond, and then the count separates them.
+ *
+ * Secrets are masked with the same list `observedShell` uses, because the same
+ * argument applies one step further out: a credential the user pasted into the
+ * prompt would otherwise be sent verbatim to the embeddings endpoint, which is
+ * a different destination from the model the message was addressed to. Masking
+ * runs BEFORE the length cap, never after — a cap applied first can cut a
+ * credential's value in two and hand the mask a fragment it no longer
+ * recognises as one.
+ *
+ * Returns undefined when the tail holds no user text at all (the first
+ * `transformContext` of a run, before the prompt is appended) — the kernel
+ * reads that as "no query this turn" and falls back to the session-start
+ * injection.
+ */
+export function readTurnQuery(messages: AgentMessage[]): TurnQuery | undefined {
+  let latest: Extract<AgentMessage, { role: "user" }> | undefined;
+  let userMessages = 0;
+  for (const message of messages) {
+    if (message.role !== "user") continue;
+    userMessages += 1;
+    latest = message;
+  }
+  if (!latest) return undefined;
+  const text = userMessageText(latest.content).trim();
+  if (!text) return undefined;
+  return {
+    query: maskSecrets(text).slice(0, MAX_QUERY_CHARS),
+    turnId: `${userMessages}:${latest.timestamp}`,
+  };
+}
+
+/** A user message's text, whether pi carries it as a string or content blocks. */
+function userMessageText(content: Extract<AgentMessage, { role: "user" }>["content"]): string {
+  if (typeof content === "string") return content;
+  return content
+    .filter((block): block is Extract<typeof block, { type: "text" }> => block.type === "text")
+    .map((block) => block.text)
+    .join("\n");
+}
+
+/**
  * Store id for a working root: stable across runs (same checkout ⇒ same memory)
  * and distinct across checkouts (two repos never share a store).
  *
@@ -252,6 +330,10 @@ export interface CreateMoriKernelOptions {
  * first observation that passes the capture filter, so a session that only reads
  * files leaves no trace on disk.
  *
+ * Both context seams are wired here, and wiring BOTH is the point (#215): with
+ * only `renderContext` the kernel injects once at session start, and the
+ * turn-level retrieval it can do would be code that never runs in production.
+ *
  * The store lives under the kernel's own root (`~/.mori`, or `MEMORIZE_ROOT`) —
  * resolved inside the kernel's path-resolver from `process.env`, which is why
  * tests that exercise this must set that variable rather than pass an env object.
@@ -281,6 +363,7 @@ export function createMoriKernel(
     sessionId: options.sessionId ?? createId("session"),
     observeEvent: createAgentEventObserver(),
     renderContext: renderContextMessage,
+    readQuery: readTurnQuery,
     ...(embedder ? { embedder } : {}),
     ...(contextEmbedder ? { contextEmbedder } : {}),
     onCaptureError: (error: unknown) => {
