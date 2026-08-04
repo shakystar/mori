@@ -25,9 +25,20 @@ import { listSegmentTexts } from "./segment-store.js";
  */
 export const LONG_TERM_WEIGHT = 0.7;
 export const SHORT_TERM_WEIGHT = 0.3;
-/** Char budget for the combined memory+observation pool. Sits INSIDE the
- *  renderer's overall MAX_STARTUP_CONTEXT_CHARS (8000) so injected memory
- *  can never evict the task/handoff blocks wholesale. */
+/**
+ * Char budget for the combined memory+observation pool — a RETRIEVAL-STAGE
+ * pre-trim over raw stored text, not the ceiling on what gets injected.
+ *
+ * The canonical ceiling is `INJECTION_BUDGET_TOKENS` (`injection-budget.ts`),
+ * which is enforced once, in tokens, over the RENDERED block. This constant
+ * only keeps the pool this function ranks from growing without bound before
+ * that judgement runs.
+ *
+ * #238 — the doc here used to claim this budget "sits INSIDE the renderer's
+ * overall MAX_STARTUP_CONTEXT_CHARS (8000)". No such identifier ever existed
+ * anywhere in the repo: nothing enforced a combined ceiling, and the comment
+ * describing the layer that would have hid its absence.
+ */
 export const MEMORY_POOL_BUDGET_CHARS = 4000;
 /** Recency half-life for the exponential decay term, in days. */
 export const RECENCY_HALF_LIFE_DAYS = 14;
@@ -42,7 +53,26 @@ export interface RankedMemory {
   score: number;
 }
 
+/**
+ * One selected pool entry, tagged with the channel it came from.
+ *
+ * Memories and observations are ranked TOGETHER by `score` (that is what the
+ * layer weights are for), and splitting them into two arrays throws that
+ * interleaving away. #238's budget trim has to drop the lowest-scoring entry
+ * first regardless of channel, so the selection order is carried out of here
+ * instead of being re-derived — re-deriving it would mean a second copy of the
+ * ranking, which this issue explicitly must not change.
+ */
+export type RankedPoolEntry =
+  | { channel: "memory"; memory: RankedMemory }
+  | { channel: "observation"; observation: Observation };
+
 export interface RetrievedMemoryContext {
+  /**
+   * The selected pool in ranked order, best first — the single source the two
+   * channel arrays below are derived views of.
+   */
+  ranked: RankedPoolEntry[];
   memories: RankedMemory[];
   observations: Observation[];
 }
@@ -133,21 +163,36 @@ export function retrieveMemoryContext(
   }
 
   pool.sort((a, b) => b.score - a.score);
-  const memories: RankedMemory[] = [];
-  const observations: Observation[] = [];
+  const ranked: RankedPoolEntry[] = [];
   let spent = 0;
   for (const entry of pool) {
     if (spent + entry.chars > MEMORY_POOL_BUDGET_CHARS) continue;
     spent += entry.chars;
-    if (entry.memory) memories.push(entry.memory);
-    if (entry.observation) observations.push(entry.observation);
+    if (entry.memory) ranked.push({ channel: "memory", memory: entry.memory });
+    else if (entry.observation)
+      ranked.push({ channel: "observation", observation: entry.observation });
   }
 
-  return { memories, observations };
+  // The channel arrays are VIEWS of `ranked`, built here rather than filled in
+  // the loop above so the ranked order stays the one thing that decides both
+  // what is in each channel and in what order.
+  return {
+    ranked,
+    memories: ranked.flatMap((entry) => (entry.channel === "memory" ? [entry.memory] : [])),
+    observations: ranked.flatMap((entry) =>
+      entry.channel === "observation" ? [entry.observation] : [],
+    ),
+  };
 }
 
-/** Max raw segments pulled per query, and their own char budget — SEPARATE from
- *  MEMORY_POOL_BUDGET_CHARS so segments can never evict consolidated memories. */
+/**
+ * Max raw segments pulled per query, and their own retrieval-stage char budget
+ * — SEPARATE from {@link MEMORY_POOL_BUDGET_CHARS} so segments can never evict
+ * consolidated memories at retrieval time. Like that constant, this is a
+ * pre-trim over raw text, not the injection ceiling: `INJECTION_BUDGET_TOKENS`
+ * (`injection-budget.ts`) is the final judge, and it drops segments first for
+ * the same reason this budget is separate.
+ */
 export const SEGMENT_CHANNEL_LIMIT = 6;
 export const SEGMENT_POOL_BUDGET_CHARS = 2000;
 
