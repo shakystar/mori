@@ -105,6 +105,61 @@ export function isDuplicateGenesisError(error: unknown): boolean {
   );
 }
 
+/**
+ * A batch refused because the log had moved since the caller read the basis it
+ * judged on (#253 / #189 A). Carries the two ids rather than only a message so
+ * a caller that retries can tell how far it fell behind; NOT the batch or its
+ * payloads — a rejection is logged and surfaced by callers, and event ids are
+ * opaque while payloads are memory text.
+ */
+export class StaleHeadError extends MemorizeError {
+  /** What the caller believed the head was; `null` = "the log was empty". */
+  readonly expectedHead: string | null;
+  /** What the head actually was, read inside the append transaction. */
+  readonly actualHead: string | null;
+
+  constructor(projectId: string, expectedHead: string | null, actualHead: string | null) {
+    super(
+      `Append to project ${projectId} rejected: expected log head ` +
+        `${expectedHead ?? "(empty log)"}, found ${actualHead ?? "(empty log)"}.`,
+    );
+    this.name = "StaleHeadError";
+    this.expectedHead = expectedHead;
+    this.actualHead = actualHead;
+  }
+}
+
+/**
+ * True when `error` is {@link appendEvents}' compare-and-append rejection —
+ * "you lost the race", as opposed to a real failure. Same role
+ * `isDuplicateGenesisError` plays for B (#236): a caller must be able to
+ * narrow the one outcome it knows how to recover from and let everything else
+ * propagate untouched.
+ *
+ * Matches on the observable `name`, not `instanceof`. The kernel ships both a
+ * `src` (tests, `tsx`) and a `dist` (`@mori/kernel` consumers) copy of this
+ * module, and a process that loads both gets two distinct class objects —
+ * `instanceof` then returns false for an error raised through the other copy,
+ * silently reclassifying a lost race as a hard failure. `name` is set in the
+ * constructor above and survives that split.
+ */
+export function isStaleHeadError(error: unknown): error is StaleHeadError {
+  return error instanceof Error && error.name === "StaleHeadError";
+}
+
+/** The newest event's id on an ALREADY-RESOLVED connection, or undefined for an
+ *  empty log. Shared by `readHeadEventId` (the public probe) and
+ *  `appendEvents`' compare-and-append check, which needs the same question
+ *  answered on the connection whose transaction it is already inside — going
+ *  back through `getDb` there would be the same connection anyway, but taking
+ *  it as an argument is what makes "this read is inside the transaction"
+ *  visible at the call site rather than incidental. */
+function headEventId(db: Database.Database): string | undefined {
+  const row = db.prepare("SELECT id FROM events ORDER BY seq DESC LIMIT 1").get() as
+    { id: string } | undefined;
+  return row?.id;
+}
+
 /** Map a DomainEvent onto the `events` table columns. payload is JSON text. */
 function insertEvent(db: Database.Database, event: DomainEvent): void {
   db.prepare(
@@ -159,6 +214,34 @@ export async function appendEvent<TPayload extends DomainEventPayload>(
   return event;
 }
 
+export interface AppendEventsOptions {
+  /**
+   * Compare-and-append (#253 / #189 A): the id the caller observed as the
+   * log's HEAD at the moment it read the basis it is about to write a verdict
+   * on. `null` means "the log was empty then". The append is refused with
+   * {@link StaleHeadError} unless the head is still exactly that.
+   *
+   * OMITTING it (or the whole options object) keeps the pre-#253 behavior — an
+   * unconditional append.
+   *
+   * `null` rather than `undefined` for the empty log is what keeps "absent"
+   * meaning only one thing. `readHeadEventId` answers that case with
+   * `undefined`, so a caller piping it straight through would silently DISABLE
+   * the guard on exactly the store where it is cheapest to get wrong — a brand
+   * new one. `exactOptionalPropertyTypes` (tsconfig.base.json) makes that a
+   * compile error rather than a convention: an optional property does not
+   * accept an explicit `undefined`, so `{ expectedHead: await
+   * readHeadEventId(id) }` will not typecheck until the caller writes
+   * `?? null` and says which case it means.
+   *
+   * Read the head BEFORE the basis, never after: an append landing between the
+   * two then makes the basis newer than the head and the check errs toward a
+   * spurious rejection (costs a re-read), where the reverse order would let the
+   * check PASS on a basis that is already stale.
+   */
+  expectedHead?: string | null;
+}
+
 /**
  * Append several events as ONE atomic unit. All inserts run inside a single
  * `db.transaction(...)` so a throw partway through (e.g. a non-serializable
@@ -166,12 +249,20 @@ export async function appendEvent<TPayload extends DomainEventPayload>(
  * with a partial logical operation. Insert order = the order of `inputs`,
  * which becomes the `seq` (replay) order.
  *
+ * With {@link AppendEventsOptions.expectedHead} the batch additionally becomes
+ * a compare-and-append: the head is re-read INSIDE that same transaction and
+ * the whole batch is refused when it has moved. Inside is the entire point —
+ * comparing before `BEGIN` would just be one more read-then-write span, the
+ * very shape this option exists to close. The refusal rolls back exactly like
+ * any other throw in the block, so there is no partial append to clean up.
+ *
  * Use this when a single logical operation emits multiple back-to-back
  * events; single-event flows keep using `appendEvent`.
  */
 export async function appendEvents<TPayload extends DomainEventPayload>(
   projectId: string,
   inputs: AppendEventInput<TPayload>[],
+  options?: AppendEventsOptions,
 ): Promise<DomainEvent<TPayload>[]> {
   const events: DomainEvent<TPayload>[] = inputs.map((input) => {
     const timestamp = nowIso();
@@ -192,11 +283,35 @@ export async function appendEvents<TPayload extends DomainEventPayload>(
   });
 
   const db = getDb(projectId);
-  db.transaction(() => {
+  const expectedHead = options?.expectedHead;
+  const batch = db.transaction(() => {
+    if (expectedHead !== undefined) {
+      const actualHead = headEventId(db) ?? null;
+      if (actualHead !== expectedHead) {
+        throw new StaleHeadError(projectId, expectedHead, actualHead);
+      }
+    }
     for (const event of events) {
       insertEvent(db, event);
     }
-  })();
+  });
+
+  if (expectedHead === undefined) {
+    // Unchanged path: a DEFERRED transaction, exactly as before this option
+    // existed.
+    batch();
+  } else {
+    // BEGIN IMMEDIATE takes the write lock up front, so the head read above
+    // and the inserts below cannot straddle another connection's commit. A
+    // deferred transaction would start its read snapshot first and only then
+    // try to upgrade — in WAL that upgrade fails with SQLITE_BUSY_SNAPSHOT
+    // when someone committed in between, which `busy_timeout` cannot wait out
+    // (retrying would need a NEW snapshot) and which would surface the lost
+    // race as an opaque SQLite error instead of `StaleHeadError`. Only this
+    // path takes the stronger lock; `busy_timeout = 5000` (db.ts) covers the
+    // wait for it.
+    batch.immediate();
+  }
   return events;
 }
 
@@ -307,9 +422,7 @@ export function readGenesisEventsSync(projectId: string): DomainEvent[] {
  *  persisted push watermark so an idle tick never builds the full event array
  *  just to learn nothing changed. */
 export async function readHeadEventId(projectId: string): Promise<string | undefined> {
-  const row = getDb(projectId).prepare("SELECT id FROM events ORDER BY seq DESC LIMIT 1").get() as
-    { id: string } | undefined;
-  return row?.id;
+  return headEventId(getDb(projectId));
 }
 
 /**

@@ -226,6 +226,54 @@ describe("contradiction-service", () => {
     expect(events[supersededIdx + 1]?.type).toBe("conflict.detected");
   });
 
+  it("refuses a verdict when the log advanced while the judge was deciding (#253)", async () => {
+    // The adopted span, end to end. `Judge` is already an injected seam, so a
+    // foreign writer landing MID-SPAN needs no mock and no timing: this judge
+    // appends an unrelated event (exactly what a second process, or this
+    // process's own lock-free `memory.injected` path, would do) before
+    // returning its verdict. That is the whole span the LLM round trip holds
+    // open in production, reproduced deterministically.
+    const embedder = fakeEmbedder(VECTORS);
+    const olderId = await seedMemory(MEM_PG, "2026-01-01T00:00:00.000Z");
+    const newerId = await seedMemory(MEM_SQLITE, "2026-01-02T00:00:00.000Z");
+    await ensureEmbeddings(projectId, embedder);
+
+    const judgeThatLosesTheRace: Judge = async () => {
+      await appendEvent({
+        type: "observation.captured",
+        projectId,
+        scopeType: "session",
+        scopeId: projectId,
+        actor: "someone-else",
+        payload: { id: "obs_interloper" } as never,
+      });
+      return { contradicts: true, reason: "opposite datastore choice" };
+    };
+
+    const results = await detectContradictions({
+      projectId,
+      embedder,
+      judge: judgeThatLosesTheRace,
+      actor: "test",
+    });
+
+    // The verdict is dropped, not applied: no supersede, no conflict, and both
+    // memories still valid. A silent success here is the exact defect #189 A
+    // names — a stale judgment landing as permanent, non-idempotent truth.
+    expect(results).toEqual([]);
+    const types = (await readEvents(projectId)).map((event) => event.type);
+    // Proof the span was actually entered: the interloper is the judge's own
+    // side effect, so its absence would mean the pair never reached the judge
+    // (a cosine/threshold drift) and the assertions below would pass
+    // vacuously. Asserted through the log, not a call count.
+    expect(types).toContain("observation.captured");
+    expect(types).not.toContain("memory.superseded");
+    expect(types).not.toContain("conflict.detected");
+    const validIds = listValidMemories(projectId).map((row) => row.memory.id);
+    expect(validIds).toContain(olderId);
+    expect(validIds).toContain(newerId);
+  });
+
   it("a surviving winner keeps scanning and both of its contradictions apply in one call (#118 item 4)", async () => {
     const MEM_WINNER = "Decision Z: use option A (latest call)";
     const MEM_LOSER_1 = "Decision Z: use option B instead of A";
