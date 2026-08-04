@@ -2189,6 +2189,99 @@ describe("consolidate — atomic boundary cursor commit (#139)", () => {
   });
 });
 
+// #232 (PR #231 review, Codex P2, relayed): `conversationSliceHeld` and
+// `extractionTruncated` are local to `run()` and only reach the ATTEMPT
+// record via its success-path return value — a boundary that fails after one
+// of them was computed used to lose it from the failed attempt row, exactly
+// when the signal matters most (memories/segments already durable, and the
+// record that should explain that state carries only `error`).
+describe("consolidate — run()'s side telemetry survives a failure past the point it was computed (#232)", () => {
+  it("records extractionTruncated on the failed attempt when the boundary fails after appendEvents", async () => {
+    await seedObservation("decided x");
+    const oversized = "x".repeat(PER_ITEM_MAX_CHARS + 100);
+    const llm = fakeLlm([JSON.stringify([{ kind: "decision", text: oversized, salience: 5 }])]);
+
+    // Forces the cursor commit (after appendEvents/rebuildProjectProjection)
+    // to fail — the same injection technique as the #139 tests above, keyed
+    // on the watermark row instead of the conversation-offset one so it fires
+    // with no conversation source in play.
+    const db = getDb(projectId);
+    db.exec(
+      "CREATE TRIGGER mori_test_boom_232a BEFORE INSERT ON meta " +
+        "WHEN NEW.key = 'cls_consolidate_watermark' " +
+        "BEGIN SELECT RAISE(ABORT, 'injected #232 test failure'); END;",
+    );
+
+    await expect(consolidate({ projectId, actor: "test", llm })).rejects.toThrow(
+      /injected #232 test failure/,
+    );
+
+    const attempt = readLastConsolidateAttempt(projectId);
+    expect(attempt?.outcome).toBe("error");
+    expect(attempt?.extractionTruncated).toBe(true);
+
+    db.exec("DROP TRIGGER mori_test_boom_232a");
+  });
+
+  it("records conversationSliceHeld on the failed attempt when the boundary fails after the hold was computed", async () => {
+    process.env.MEMORIZE_RAW_SEGMENTS = "0";
+    await seedObservation("decided x");
+    // Same shape as the #139 CLIPPED-tail test: a slice too large to ever
+    // show whole, so the conversation cursor holds and `conversationSliceHeld`
+    // is computed `true`. The extractor returns a memory (not `[]`) so
+    // `inputs.length > 0` and `rebuildProjectProjection` — the step this
+    // test fails — actually runs; with raw segments off and no extracted
+    // memories, that step would be skipped entirely and the injected
+    // failure below would never fire.
+    const huge = Array.from({ length: 4000 }, (_, i) => `USER: line ${i}`).join("\n\n");
+    const conversation = fakeConversation([{ text: huge, newOffset: 512, resumePoints: [] }]);
+    const consolidator: Consolidator = {
+      async extract() {
+        return [{ kind: "decision", text: "extracted despite the held slice", salience: 5 }];
+      },
+    };
+
+    // Fails the projection rebuild itself (its transaction's first insert)
+    // rather than the later cursor commit — proves the mirrored flag
+    // survives specifically the interleave issue #232 named: the hold is
+    // computed BEFORE this point (right after `pruneSegments`) and must
+    // still reach the failed attempt when `rebuildProjectProjection` throws.
+    const db = getDb(projectId);
+    db.exec(
+      "CREATE TRIGGER mori_test_boom_232b BEFORE INSERT ON projects " +
+        "BEGIN SELECT RAISE(ABORT, 'injected #232 test failure'); END;",
+    );
+
+    await expect(
+      consolidate({ projectId, actor: "test", conversation, consolidator }),
+    ).rejects.toThrow(/injected #232 test failure/);
+
+    const attempt = readLastConsolidateAttempt(projectId);
+    expect(attempt?.outcome).toBe("error");
+    expect(attempt?.conversationSliceHeld).toBe(true);
+
+    db.exec("DROP TRIGGER mori_test_boom_232b");
+  });
+
+  it("leaves both fields absent when the failure precedes either being computed", async () => {
+    await seedObservation("decided x");
+    const consolidator: Consolidator = {
+      async extract() {
+        throw new Error("extractor boom");
+      },
+    };
+
+    await expect(consolidate({ projectId, actor: "test", consolidator })).rejects.toThrow(
+      "extractor boom",
+    );
+
+    const attempt = readLastConsolidateAttempt(projectId);
+    expect(attempt?.outcome).toBe("error");
+    expect(attempt?.extractionTruncated).toBeUndefined();
+    expect(attempt?.conversationSliceHeld).toBeUndefined();
+  });
+});
+
 // Codex P2 on PR #136: the extractor sees `bounded.existingMemories`, so a
 // supersedes id naming a memory the budget trimmed away cannot have been
 // judged by the model that emitted it.
