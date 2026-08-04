@@ -6,11 +6,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { closeAll } from "../../src/storage/db.js";
-import {
-  appendEvent,
-  isDuplicateGenesisError,
-  readEvents,
-} from "../../src/storage/event-store.js";
+import { appendEvent, isDuplicateGenesisError, readEvents } from "../../src/storage/event-store.js";
 import { getProjectDbFile } from "../../src/storage/path-resolver.js";
 
 let sandbox: string;
@@ -48,8 +44,8 @@ describe("event-store project.created uniqueness (#236)", () => {
     const projectId = "proj_genesis_dup_01";
 
     await appendEvent(genesisInput(projectId));
-    await expect(appendEvent(genesisInput(projectId))).rejects.toSatisfy(
-      (error: unknown) => isDuplicateGenesisError(error),
+    await expect(appendEvent(genesisInput(projectId))).rejects.toSatisfy((error: unknown) =>
+      isDuplicateGenesisError(error),
     );
 
     const events = await readEvents(projectId);
