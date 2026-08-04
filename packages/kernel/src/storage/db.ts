@@ -223,6 +223,66 @@ function backfillSearchFtsLane(db: Database.Database): void {
 }
 
 /**
+ * Prescan for v18 (#236 / #189 B): stores that already carry two
+ * `project.created` rows for ONE `project_id` cannot take the unique index,
+ * and letting `CREATE UNIQUE INDEX` be the thing that reports that gives the
+ * user one opaque line (`SQLITE_CONSTRAINT: UNIQUE constraint failed:
+ * events.project_id`) on a store that now refuses to open, with no way to tell
+ * what is wrong or what to do. This runs first and fails with the diagnosis
+ * instead: which identities are duplicated, how many rows each has, and that
+ * choosing what to do about them is a human call.
+ *
+ * It only ever SELECTs — deleting or rewriting the offending rows is
+ * deliberately not done here (the issue puts recovery tooling out of scope,
+ * and silently dropping events from an append-only log to make a migration
+ * pass is the failure mode this whole issue exists to remove).
+ *
+ * Same shape as the v15/v16 lane backfills' `scanGenesis` above: synchronous
+ * SQL inside the migration, reading the same `type = 'project.created'` rows.
+ */
+function findDuplicateGenesis(
+  db: Database.Database,
+): Array<{ projectId: string; rowCount: number }> {
+  return db
+    .prepare(
+      `SELECT project_id AS projectId, COUNT(*) AS rowCount
+         FROM events
+        WHERE type = 'project.created'
+        GROUP BY project_id
+       HAVING COUNT(*) > 1
+        ORDER BY project_id`,
+    )
+    .all() as Array<{ projectId: string; rowCount: number }>;
+}
+
+/** How many duplicated identities the v18 error names one by one. */
+const DUPLICATE_GENESIS_REPORT_LIMIT = 5;
+
+export function duplicateGenesisError(
+  duplicates: ReadonlyArray<{ projectId: string; rowCount: number }>,
+): Error {
+  const named = duplicates
+    .slice(0, DUPLICATE_GENESIS_REPORT_LIMIT)
+    .map((row) => `  ${row.projectId}: ${row.rowCount} project.created rows`)
+    .join("\n");
+  // Never let the cap read as "that was all of them" — the count above the
+  // list is the whole population, and anything the list drops is said so.
+  const elided =
+    duplicates.length > DUPLICATE_GENESIS_REPORT_LIMIT
+      ? `\n  ... and ${duplicates.length - DUPLICATE_GENESIS_REPORT_LIMIT} more`
+      : "";
+  return new Error(
+    `Cannot apply migration v18 (one project.created per store): this store ` +
+      `already has ${duplicates.length} project id(s) with more than one ` +
+      `project.created event.\n${named}${elided}\n` +
+      `The migration made no changes and the store was not opened. Nothing ` +
+      `was deleted — deciding what to do with the existing duplicate genesis ` +
+      `events (keep one, keep the store as-is without the constraint, or ` +
+      `something else) is a human decision, not one this migration makes.`,
+  );
+}
+
+/**
  * Ordered DDL migrations applied via `PRAGMA user_version`. The user_version
  * tracks table DDL only; it is ORTHOGONAL to per-row `event.schemaVersion`
  * (which versions payload shape, not table structure). Append future
@@ -772,6 +832,59 @@ const MIGRATIONS: ReadonlyArray<(db: Database.Database, projectId?: string) => v
       DROP TABLE memories;
       ALTER TABLE memories_new RENAME TO memories;
       CREATE INDEX IF NOT EXISTS idx_memories_kind ON memories(kind);
+    `);
+  },
+  // v18 — #236 (#189 B): reject a second `project.created` genesis for the
+  // SAME identity at the database level, instead of relying on caller
+  // discipline. Unique on `project_id` (not on `type` alone) — mirrors
+  // `hasGenesisEvent`'s own WHERE clause exactly (`storage/event-store.ts`:
+  // `type = 'project.created' AND project_id = ?`), so the index is a direct
+  // backstop of that check, not a stricter rule than it.
+  //
+  // `project_id`, not `type`, because a whole-DB workspace union legitimately
+  // carries MULTIPLE distinct `project.created` rows in one store — one per
+  // member (the v12 comment above walks through why; `entity-lane-backfill
+  // .test.ts` / `observation-lane-backfill.test.ts` hand-build exactly that
+  // shape as defense-in-depth fixtures for a mechanism mori has never
+  // shipped). Those rows never share a `project_id` — each member mints its
+  // own genesis with its own id — so scoping the index to `project_id` keeps
+  // that shape legal while still catching the real defect: two rows for ONE
+  // identity, which is only ever the same-store race below (mori has no
+  // `insertExternalEvents`/`pullProject`, so nothing here can write a second
+  // row for a foreign `project_id` either — every row this store appends
+  // carries its own id, `appendEvent` in `storage/event-store.ts`).
+  //
+  // This is the database-level backstop `ensureGenesis`'s in-process
+  // `hasGenesisEvent` check + `withProjectLock` (#132) could not fully be:
+  // `withProjectLock` runs its critical section to completion even after
+  // losing the lock (`ProjectLockCompromisedError` is reported, not
+  // pre-empted — `storage/project-lock.ts`), so two processes racing the
+  // store's very first bootstrap could still both pass `hasGenesisEvent` and
+  // both append. This index turns that into a loud, explicit insert failure
+  // for the loser instead of a silent duplicate — `ensureGenesis` (kernel/
+  // sqlite-memory-kernel.ts) catches exactly that failure and treats it as
+  // "someone else already minted genesis," which is the normal outcome of
+  // losing the race, not an error.
+  //
+  // Additive index only, no table rebuild (unlike v5/v17's create-copy-swap):
+  // this is a plain `CREATE INDEX` on `events` as it stands today, not a
+  // column type change or column removal, so none of those migrations'
+  // swap machinery applies here.
+  //
+  // The prescan runs BEFORE the index so a store that already violates the
+  // constraint gets a readable diagnosis rather than sqlite's bare
+  // `UNIQUE constraint failed: events.project_id` (see
+  // `duplicateGenesisError`). Either way the store does not open — the whole
+  // ladder rolls back with `runMigrations`' transaction — but only one of the
+  // two tells the user what is wrong. This throw is diagnostic only; it
+  // repairs nothing.
+  (db) => {
+    const duplicates = findDuplicateGenesis(db);
+    if (duplicates.length > 0) throw duplicateGenesisError(duplicates);
+
+    db.exec(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_events_genesis_once
+        ON events(project_id) WHERE type = 'project.created';
     `);
   },
 ];
