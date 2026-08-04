@@ -2228,19 +2228,27 @@ describe("consolidate — run()'s side telemetry survives a failure past the poi
     await seedObservation("decided x");
     // Same shape as the #139 CLIPPED-tail test: a slice too large to ever
     // show whole, so the conversation cursor holds and `conversationSliceHeld`
-    // is computed `true` — the write that follows is what this test fails.
+    // is computed `true`. The extractor returns a memory (not `[]`) so
+    // `inputs.length > 0` and `rebuildProjectProjection` — the step this
+    // test fails — actually runs; with raw segments off and no extracted
+    // memories, that step would be skipped entirely and the injected
+    // failure below would never fire.
     const huge = Array.from({ length: 4000 }, (_, i) => `USER: line ${i}`).join("\n\n");
     const conversation = fakeConversation([{ text: huge, newOffset: 512, resumePoints: [] }]);
     const consolidator: Consolidator = {
       async extract() {
-        return [];
+        return [{ kind: "decision", text: "extracted despite the held slice", salience: 5 }];
       },
     };
 
+    // Fails the projection rebuild itself (its transaction's first insert)
+    // rather than the later cursor commit — proves the mirrored flag
+    // survives specifically the interleave issue #232 named: the hold is
+    // computed BEFORE this point (right after `pruneSegments`) and must
+    // still reach the failed attempt when `rebuildProjectProjection` throws.
     const db = getDb(projectId);
     db.exec(
-      "CREATE TRIGGER mori_test_boom_232b BEFORE INSERT ON meta " +
-        "WHEN NEW.key = 'cls_consolidate_watermark' " +
+      "CREATE TRIGGER mori_test_boom_232b BEFORE INSERT ON projects " +
         "BEGIN SELECT RAISE(ABORT, 'injected #232 test failure'); END;",
     );
 
@@ -2263,9 +2271,9 @@ describe("consolidate — run()'s side telemetry survives a failure past the poi
       },
     };
 
-    await expect(
-      consolidate({ projectId, actor: "test", consolidator }),
-    ).rejects.toThrow("extractor boom");
+    await expect(consolidate({ projectId, actor: "test", consolidator })).rejects.toThrow(
+      "extractor boom",
+    );
 
     const attempt = readLastConsolidateAttempt(projectId);
     expect(attempt?.outcome).toBe("error");

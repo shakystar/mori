@@ -2430,6 +2430,76 @@ export async function consolidate(params: ConsolidateParams): Promise<Consolidat
       }
     }
 
+    // #139: "stored WHOLE" is only true if the segments THIS boundary wrote
+    // for this slice are still there — `pruneSegments` (just above) runs
+    // before this check and can delete some or all of them in the same
+    // boundary a slice too large for `SEGMENT_RETENTION_MAX` forces its own
+    // oldest chunks out. `segmentsWritten > 0` alone (the pre-#139 check) only
+    // proved an insert happened, not that it survived retention. Disjoint
+    // from `prunedSegmentIds` is required, not just "not entirely pruned" — a
+    // partially-pruned slice is a partially-lost one, same as never storing
+    // it.
+    const prunedIds = new Set(prunedSegmentIds);
+    const sliceFullyStored =
+      storedSegmentIds.length > 0 && storedSegmentIds.every((id) => !prunedIds.has(id));
+
+    // Per-conversation offset target: advance in lockstep with the event
+    // watermark — the extractor has now seen this slice, so the next boundary
+    // reads only what is new. The invariant is unchanged from #136: "shown or
+    // stored, or else not consumed". What #144 changed is the GRANULARITY.
+    //
+    // - Shown WHOLE (or stored whole regardless) ⇒ commit `newOffset`.
+    // - Shown as a PREFIX ending on one of the source's own resume points ⇒
+    //   commit THAT point's offset. Only the shown part is consumed; the rest
+    //   comes back at the next boundary, which is what lets a slice too large
+    //   for the extraction budget drain over successive boundaries instead of
+    //   pinning the conversation axis forever.
+    // - Anything else (`"clipped"`/`"dropped"` with no resume point) leaves
+    //   part of the slice neither shown to the extractor nor — with the raw
+    //   buffer off, or pruned back out — stored anywhere, which is the same
+    //   loss as dropping it (owner adjudication on PR #136). The cursor holds.
+    //
+    // An EMPTY slice has nothing to lose and always advances, so an idle
+    // conversation never pins the cursor. Computed here but not yet written:
+    // committed together with the event watermark below, in one transaction
+    // (#139).
+    let conversationSliceHeld = false;
+    let conversationOffsetTarget: { sourceId: string; offset: number } | undefined;
+    if (source && slice) {
+      const shownWhole =
+        bounded.transcriptTailCoverage === "whole" || bounded.transcriptTailCoverage === "absent";
+      const shownPrefixOffset =
+        bounded.transcriptTailCoverage === "prefix" &&
+        bounded.transcriptTailPrefixChars !== undefined
+          ? resumePoints?.get(bounded.transcriptTailPrefixChars)
+          : undefined;
+      if (shownWhole || sliceFullyStored || slice.text.length === 0) {
+        conversationOffsetTarget = { sourceId: source.id, offset: slice.newOffset };
+      } else if (shownPrefixOffset !== undefined) {
+        conversationOffsetTarget = { sourceId: source.id, offset: shownPrefixOffset };
+      } else {
+        // Still reachable, and still not allowed to be SILENT — surface it on
+        // the result and the attempt telemetry so a pinned conversation axis is
+        // observable from outside. See `ConsolidateResult.conversationSliceHeld`
+        // for the conditions that survive #144.
+        conversationSliceHeld = true;
+      }
+    }
+    // #232: mirror immediately — everything from here to the end of this
+    // function (the projection rebuild, embeddings, contradiction detection,
+    // and the cursor commit) can throw, and the value is already final by
+    // this point. This block sits right after `pruneSegments` — not at its
+    // originally-drafted position further down, after the rebuild/embeddings
+    // calls — because `rebuildProjectProjection` throwing is exactly the
+    // interleave issue #232 named (memories/segments already durable, then
+    // the projection rebuild fails) and the old position lost this flag on
+    // that exact path. Safe to compute this early: none of the calls between
+    // here and the old position (`rebuildProjectProjection`,
+    // `ensureEmbeddings`, `detectContradictions`, `ensureSegmentEmbeddings`)
+    // read or write `storedSegmentIds`, `prunedSegmentIds`, `bounded`,
+    // `slice`, or `resumePoints` — they only touch the DB via `projectId`.
+    capturedConversationSliceHeld = conversationSliceHeld;
+
     // Rebuild + FTS reindex when there are new memories OR new segments — the
     // reindex (deferred by every capture as reindexSearch:false) repopulates
     // search_fts for memories AND re-emits the kind='segment' rows from the
@@ -2477,7 +2547,8 @@ export async function consolidate(params: ConsolidateParams): Promise<Consolidat
     // re-read (and re-filtered) by the NEXT boundary, since
     // `readEventsSince` resumes strictly after the watermark's `seq`. Computed
     // here but not yet written: committed together with the conversation
-    // offset below, in one transaction (#139).
+    // offset (computed earlier, right after `pruneSegments`), in one
+    // transaction (#139).
     let eventWatermarkId: string | undefined;
     if (bounded.observations.length > 0) {
       eventWatermarkId = observationEvents[bounded.observations.length - 1]!.id;
@@ -2488,65 +2559,6 @@ export async function consolidate(params: ConsolidateParams): Promise<Consolidat
       // foreign-only or fully-deduped window is not rescanned every boundary.
       eventWatermarkId = rawObservationEvents[rawObservationEvents.length - 1]!.id;
     }
-
-    // #139: "stored WHOLE" is only true if the segments THIS boundary wrote
-    // for this slice are still there — `pruneSegments` runs (above) before
-    // this check and can delete some or all of them in the same boundary a
-    // slice too large for `SEGMENT_RETENTION_MAX` forces its own oldest
-    // chunks out. `segmentsWritten > 0` alone (the pre-#139 check) only proved
-    // an insert happened, not that it survived retention. Disjoint from
-    // `prunedSegmentIds` is required, not just "not entirely pruned" — a
-    // partially-pruned slice is a partially-lost one, same as never storing it.
-    const prunedIds = new Set(prunedSegmentIds);
-    const sliceFullyStored =
-      storedSegmentIds.length > 0 && storedSegmentIds.every((id) => !prunedIds.has(id));
-
-    // Per-conversation offset target: advance in lockstep with the event
-    // watermark — the extractor has now seen this slice, so the next boundary
-    // reads only what is new. The invariant is unchanged from #136: "shown or
-    // stored, or else not consumed". What #144 changed is the GRANULARITY.
-    //
-    // - Shown WHOLE (or stored whole regardless) ⇒ commit `newOffset`.
-    // - Shown as a PREFIX ending on one of the source's own resume points ⇒
-    //   commit THAT point's offset. Only the shown part is consumed; the rest
-    //   comes back at the next boundary, which is what lets a slice too large
-    //   for the extraction budget drain over successive boundaries instead of
-    //   pinning the conversation axis forever.
-    // - Anything else (`"clipped"`/`"dropped"` with no resume point) leaves
-    //   part of the slice neither shown to the extractor nor — with the raw
-    //   buffer off, or pruned back out — stored anywhere, which is the same
-    //   loss as dropping it (owner adjudication on PR #136). The cursor holds.
-    //
-    // An EMPTY slice has nothing to lose and always advances, so an idle
-    // conversation never pins the cursor. Computed here but not yet written:
-    // committed together with the event watermark below, in one transaction
-    // (#139).
-    let conversationSliceHeld = false;
-    let conversationOffsetTarget: { sourceId: string; offset: number } | undefined;
-    if (source && slice) {
-      const shownWhole =
-        bounded.transcriptTailCoverage === "whole" || bounded.transcriptTailCoverage === "absent";
-      const shownPrefixOffset =
-        bounded.transcriptTailCoverage === "prefix" &&
-        bounded.transcriptTailPrefixChars !== undefined
-          ? resumePoints?.get(bounded.transcriptTailPrefixChars)
-          : undefined;
-      if (shownWhole || sliceFullyStored || slice.text.length === 0) {
-        conversationOffsetTarget = { sourceId: source.id, offset: slice.newOffset };
-      } else if (shownPrefixOffset !== undefined) {
-        conversationOffsetTarget = { sourceId: source.id, offset: shownPrefixOffset };
-      } else {
-        // Still reachable, and still not allowed to be SILENT — surface it on
-        // the result and the attempt telemetry so a pinned conversation axis is
-        // observable from outside. See `ConsolidateResult.conversationSliceHeld`
-        // for the conditions that survive #144.
-        conversationSliceHeld = true;
-      }
-    }
-    // #232: mirror immediately, same reasoning as `extractionTruncated` above
-    // — `commitBoundaryCursors` right below can still throw, and the value is
-    // already final by this point.
-    capturedConversationSliceHeld = conversationSliceHeld;
 
     // #139: commit both cursors atomically — see `commitBoundaryCursors`. A
     // crash (or thrown error) between the two writes can no longer leave one
