@@ -207,39 +207,11 @@ export async function rebuildProjectProjection(
 
   const db = getDb(projectId);
   const writeAll = db.transaction(() => {
-    // Retrieval reinforcement (`last_accessed_at`) lives ONLY in the
-    // projection table — it is not an event, so a replace-all rebuild would
-    // wipe it on every write. Carry it over across routine rebuilds; a true
-    // from-scratch replay (fresh db, corruption recovery) resets it, which
-    // is the accepted best-effort grade of reinforcement (decision ⑤ —
-    // decay stays deterministic, reinforcement is a derived-layer
-    // convenience, not part of the source of truth).
-    // `injection_count` (#62 behavioral telemetry) rides the same carry-over:
-    // projection-only, observe-only, reset by a from-scratch replay.
-    const accessStateById = new Map<
-      string,
-      { lastAccessedAt: string | null; injectionCount: number }
-    >(
-      (
-        db
-          .prepare(
-            "SELECT id, last_accessed_at, injection_count FROM memories " +
-              "WHERE last_accessed_at IS NOT NULL OR injection_count > 0",
-          )
-          .all() as Array<{
-          id: string;
-          last_accessed_at: string | null;
-          injection_count: number;
-        }>
-      ).map((row) => [
-        row.id,
-        {
-          lastAccessedAt: row.last_accessed_at,
-          injectionCount: row.injection_count,
-        },
-      ]),
-    );
-
+    // Retrieval reinforcement (`last_accessed_at`, `injection_count`) is NOT
+    // wiped and re-derived here: it lives in `memory_access` (v17, #235),
+    // which is absent from the two table lists below on purpose, so the
+    // DELETE loop never reaches it. Nothing to carry over — see the v17
+    // comment in storage/db.ts for why carrying it over was the defect.
     for (const table of [...SINGLETON_TABLES, ...ENTITY_TABLES]) {
       db.prepare(`DELETE FROM ${table}`).run();
     }
@@ -440,13 +412,12 @@ export async function rebuildProjectProjection(
     const insertMemory = db.prepare(
       `INSERT INTO memories
          (id, kind, salience, created_at, invalid_at, superseded_by,
-          deduped_by, last_accessed_at, injection_count, source_project_id, data)
+          deduped_by, source_project_id, data)
        VALUES
          (@id, @kind, @salience, @createdAt, @invalidAt, @supersededBy,
-          @dedupedBy, @lastAccessedAt, @injectionCount, @sourceProjectId, @data)`,
+          @dedupedBy, @sourceProjectId, @data)`,
     );
     for (const memory of Object.values(state.memories)) {
-      const accessState = accessStateById.get(memory.id);
       // Memories are id-keyed (unique ids); the lane rides on the record itself.
       const sourceProjectId = memory.sourceProjectId ?? null;
       insertMemory.run({
@@ -457,8 +428,6 @@ export async function rebuildProjectProjection(
         invalidAt: memory.invalidAt ?? null,
         supersededBy: memory.supersededBy ?? null,
         dedupedBy: memory.dedupedBy ?? null,
-        lastAccessedAt: accessState?.lastAccessedAt ?? null,
-        injectionCount: accessState?.injectionCount ?? 0,
         sourceProjectId,
         data: JSON.stringify(memory),
       });
@@ -724,23 +693,38 @@ export function getSession(projectId: string, sessionId: string): Session | unde
 
 // --- CLS two-layer memory (Phase 1) -----------------------------------------
 
-/** A valid (non-superseded) memory plus its best-effort reinforcement stamp. */
+/** A valid (non-superseded) memory plus its reinforcement stamp, if any. */
 export interface ValidMemoryRow {
   memory: MemoryRecord;
-  /** Projection-only reinforcement signal — may reset on a full replay (⑤). */
+  /**
+   * Projection-only reinforcement signal (`memory_access`, v17). Absent until
+   * the memory has actually been injected once — never reinforced is the
+   * normal state, not a degraded one.
+   */
   lastAccessedAt?: string;
 }
 
 /**
+ * LEFT JOIN, never INNER: `memory_access` holds a row only for memories that
+ * have been injected at least once, so an inner join would drop every
+ * never-reinforced memory from retrieval — i.e. most of them on a young store.
+ */
+const MEMORY_ACCESS_JOIN =
+  "FROM memories LEFT JOIN memory_access ON memory_access.memory_id = memories.id";
+
+/**
  * Read a single memory by id (valid or already-superseded), with its
- * best-effort reinforcement stamp. Mirrors the single-entity readers
- * (getTask/getRule) but carries `lastAccessedAt` like listValidMemories so
- * `memory show` can surface the reinforcement signal. Returns undefined when
- * no memory with that id exists in the project.
+ * reinforcement stamp. Mirrors the single-entity readers (getTask/getRule) but
+ * carries `lastAccessedAt` like listValidMemories so `memory show` can surface
+ * the reinforcement signal. Returns undefined when no memory with that id
+ * exists in the project.
  */
 export function getMemory(projectId: string, memoryId: string): ValidMemoryRow | undefined {
   const row = db(projectId)
-    .prepare("SELECT data, last_accessed_at FROM memories WHERE id = ?")
+    .prepare(
+      `SELECT memories.data AS data, memory_access.last_accessed_at AS last_accessed_at ` +
+        `${MEMORY_ACCESS_JOIN} WHERE memories.id = ?`,
+    )
     .get(memoryId) as { data: string; last_accessed_at: string | null } | undefined;
   if (!row) return undefined;
   return {
@@ -761,8 +745,11 @@ export function listValidMemories(
 ): ValidMemoryRow[] {
   const rows = db(projectId)
     .prepare(
-      `SELECT data, last_accessed_at FROM memories ` +
-        `WHERE invalid_at IS NULL AND ${laneWhere(lane)}`,
+      `SELECT memories.data AS data, memory_access.last_accessed_at AS last_accessed_at ` +
+        `${MEMORY_ACCESS_JOIN} ` +
+        // `laneWhere` names a bare `source_project_id`; only `memories` has one,
+        // so it stays unambiguous across the join.
+        `WHERE memories.invalid_at IS NULL AND ${laneWhere(lane)}`,
     )
     .all() as Array<{ data: string; last_accessed_at: string | null }>;
   return rows.map((row) => ({
@@ -800,12 +787,16 @@ export function listRecentObservations(
 }
 
 /**
- * Retrieval reinforcement: stamp `last_accessed_at` on the memories that
- * were just injected into a session. This is a projection-level UPDATE on a
- * DERIVED table — the events log is untouched, so the append-only invariant
- * holds. Deliberately best-effort (decision ⑤): survives routine rebuilds
- * via the carry-over in rebuildProjectProjection, resets on a from-scratch
- * replay.
+ * Retrieval reinforcement: stamp `last_accessed_at` on the memories that were
+ * just injected into a session. Projection-level write on the DERIVED
+ * `memory_access` table (v17, #235) — the events log is untouched, so the
+ * append-only invariant holds.
+ *
+ * The upsert is ONE statement per id, so the counter bump is atomic even
+ * though this runs outside the project lock (`transformContext` cannot take
+ * one). `rebuildProjectProjection` no longer touches this table at all, so
+ * neither a routine rebuild nor a from-scratch replay can revert what is
+ * written here.
  */
 export function touchMemoryAccess(
   projectId: string,
@@ -816,13 +807,16 @@ export function touchMemoryAccess(
   const database = db(projectId);
   // #62 — startup injection is also an injection: bump the telemetry counter
   // in the same statement as the reinforcement stamp.
-  const update = database.prepare(
-    "UPDATE memories SET last_accessed_at = ?, " +
-      "injection_count = injection_count + 1 WHERE id = ?",
+  const upsert = database.prepare(
+    "INSERT INTO memory_access (memory_id, last_accessed_at, injection_count) " +
+      "VALUES (?, ?, 1) " +
+      "ON CONFLICT(memory_id) DO UPDATE SET " +
+      "last_accessed_at = excluded.last_accessed_at, " +
+      "injection_count = memory_access.injection_count + 1",
   );
   database.transaction(() => {
     for (const memoryId of memoryIds) {
-      update.run(accessedAtIso, memoryId);
+      upsert.run(memoryId, accessedAtIso);
     }
   })();
 }
@@ -831,19 +825,22 @@ export function touchMemoryAccess(
  * #62 behavioral telemetry — count a mid-session live-share injection of a
  * memory. UNLIKE touchMemoryAccess this deliberately does NOT stamp
  * `last_accessed_at`: reinforcement feeds retrieval ranking, and the #62
- * contract is observe-only (no behavior change to injection/ranking). Same
- * best-effort grade: projection-level UPDATE, carried over across routine
- * rebuilds, reset by a from-scratch replay.
+ * contract is observe-only (no behavior change to injection/ranking). Hence
+ * the upsert names only `injection_count` — an inserted row leaves
+ * `last_accessed_at` at its NULL default, and an existing row keeps whatever
+ * stamp it already had.
  */
 export function bumpMemoryInjections(projectId: string, memoryIds: string[]): void {
   if (memoryIds.length === 0) return;
   const database = db(projectId);
-  const update = database.prepare(
-    "UPDATE memories SET injection_count = injection_count + 1 WHERE id = ?",
+  const upsert = database.prepare(
+    "INSERT INTO memory_access (memory_id, injection_count) VALUES (?, 1) " +
+      "ON CONFLICT(memory_id) DO UPDATE SET " +
+      "injection_count = memory_access.injection_count + 1",
   );
   database.transaction(() => {
     for (const memoryId of memoryIds) {
-      update.run(memoryId);
+      upsert.run(memoryId);
     }
   })();
 }
