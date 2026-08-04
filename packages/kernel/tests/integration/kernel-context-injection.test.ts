@@ -553,3 +553,65 @@ describe("turn-level retrieval (#5 2/3-b)", () => {
     expect(next[0]).toContain("zephyr pipeline");
   });
 });
+
+describe("resetConversation (#234)", () => {
+  it("lets the untargeted session-start read fire again for the conversation after /clear", async () => {
+    const { kernel } = harness();
+    await seedObservation(kernel);
+
+    // First conversation: session-start read fires once, and — the premise this
+    // guards, pinned the same way #149's own "does not inject again" case is —
+    // a second call in the SAME conversation gets nothing further.
+    expect(injectedCount(await kernel.transformContext(["one"]))).toBe(1);
+    expect(injectedCount(await kernel.transformContext(["one", "two"]))).toBe(0);
+
+    // `/clear`: a new conversation has not asked this kernel anything yet, so
+    // its first call must get the session-start injection back — that is
+    // exactly what #234 reports missing.
+    kernel.resetConversation();
+    expect(injectedCount(await kernel.transformContext(["one"]))).toBe(1);
+  });
+
+  it("retrieves again for a turn identical to the previous conversation's last one", async () => {
+    const turn: TurnQuery = { query: "zephyr", turnId: "turn-1" };
+    const { kernel } = harness({ readQuery: () => turn });
+    await seedObservation(kernel);
+    const retrievals = vi.spyOn(contextService, "buildMemoryContext");
+
+    try {
+      await kernel.transformContext(["one"]);
+      expect(retrievals).toHaveBeenCalledTimes(1);
+      // Unchanged turn, same conversation: the read is skipped (isRepeatCall),
+      // the cached block is reattached instead — existing behaviour, pinned as
+      // the premise the next assertion contrasts with.
+      await kernel.transformContext(["one", "two"]);
+      expect(retrievals).toHaveBeenCalledTimes(1);
+
+      // `/clear`, then the harness happens to ask the exact same TurnQuery
+      // (turn ids can collide across conversations, e.g. a harness that resets
+      // its own turn counter — mori's does not, but the kernel cannot assume
+      // that of every harness). Without the reset this would still read from
+      // `lastRetrieval` and skip the store; the new conversation would silently
+      // run on a retrieval the OLD conversation performed.
+      kernel.resetConversation();
+      await kernel.transformContext(["one"]);
+      expect(retrievals).toHaveBeenCalledTimes(2);
+    } finally {
+      retrievals.mockRestore();
+    }
+  });
+
+  it("does not cancel or wait for the capture queue", async () => {
+    const { kernel } = harness();
+
+    // Queue a capture and reset in the same tick, no await between them: the
+    // point is that `resetConversation` must not touch `tail` at all, in
+    // either direction (cancel it or block on it).
+    kernel.observe(observedShell({ toolName: "bash", command: "git commit -m 'pick zephyr'" }));
+    kernel.resetConversation();
+
+    await kernel.drain();
+    const events = await readEvents(projectId);
+    expect(events.some((event) => event.type === "observation.captured")).toBe(true);
+  });
+});
