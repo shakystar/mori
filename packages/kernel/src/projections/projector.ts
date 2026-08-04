@@ -29,8 +29,9 @@ import type {
  * A consolidated memory plus its replay-derived validity window. The
  * invalidation fields come from `memory.superseded` events (bi-temporal,
  * invalidate-not-delete) — fully deterministic under replay. Retrieval
- * reinforcement (`last_accessed_at`) is deliberately NOT here: it is a
- * projection-table-only, best-effort column (decision ⑤).
+ * reinforcement (`last_accessed_at`) is deliberately NOT here: no event
+ * carries it, and it lives in its own projection table (`memory_access`, v17)
+ * that replay does not reconstruct — or reset.
  */
 export interface MemoryRecord extends ConsolidatedMemory {
   invalidAt?: string;

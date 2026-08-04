@@ -16,8 +16,9 @@ import { listSegmentTexts } from "./segment-store.js";
  *
  * Forgetting is retrieval-time ONLY (D4): nothing is deleted, low scores
  * just fall outside the budget. Decay is deterministic (createdAt-based);
- * reinforcement (lastAccessedAt) is the best-effort projection signal that
- * bumps effective recency when present (decision ⑤).
+ * reinforcement (lastAccessedAt) is the projection-level signal that bumps
+ * effective recency when present, and is absent until a memory has been
+ * injected at least once.
  *
  * Every constant below is a TUNING PARAMETER (start values from the
  * 2026-06-08 decisions) — adjust against real transcripts, not in advance.
@@ -97,8 +98,9 @@ export function retrieveMemoryContext(
 
   for (const row of listValidMemories(projectId)) {
     const { memory, lastAccessedAt } = row;
-    // Reinforcement: a re-referenced memory decays from its last access,
-    // not its creation (best-effort — resets with a from-scratch replay).
+    // Reinforcement: a re-referenced memory decays from its last access, not
+    // its creation. Never-injected memories have no stamp and decay from
+    // createdAt.
     const reference =
       lastAccessedAt && lastAccessedAt > memory.createdAt ? lastAccessedAt : memory.createdAt;
     const base = 0.5 * (memory.salience / 10) + 0.5 * recencyScore(reference, nowMs);

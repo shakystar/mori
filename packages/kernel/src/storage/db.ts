@@ -376,9 +376,12 @@ const MIGRATIONS: ReadonlyArray<(db: Database.Database, projectId?: string) => v
   // events — always reconstructable by replay. The mutable columns on
   // `memories` (`invalid_at`, `superseded_by`, `last_accessed_at`) live at
   // the DERIVED projection level only; the events table stays append-only.
-  // `last_accessed_at` (retrieval reinforcement) is intentionally
-  // best-effort: carried over across routine rebuilds, reset by a true
-  // from-scratch replay (decision ⑤, 2026-06-08).
+  // `last_accessed_at` (retrieval reinforcement) is NOT reconstructable that
+  // way — no event carries it — so this migration parked it on the `memories`
+  // row and the rebuild carried it across its own DELETE. v17 (#235) moved it
+  // (and v9's `injection_count`) OUT to `memory_access` and dropped both
+  // columns from this table; read that entry for the current shape and for why
+  // the carry-over had to go.
   (db) => {
     db.exec(`
       CREATE TABLE IF NOT EXISTS observations (
@@ -436,10 +439,10 @@ const MIGRATIONS: ReadonlyArray<(db: Database.Database, projectId?: string) => v
   },
   // v9 — #62 behavioral lifecycle telemetry: how often a memory was actually
   // injected into an agent context (startup AND mid-session live share).
-  // DERIVED-level, observe-only counter: like `last_accessed_at` it is
-  // best-effort — carried over across routine rebuilds, reset by a true
-  // from-scratch replay — and read by NO ranking/injection consumer; only
-  // the `consolidate --report` evidence dump aggregates it.
+  // DERIVED-level, observe-only counter that no ranking/injection consumer
+  // reads. Like `last_accessed_at` it is not derivable from the event log, so
+  // it rode the same rebuild carry-over — and v17 (#235) moved it to
+  // `memory_access` for the same reason, dropping this column.
   (db) => {
     db.exec("ALTER TABLE memories ADD COLUMN injection_count INTEGER NOT NULL DEFAULT 0;");
   },
@@ -686,6 +689,90 @@ const MIGRATIONS: ReadonlyArray<(db: Database.Database, projectId?: string) => v
     backfillEntityTableLane(db, "memories", "memory.consolidated", idOf, true, selfId, isUnion);
 
     backfillSearchFtsLane(db);
+  },
+  // v17 — #235 (#189 C): move the reinforcement telemetry off the `memories`
+  // row into its own `memory_access` table, keyed by memory id.
+  //
+  // `last_accessed_at` (v6) and `injection_count` (v9) are the only two things
+  // on a `memories` row that the event log cannot reconstruct. Everything else
+  // there comes out of `reduceProjectState`, so `rebuildProjectProjection`
+  // could DELETE the table and re-derive it — except for these two, which it
+  // had to SELECT first and write back on re-insert. That carry-over is a
+  // read-modify-write spanning the entire rebuild transaction, and the writers
+  // that feed it (`touchMemoryAccess` / `bumpMemoryInjections`) run OUTSIDE
+  // any lock: their caller is `transformContext`, which runs before every LLM
+  // call, is contractually forbidden to throw, and must not create a store.
+  // A reinforcement landing inside that window was silently reverted to the
+  // pre-rebuild value — and the losing writer got no signal, because its
+  // UPDATE really had succeeded.
+  //
+  // `memory_access` is deliberately NOT registered in `SINGLETON_TABLES` /
+  // `ENTITY_TABLES` (services/projection-store.ts), so the rebuild's
+  // `DELETE FROM ${table}` loop never touches it, there is nothing left to
+  // carry over, and the window is GONE rather than guarded. Consequence, and a
+  // real semantic change from v6/v9: a from-scratch replay no longer resets
+  // reinforcement either. The "best-effort, resets on replay" grade those two
+  // migrations recorded no longer describes this store.
+  //
+  // The columns are REMOVED from `memories`, not left in place: two sinks for
+  // one value is exactly how this defect grows back — a stray write to
+  // `memories.last_accessed_at` added later would compile, run, and be
+  // authoritative for nobody. Gone, it fails loudly instead. Table rebuild
+  // (create → copy → swap, the v5 precedent) rather than
+  // `ALTER TABLE ... DROP COLUMN`, so this does not depend on the bundled
+  // SQLite being >= 3.35.
+  //
+  // Orphan rows (the memory is later invalidated, or the id never existed) are
+  // harmless and NOT collected: every reader LEFT JOINs from `memories`, so an
+  // access row with no memory is invisible.
+  (db) => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS memory_access (
+        memory_id        TEXT PRIMARY KEY,
+        last_accessed_at TEXT,
+        injection_count  INTEGER NOT NULL DEFAULT 0
+      );
+    `);
+
+    // Both columns arrive together on any real ladder (v6 then v9) and leave
+    // together below, so one of them is enough to tell the two shapes apart.
+    // Absent => `memories` is already post-v17 and there is nothing to move:
+    // return rather than fail. `runMigrations` never replays a migration on a
+    // real store, but test fixtures rewind `user_version` over a
+    // current-schema db on purpose, and a migration that only reads what it
+    // itself removed cannot survive that.
+    const hasLegacyColumns = (
+      db.prepare("PRAGMA table_info(memories)").all() as Array<{ name: string }>
+    ).some((column) => column.name === "last_accessed_at");
+    if (!hasLegacyColumns) return;
+
+    db.exec(`
+      INSERT INTO memory_access (memory_id, last_accessed_at, injection_count)
+        SELECT id, last_accessed_at, injection_count FROM memories
+        WHERE last_accessed_at IS NOT NULL OR injection_count > 0;
+
+      CREATE TABLE memories_new (
+        id                TEXT PRIMARY KEY,
+        kind              TEXT,
+        salience          INTEGER,
+        created_at        TEXT,
+        invalid_at        TEXT,
+        superseded_by     TEXT,
+        deduped_by        TEXT,
+        source_project_id TEXT,
+        data              TEXT NOT NULL
+      );
+      INSERT INTO memories_new
+        (id, kind, salience, created_at, invalid_at, superseded_by,
+         deduped_by, source_project_id, data)
+      SELECT
+        id, kind, salience, created_at, invalid_at, superseded_by,
+        deduped_by, source_project_id, data
+      FROM memories;
+      DROP TABLE memories;
+      ALTER TABLE memories_new RENAME TO memories;
+      CREATE INDEX IF NOT EXISTS idx_memories_kind ON memories(kind);
+    `);
   },
 ];
 
