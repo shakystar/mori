@@ -96,6 +96,7 @@ function spyKernel(consolidate: MoriKernel["consolidate"] = async () => {}): Mor
     transformContext: async (messages: AgentMessage[]) => messages,
     observe: () => {},
     drain: async () => {},
+    resetConversation: () => {},
     consolidate: async (llm) => {
       consolidateCalls.push(llm);
       await consolidate(llm);
