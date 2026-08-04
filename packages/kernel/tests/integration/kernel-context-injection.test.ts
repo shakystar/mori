@@ -31,7 +31,8 @@ import {
   rebuildProjectProjection,
 } from "../../src/services/projection-store.js";
 import { closeAll } from "../../src/storage/db.js";
-import { appendEvent } from "../../src/storage/event-store.js";
+import { appendEvent, readEvents } from "../../src/storage/event-store.js";
+import * as eventStore from "../../src/storage/event-store.js";
 import { getProjectDbFile } from "../../src/storage/path-resolver.js";
 
 type FakeEvent = ObservedToolCall;
@@ -274,6 +275,61 @@ describe("SqliteMemoryKernel.transformContext — session-start injection", () =
         // making the assertion above pass for the wrong reason.
         const row = listValidMemories(projectId).find((r) => r.memory.id === "mem_a");
         expect(row?.lastAccessedAt).toBeUndefined();
+      } finally {
+        spy.mockRestore();
+      }
+    });
+  });
+
+  describe("memory.injected event (#5 2/3-a, mori#214)", () => {
+    it("appends one memory.injected event, with the injected memory ids, once render succeeds", async () => {
+      await seedEmptyStore();
+      await seedMemory("mem_a", "chose zephyr as the deploy target");
+      await rebuildProjectProjection(projectId);
+      const { kernel } = harness();
+
+      const result = await kernel.transformContext(["one"]);
+
+      expect(injectedCount(result)).toBe(1);
+      const events = await readEvents(projectId);
+      const injected = events.filter((event) => event.type === "memory.injected");
+      expect(injected).toHaveLength(1);
+      expect(injected[0]?.payload).toEqual({ memoryIds: ["mem_a"] });
+    });
+
+    it("appends no memory.injected event when the harness's renderer throws", async () => {
+      await seedEmptyStore();
+      await seedMemory("mem_a", "chose zephyr as the deploy target");
+      await rebuildProjectProjection(projectId);
+      const { kernel } = harness({ throwOnRender: true });
+
+      await expect(kernel.transformContext(["one"])).resolves.toEqual(["one"]);
+
+      const events = await readEvents(projectId);
+      expect(events.some((event) => event.type === "memory.injected")).toBe(false);
+    });
+
+    it("still returns the rendered injection when the memory.injected append itself fails", async () => {
+      await seedEmptyStore();
+      await seedMemory("mem_a", "chose zephyr as the deploy target");
+      await rebuildProjectProjection(projectId);
+      const { kernel } = harness();
+      const spy = vi.spyOn(eventStore, "appendEvent").mockImplementation(async () => {
+        throw new Error("append boom — e.g. a lock held by another process");
+      });
+
+      try {
+        const result = await kernel.transformContext(["one"]);
+        // Same shape of guard as the reinforcement case above: the append
+        // failure must not undo the injection already computed and about to
+        // be returned.
+        expect(injectedCount(result)).toBe(1);
+        // Independent evidence the spy actually intercepted the call, not
+        // just that the assertion above passed for the wrong reason (PR #198
+        // review precedent): if the named-import binding had bypassed the
+        // spy, the event would exist in the log.
+        const events = await readEvents(projectId);
+        expect(events.some((event) => event.type === "memory.injected")).toBe(false);
       } finally {
         spy.mockRestore();
       }
