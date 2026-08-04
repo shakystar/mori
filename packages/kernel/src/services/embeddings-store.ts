@@ -1,4 +1,5 @@
 import { getDb } from "../storage/db.js";
+import { laneWhere } from "./projection-store.js";
 
 /**
  * Read/write the `embeddings` table (v8) — the derived, best-effort semantic
@@ -123,13 +124,47 @@ export function listEmbeddings(projectId: string, kind?: string, model?: string)
 
 /**
  * Cheap existence probe: does this project's corpus hold at least one vector
- * for `kind` under `model`? Unlike {@link listEmbeddings}, this never reads
- * the `vector` column (a `SELECT 1 … LIMIT 1`), so a caller that only needs to
- * know "is there anything to embed against" does not pay to load the corpus
- * it is trying to avoid touching (mori#237).
+ * for `kind` under `model` that a consumer would actually use? Unlike
+ * {@link listEmbeddings}, this never reads the `vector` column (a
+ * `SELECT 1 … LIMIT 1`), so a caller that only needs to know "is there
+ * anything to embed against" does not pay to load the corpus it is trying to
+ * avoid touching (mori#237).
+ *
+ * `kind === "memory"` joins to `memories` and applies the SAME liveness
+ * filter `listValidMemories` reads through (`invalid_at IS NULL` + self-lane
+ * `laneWhere`, projection-store.ts:742) — mori#257: a memory's row in
+ * `embeddings` outlives invalidation (`deleteEmbedding` has no caller in this
+ * repo), so without this join a project whose memories are all invalidated
+ * would probe `true` forever and `buildMemoryContext` would keep paying for a
+ * remote embed the consumer can never use. Both indexed columns
+ * (`embeddings.entity_id`/`memories.id` PRIMARY KEY pair, `idx_embeddings_kind`)
+ * back the join and `LIMIT 1` still short-circuits on the first live match, so
+ * this stays a cheap existence probe, not a corpus load.
+ *
+ * `kind === "segment"` is NOT joined: `pruneSegments` deletes a segment's
+ * `embeddings` row in the SAME transaction as the `segments` row
+ * (segment-store.ts `pruneSegments`), so the retention path never produces an
+ * orphaned segment embedding, and `upsertSegmentEmbeddingIfLive`
+ * (embeddings-service.ts, mori#255 defect 2) closes the one write-side race
+ * that could have resurrected one. There is no liveness gap to close here —
+ * see the issue body for the code audit that ruled this out.
  */
 export function hasEmbeddings(projectId: string, kind: string, model: string): boolean {
-  const row = getDb(projectId)
+  const db = getDb(projectId);
+  if (kind === "memory") {
+    const row = db
+      .prepare(
+        `SELECT 1
+           FROM embeddings
+           JOIN memories ON memories.id = embeddings.entity_id
+          WHERE embeddings.kind = ? AND embeddings.model = ?
+            AND memories.invalid_at IS NULL AND ${laneWhere("self")}
+          LIMIT 1`,
+      )
+      .get(kind, model);
+    return row !== undefined;
+  }
+  const row = db
     .prepare("SELECT 1 FROM embeddings WHERE kind = ? AND model = ? LIMIT 1")
     .get(kind, model);
   return row !== undefined;
