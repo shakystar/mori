@@ -123,7 +123,7 @@
  * two embedder round trips, and — whenever a configured judge flags a
  * candidate pair — one LLM call per pair compared, `detectContradictions`'s
  * judge loop, which only runs on the `inputs.length > 0` branch, so a
- * segment-only tail is shorter but not check-point-free; #227 corrects an
+ * segment-only tail is shorter but no better protected; #227 corrects an
  * earlier count that omitted the judge calls, Codex P2 on PR #245). A holder
  * dispossessed inside it therefore runs to the end, and the doc must not read
  * as though it stopped.
@@ -138,14 +138,16 @@
  * append to stop after — the raw segments are already on disk before the tail
  * even starts (check point ④ sits after the raw-segment write, per the check
  * point list above). What a fifth check point would instead protect is the
- * segment-FTS reindex inside `rebuildProjectProjection` and the CONVERSATION
- * offset `commitBoundaryCursors` advances on `sliceFullyStored`, which does
- * not consult `inputs.length` at all (this file's `run()`). Stopping before
- * the reindex would leave that offset advanced past a slice whose segments
- * are stored but not yet searchable — not lost memories, but a lost SEGMENT
- * PROJECTION for a conversation window the offset already treats as
- * consumed, healed only by the next rebuild that runs to completion, the same
- * recovery path as the memory case above.
+ * segment-FTS reindex inside `rebuildProjectProjection` — but
+ * `commitBoundaryCursors` (①), including the CONVERSATION offset it advances
+ * on `sliceFullyStored` (this file's `run()`, which does not consult
+ * `inputs.length` at all), sits at the very end of `run()`, after that
+ * reindex. Stopping before it therefore means neither cursor moves
+ * (`consolidate-service.ts:2383-2388`), same as check point ④ already
+ * guarantees on the memory-extraction branch: the watermark stays exactly
+ * where `run()` found it, and the next boundary re-chunks and re-inserts the
+ * same slice — a duplicate `pruneSegments` bounds and heals, not a lost
+ * SEGMENT PROJECTION behind an already-advanced offset.
  *
  * What runs after the append, in order, each classified by what a race there
  * can actually cost (#227; corrects an earlier draft that missed three writes
