@@ -1278,17 +1278,27 @@ describe("extractionCharBudget — model-aware extraction budget (#143)", () => 
     expect(budget).toBeLessThan(MAX_EXTRACTION_INPUT_CHARS);
   });
 
-  // #174 — before the fix, `estimateTokens` applied the CJK-worst-case
+  // #174 — before that fix, `estimateTokens` applied the CJK-worst-case
   // `CONSERVATIVE_CHARS_PER_TOKEN` to the (English, fixed) system prompt too,
   // inflating it to ~6,400 "tokens" and leaving an 8,192-token window only
   // 267 derived chars — not enough for a single observation to survive
   // `boundExtractionInput`'s minimum. Guards the regression directly.
+  //
+  // Threshold recalibrated 1_000 -> 900 by #212: that issue corrected
+  // `SYSTEM_PROMPT_CHARS_PER_TOKEN` from `3` (an English-BPE rule of thumb,
+  // which undercounted the fixed prompt for a byte-level tokenizer) to `1`
+  // (that tokenizer's exact ASCII worst case), which counts a few hundred
+  // more system-prompt tokens and so legitimately lowers the derived budget
+  // at every window (1,236 -> 978 at 8,192). 900 keeps the assertion
+  // meaningful — it still fails hard against the #174 regression's ~267 (or
+  // a floor of 0), it just isn't tuned to a stale pre-#212 number that
+  // assumed an undercounted system prompt.
   it("leaves a usable budget for an 8,192-token declared context window", () => {
     const budget = extractionCharBudget({
       complete: async () => "[]",
       contextWindowTokens: 8_192,
     });
-    expect(budget).toBeGreaterThanOrEqual(1_000);
+    expect(budget).toBeGreaterThanOrEqual(900);
   });
 
   // #174 — same regression, at the floor: before the fix this window's
@@ -1358,6 +1368,39 @@ describe("extractionCharBudget — model-aware extraction budget (#143)", () => 
     const drained = await consolidate({ projectId, actor: "test", llm });
     expect(drained).toMatchObject({ observationsProcessed: 0, outcome: "noop" });
   });
+});
+
+// #212 (PR #196 Codex P1) — SYSTEM_PROMPT_CHARS_PER_TOKEN is an English-BPE
+// approximation (~4 chars/token, with margin). A byte-level tokenizer's worst
+// case for the fixed ASCII EXTRACTION_SYSTEM_PROMPT is 1 BYTE = 1 TOKEN
+// (EXTRACTION_SYSTEM_PROMPT.length, exactly), not the ~4x-fewer count the
+// English approximation assumes. Reproduces the issue's own table
+// independently of SYSTEM_PROMPT_CHARS_PER_TOKEN (a hardcoded byte-level
+// count, not `EXTRACTION_SYSTEM_PROMPT.length / SYSTEM_PROMPT_CHARS_PER_TOKEN`
+// — same reasoning as the CJK backlog test above, so this only passes if the
+// render is ACTUALLY within budget under that tokenizer, not merely
+// self-consistent with the constant under test): worst-case total tokens a
+// byte-level-tokenizer provider would see — the fixed system prompt at 1
+// char/token, the derived user budget at its own declared CJK worst case (1
+// char <= 3 tokens), and the output reservation actually requested — must
+// never exceed the declared context window. Before this issue's fix this
+// failed on every narrow window (e.g. a 4,000-token window overshoots to
+// ~5,546 actual tokens before a single user character is sent) — see PR body
+// for the failing run.
+describe("extractionCharBudget — system prompt accounting under a byte-level tokenizer (#212)", () => {
+  const byteLevelSystemPromptTokens = EXTRACTION_SYSTEM_PROMPT.length;
+
+  it.each([2_400, 3_000, 4_000, 8_192, 16_000, 128_000])(
+    "stays within a %i-token declared context window for a CJK-heavy worst case",
+    (contextWindowTokens) => {
+      const llm = { complete: async () => "[]", contextWindowTokens };
+      const budgetChars = extractionCharBudget(llm);
+      const reservedOutput = reservedOutputTokensFor(contextWindowTokens);
+      const worstCaseUserTokens = budgetChars * 3; // CJK: 1 char <= 3 tokens
+      const worstCaseTotal = byteLevelSystemPromptTokens + worstCaseUserTokens + reservedOutput;
+      expect(worstCaseTotal).toBeLessThanOrEqual(contextWindowTokens);
+    },
+  );
 });
 
 // Codex P1 on PR #136: the tail was dropped on the argument that the raw
