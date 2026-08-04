@@ -30,6 +30,7 @@ import {
 import { renderMemoryContext } from "../../src/services/context-render.js";
 import { buildMemoryContext, type MemoryContext } from "../../src/services/context-service.js";
 import * as contextService from "../../src/services/context-service.js";
+import { upsertEmbedding } from "../../src/services/embeddings-store.js";
 import * as memoryRetrievalService from "../../src/services/memory-retrieval-service.js";
 import {
   listValidMemories,
@@ -369,6 +370,19 @@ describe("turn-level retrieval (#5 2/3-b)", () => {
       .run(id, "s1", "2026-01-01T00:00:00.000Z", 0, null, text);
   }
 
+  /** Seeds a same-model vector via the real write path (mori#237 corpus probe). */
+  function seedEmbedding(entityId: string, kind: string, model: string): void {
+    upsertEmbedding(projectId, {
+      entityId,
+      kind,
+      model,
+      dim: 3,
+      vector: [0, 1, 0],
+      textHash: "test-hash",
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+  }
+
   /** Empty store + one memory + one segment per topic, all indexed. */
   async function seedTopics(): Promise<void> {
     await seedEmptyStore();
@@ -511,6 +525,12 @@ describe("turn-level retrieval (#5 2/3-b)", () => {
 
   it("records nothing for a turn cancelled mid-retrieval, so a later turn still gets it", async () => {
     await seedTopics();
+    // mori#237: the corpus probe only calls embed when at least one channel
+    // has a same-model vector to reuse it against — seed both real channels
+    // via the actual write path (not a direct INSERT) so the cancellation
+    // this test injects through `contextEmbedder.embed` actually fires.
+    seedEmbedding("mem_a", "memory", "test-embed");
+    seedEmbedding("seg_zephyr", "segment", "test-embed");
     const controller = new AbortController();
     // Cancel from INSIDE the retrieval await, which is where the window
     // actually is: the pre-retrieval check has already passed by then, and in
