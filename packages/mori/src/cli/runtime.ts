@@ -3,7 +3,7 @@ import type { ConsolidatorLlm } from "@mori/kernel";
 import { createMoriAgent, createMoriModels, type MoriKernel } from "../agent/index.js";
 import { defaultCredentialsPath, FileCredentialStore } from "../auth/credential-store.js";
 import { getConsolidatorLlm, resolveConsolidatorConfig } from "../external/consolidator/index.js";
-import { createMoriKernel, moriStoreExists } from "../kernel/index.js";
+import { createMoriKernel, moriStoreExistsForId } from "../kernel/index.js";
 import { consolidateOnSessionEnd } from "./consolidation.js";
 import { unauthenticatedMessage } from "./messages.js";
 import type { RunCliDeps } from "./types.js";
@@ -18,7 +18,18 @@ export interface RunPromptIO {
  * which case the user-facing message has already been written to stderr.
  */
 export type PreparedAgent =
-  | { ok: true; agent: Agent; kernel: MoriKernel; llm: ConsolidatorLlm | undefined }
+  | {
+      ok: true;
+      agent: Agent;
+      kernel: MoriKernel;
+      llm: ConsolidatorLlm | undefined;
+      /**
+       * The real kernel's `projectId`, pinned at construction (#230) — `undefined` when
+       * `deps.kernel` was injected (a test double has no on-disk store `sessionEndLlm`
+       * could check anyway; see its own doc).
+       */
+      projectId: string | undefined;
+    }
   | { ok: false; exitCode: number };
 
 /**
@@ -60,8 +71,19 @@ export async function prepareAgent(
   // The real memory kernel (#12), sharing the toolset's working root so "which
   // checkout is this" has one answer. It writes nothing until an observation
   // passes the capture filter, so preparing an agent stays side-effect-free.
-  const kernel =
-    deps.kernel ?? createMoriKernel({ root: deps.root ?? process.cwd(), env, warn: stderr });
+  //
+  // `projectId` is only set on the real-kernel branch: it is the id THIS construction
+  // resolved (#230), carried forward for `sessionEndLlm` instead of being re-read from
+  // disk at session end, when `.mori/project.json` may no longer say the same thing.
+  let kernel: MoriKernel;
+  let projectId: string | undefined;
+  if (deps.kernel) {
+    kernel = deps.kernel;
+  } else {
+    const created = createMoriKernel({ root: deps.root ?? process.cwd(), env, warn: stderr });
+    kernel = created;
+    projectId = created.projectId;
+  }
   let agent: Agent;
   try {
     agent = createMoriAgent(kernel, credentialStore, env, deps.streamFn, {
@@ -80,7 +102,7 @@ export async function prepareAgent(
     }
   });
 
-  return { ok: true, agent, kernel, llm };
+  return { ok: true, agent, kernel, llm, projectId };
 }
 
 /**
@@ -89,16 +111,24 @@ export async function prepareAgent(
  * against was never created. `observe`'s own `ensureGenesis` creates that store the moment
  * anything passes the capture filter, so "no store" here means nothing did — running a
  * boundary anyway would be the first write of a session that only read files (README's
- * "no trace on disk" guarantee, #107 review). Only second-guesses the trigger for the real
- * kernel (`deps.kernel` unset, per its own doc in `cli/types.ts`) — an injected kernel
- * (tests) has no on-disk store this check could observe.
+ * "no trace on disk" guarantee, #107 review).
+ *
+ * `projectId` is `prepareAgent`'s kernel-construction-time id (#230), never re-derived here:
+ * before this fix the check re-read `.mori/project.json` from `root` at session-end time,
+ * which can name a DIFFERENT store than the one the kernel actually captured into if the
+ * file changed mid-session (a tool checking out another branch or worktree — this very
+ * fleet's own pattern, one `.mori/project.json` per issue). That skipped the boundary for
+ * the kernel's real id and checked a store that was never this session's to begin with.
+ * Reading the id back from where the kernel construction pinned it, instead of asking the
+ * root again, closes that gap. `undefined` (`deps.kernel` injected, per `cli/types.ts`) keeps
+ * the existing test-seam contract: an injected kernel has no on-disk store this could check.
  */
 export function sessionEndLlm(
   llm: ConsolidatorLlm | undefined,
-  deps: RunCliDeps,
+  projectId: string | undefined,
 ): ConsolidatorLlm | undefined {
-  if (deps.kernel) return llm;
-  return moriStoreExists(deps.root ?? process.cwd()) ? llm : undefined;
+  if (projectId === undefined) return llm;
+  return moriStoreExistsForId(projectId) ? llm : undefined;
 }
 
 /**
@@ -115,7 +145,7 @@ export async function runPrompt(
   const prepared = await prepareAgent(providerId, env, deps, io);
   if (!prepared.ok) return prepared.exitCode;
 
-  const { agent, kernel, llm } = prepared;
+  const { agent, kernel, llm, projectId } = prepared;
 
   try {
     await agent.prompt(prompt);
@@ -128,7 +158,7 @@ export async function runPrompt(
     // Session-end consolidation trigger (#107). After drain so the turn's own
     // observations are in the window being consolidated. Never throws — see
     // consolidation.ts — so a bad extractor cannot change this turn's exit code.
-    await consolidateOnSessionEnd(kernel, sessionEndLlm(llm, deps), io.stderr);
+    await consolidateOnSessionEnd(kernel, sessionEndLlm(llm, projectId), io.stderr);
   }
   io.stdout("\n");
 
