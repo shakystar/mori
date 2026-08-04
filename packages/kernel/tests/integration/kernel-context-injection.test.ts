@@ -1,6 +1,8 @@
 /**
- * Session-start injection (#149, #5 1/3): what `SqliteMemoryKernel.transformContext`
- * puts in front of the agent's first LLM call, and — mostly — what it refuses to.
+ * Context injection: what `SqliteMemoryKernel.transformContext` puts in front of
+ * an LLM call, and — mostly — what it refuses to. Two describes, because the
+ * seam has two modes: session-start only (#149, #5 1/3, no `readQuery`) and
+ * turn-level (#5 2/3-b, `readQuery` wired).
  *
  * Integration rather than unit because the behaviour under test is the seam
  * meeting the store: the same kernel captures an observation, projects it, and
@@ -18,19 +20,22 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { CURRENT_SCHEMA_VERSION } from "../../src/domain/common.js";
 import { createProject } from "../../src/domain/entities.js";
+import type { Embedder } from "../../src/index.js";
 import {
   observedShell,
   SqliteMemoryKernel,
   type ObservedToolCall,
+  type TurnQuery,
 } from "../../src/kernel/sqlite-memory-kernel.js";
 import { renderMemoryContext } from "../../src/services/context-render.js";
 import { buildMemoryContext, type MemoryContext } from "../../src/services/context-service.js";
+import * as contextService from "../../src/services/context-service.js";
 import * as memoryRetrievalService from "../../src/services/memory-retrieval-service.js";
 import {
   listValidMemories,
   rebuildProjectProjection,
 } from "../../src/services/projection-store.js";
-import { closeAll } from "../../src/storage/db.js";
+import { closeAll, getDb } from "../../src/storage/db.js";
 import { appendEvent, readEvents } from "../../src/storage/event-store.js";
 import * as eventStore from "../../src/storage/event-store.js";
 import { getProjectDbFile } from "../../src/storage/path-resolver.js";
@@ -49,7 +54,16 @@ interface Harness {
   rendered: MemoryContext[];
 }
 
-function harness(options: { renderContext?: boolean; throwOnRender?: boolean } = {}): Harness {
+function harness(
+  options: {
+    renderContext?: boolean;
+    throwOnRender?: boolean;
+    /** The `readQuery` seam. Omitted ⇒ the session-start-only behaviour of #149. */
+    readQuery?: (messages: string[]) => TurnQuery | undefined;
+    /** The context embedder, i.e. the one await a cancellation can land inside. */
+    contextEmbedder?: Embedder;
+  } = {},
+): Harness {
   const rendered: MemoryContext[] = [];
   const render = (context: MemoryContext): string => {
     rendered.push(context);
@@ -62,6 +76,8 @@ function harness(options: { renderContext?: boolean; throwOnRender?: boolean } =
     project: { title: "kernel injection", rootPath: sandbox },
     observeEvent: (event) => event,
     ...(options.renderContext === false ? {} : { renderContext: render }),
+    ...(options.readQuery ? { readQuery: options.readQuery } : {}),
+    ...(options.contextEmbedder ? { contextEmbedder: options.contextEmbedder } : {}),
   });
   return { kernel, rendered };
 }
@@ -334,5 +350,206 @@ describe("SqliteMemoryKernel.transformContext — session-start injection", () =
         spy.mockRestore();
       }
     });
+  });
+});
+
+describe("turn-level retrieval (#5 2/3-b)", () => {
+  /**
+   * Segments are the channel a QUERY actually selects (the memory pool is
+   * ranked by the query but not filtered by it), so two turns asking
+   * different things are only visibly different here. Inserted straight into
+   * the table for the same reason segment-retrieval.test.ts does: the write
+   * path belongs to consolidation, not to this seam.
+   */
+  function insertSegment(id: string, text: string): void {
+    getDb(projectId)
+      .prepare(
+        "INSERT INTO segments (id, session_id, created_at, ordinal, source, text) VALUES (?, ?, ?, ?, ?, ?)",
+      )
+      .run(id, "s1", "2026-01-01T00:00:00.000Z", 0, null, text);
+  }
+
+  /** Empty store + one memory + one segment per topic, all indexed. */
+  async function seedTopics(): Promise<void> {
+    await seedEmptyStore();
+    await seedMemory("mem_a", "chose zephyr as the deploy target");
+    insertSegment("seg_zephyr", "rolling the release out through the zephyr pipeline");
+    insertSegment("seg_gamma", "the gamma indexer rebuild took nine minutes");
+    await rebuildProjectProjection(projectId, { reindexSearch: true });
+  }
+
+  it("retrieves per turn, so two turns with different queries inject different content", async () => {
+    await seedTopics();
+    let turn: TurnQuery = { query: "zephyr", turnId: "turn-1" };
+    const { kernel, rendered } = harness({ readQuery: () => turn });
+    // Retrievals are counted, not inferred from injections: the last case below
+    // is a turn that retrieves and injects nothing, which is exactly the state
+    // an injection-only assertion cannot tell from a turn that never read.
+    const retrievals = vi.spyOn(contextService, "buildMemoryContext");
+
+    try {
+      const first = await kernel.transformContext(["one"]);
+      turn = { query: "gamma", turnId: "turn-2" };
+      const second = await kernel.transformContext(["one", "two"]);
+
+      expect(injectedCount(first)).toBe(1);
+      expect(first[0]).toContain("zephyr pipeline");
+      expect(first[0]).not.toContain("gamma indexer");
+      expect(injectedCount(second)).toBe(1);
+      expect(second[0]).toContain("gamma indexer");
+      expect(second[0]).not.toContain("zephyr pipeline");
+      // Two retrievals, not one cached read: the seam ran again for the second
+      // query rather than replaying the first turn's context.
+      expect(rendered).toHaveLength(2);
+      expect(retrievals).toHaveBeenCalledTimes(2);
+
+      // The cache key is the whole TurnQuery, and each half earns its place.
+      // The SAME turn asking again must not re-read — this seam runs before
+      // every provider call, so a turn that uses twenty tools arrives here
+      // twenty more times, each one an FTS read and an embed for a context
+      // that cannot have moved.
+      const repeat = await kernel.transformContext(["one", "two", "tool result"]);
+      expect(retrievals).toHaveBeenCalledTimes(2);
+      // …and the saving is the READ only. The block still rides this request:
+      // it lived in the previous one and nothing carried it forward, so a bare
+      // pass-through here would mean the turn works its tools without the
+      // context it just retrieved.
+      expect(injectedCount(repeat)).toBe(1);
+      expect(repeat[0]).toBe(second[0]);
+      expect(repeat.slice(1)).toEqual(["one", "two", "tool result"]);
+
+      // A NEW turn that repeats the previous turn's words is not that case and
+      // does read: `continue` twice is the most ordinary follow-up an agent
+      // REPL has, and by the second one the store holds what the first turn did.
+      turn = { query: "gamma", turnId: "turn-3" };
+      await kernel.transformContext(["one", "two", "three"]);
+      expect(retrievals).toHaveBeenCalledTimes(3);
+    } finally {
+      retrievals.mockRestore();
+    }
+  });
+
+  it("sends a memory again on the next turn, and reinforces it only the first time", async () => {
+    await seedTopics();
+    let turn: TurnQuery = { query: "zephyr", turnId: "turn-1" };
+    const { kernel, rendered } = harness({ readQuery: () => turn });
+    const reinforce = vi.spyOn(memoryRetrievalService, "reinforceInjectedMemories");
+
+    try {
+      const first = await kernel.transformContext(["one"]);
+      turn = { query: "gamma", turnId: "turn-2" };
+      const second = await kernel.transformContext(["one", "two"]);
+
+      expect(first[0]).toContain("chose zephyr as the deploy target");
+      // Pin the premise: the second turn's retrieval DID find that memory
+      // again (the memory pool is ranked by the query, never filtered by it),
+      // so the assertions below are about the injection policy and not about a
+      // retrieval that happened to come back empty.
+      const retrieved = await buildMemoryContext(projectId, { taskTitle: "gamma" });
+      expect(retrieved.consolidatedMemories?.map((memory) => memory.id)).toEqual(["mem_a"]);
+
+      // …so the second turn shows it again. The first turn's block lived in
+      // that turn's provider request and nothing carried it forward — the
+      // model is stateless and pi never folds this seam's return value back
+      // into the conversation — so withholding it here would leave the model
+      // without the memory its own query just selected.
+      expect(rendered[1]?.consolidatedMemories?.map((memory) => memory.id)).toEqual(["mem_a"]);
+      expect(second[0]).toContain("chose zephyr as the deploy target");
+      expect(second[0]).toContain("gamma indexer");
+
+      // Reinforcement is what does NOT repeat: its stamp (`last_accessed_at`)
+      // is an input to the ranking that selected this memory, so a stamp every
+      // turn would let an injected memory refresh its own recency and pin
+      // itself to the top of the pool for the rest of the session.
+      expect(reinforce.mock.calls.map((call) => call[1])).toEqual([["mem_a"], []]);
+    } finally {
+      reinforce.mockRestore();
+    }
+  });
+
+  it("passes the turn through untouched when the query seam throws, and spends nothing", async () => {
+    await seedTopics();
+    let explode = true;
+    const { kernel, rendered } = harness({
+      readQuery: () => {
+        if (explode) throw new Error("query derivation exploded");
+        return { query: "zephyr", turnId: "turn-1" };
+      },
+    });
+    const messages = ["one"];
+
+    await expect(kernel.transformContext(messages)).resolves.toEqual(messages);
+    expect(rendered).toEqual([]);
+
+    // The broken turn cost the session nothing — a later turn whose seam
+    // works still retrieves and injects.
+    explode = false;
+    expect(injectedCount(await kernel.transformContext(messages))).toBe(1);
+  });
+
+  it("appends one memory.injected per INJECTING turn, carrying that turn's memory ids", async () => {
+    await seedTopics();
+    let turn: TurnQuery = { query: "zephyr", turnId: "turn-1" };
+    const { kernel } = harness({ readQuery: () => turn });
+
+    expect(injectedCount(await kernel.transformContext(["one"]))).toBe(1);
+    turn = { query: "gamma", turnId: "turn-2" };
+    expect(injectedCount(await kernel.transformContext(["one", "two"]))).toBe(1);
+
+    const events = await readEvents(projectId);
+    const injected = events.filter((event) => event.type === "memory.injected");
+    // 2/3-a's append is per injection, and turn-level injection is what makes
+    // that plural — the condition (render succeeded) is unchanged, more turns
+    // now meet it.
+    expect(injected).toHaveLength(2);
+    expect(injected[0]?.payload).toEqual({ memoryIds: ["mem_a"] });
+    // The second turn sent that memory again, so its event lists it again:
+    // this payload records what the model saw on THIS turn, not what it saw
+    // for the first time (which is reinforcement's grain, not telemetry's).
+    expect(injected[1]?.payload).toEqual({ memoryIds: ["mem_a"] });
+  });
+
+  it("records nothing for a turn cancelled mid-retrieval, so a later turn still gets it", async () => {
+    await seedTopics();
+    const controller = new AbortController();
+    // Cancel from INSIDE the retrieval await, which is where the window
+    // actually is: the pre-retrieval check has already passed by then, and in
+    // production the wait is an FTS read plus an embed against a multi-second
+    // budget — now once per retrieving turn (#5 2/3-b), against a Ctrl-C that
+    // is ordinary rather than exceptional in a REPL. Throwing afterwards is
+    // what a cancelled embed does; retrieval degrades to FTS and still returns
+    // content, which is the point — the content is ready and nobody will see it.
+    const contextEmbedder: Embedder = {
+      model: "test-embed",
+      embed: async () => {
+        controller.abort();
+        throw new Error("cancelled");
+      },
+    };
+    const turn: TurnQuery = { query: "zephyr", turnId: "turn-1" };
+    const { kernel, rendered } = harness({ readQuery: () => turn, contextEmbedder });
+    const messages = ["one"];
+    const reinforce = vi.spyOn(memoryRetrievalService, "reinforceInjectedMemories");
+
+    try {
+      await expect(kernel.transformContext(messages, controller.signal)).resolves.toEqual(messages);
+      // Nothing reached the model, so nothing claims it did: no render, no
+      // access stamp on the CLS ranking inputs (mori#176), no event.
+      expect(rendered).toEqual([]);
+      expect(reinforce).not.toHaveBeenCalled();
+      const events = await readEvents(projectId);
+      expect(events.filter((event) => event.type === "memory.injected")).toEqual([]);
+    } finally {
+      reinforce.mockRestore();
+    }
+
+    // …and the cancelled turn took nothing from the turns after it. The same
+    // ask, unchanged, still retrieves rather than being answered from a cache
+    // the cancelled call never filled: the attempt and the retrieval gate were
+    // both given back, so the content the model never saw is not stranded
+    // behind a read that "already happened".
+    const next = await kernel.transformContext(messages);
+    expect(injectedCount(next)).toBe(1);
+    expect(next[0]).toContain("zephyr pipeline");
   });
 });
