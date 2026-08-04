@@ -388,6 +388,23 @@ export function moriStoreExists(root: string): boolean {
   return projectStoreExists(moriProjectId(root));
 }
 
+/**
+ * Whether a store already exists for an id a caller already has in hand — the
+ * kernel's own `projectId` (see {@link MoriKernelHandle}), never a fresh
+ * `moriProjectId(root)` read (#230).
+ *
+ * `moriStoreExists(root)` re-resolves identity from disk at call time, which is
+ * exactly the seam #230 closes: a session-end boundary asking "does the store
+ * THIS session captured into exist" must check the id the kernel actually
+ * captured under, not whatever `.mori/project.json` currently holds — the two
+ * can differ if the file changed after the kernel was constructed (a
+ * `git checkout`, another mori session's `persistProjectIdentity`, or this
+ * fleet's own worktree switch between issues).
+ */
+export function moriStoreExistsForId(projectId: string): boolean {
+  return projectStoreExists(projectId);
+}
+
 export interface CreateMoriKernelOptions {
   /** Working root; identifies the store and titles its genesis. Defaults to cwd. */
   root?: string;
@@ -489,6 +506,25 @@ function persistProjectIdentity(root: string, id: string, warn?: (message: strin
 }
 
 /**
+ * What `createMoriKernel` hands back: the kernel plus the `projectId` it
+ * resolved and pinned at construction (#230).
+ *
+ * The kernel's own `options.projectId` is private (`SqliteMemoryKernel` is
+ * `@mori/kernel`'s, and identity resolution is the harness's job, not the
+ * kernel's — #217's seam discipline, unchanged here). A caller that needs to
+ * know "which store did THIS session actually capture into" — the session-end
+ * boundary, specifically — cannot ask the kernel object for it via the shared
+ * `MoriKernel` seam, and must not re-derive it by calling
+ * `moriProjectId(root)`/`readIdentityFile` again, because a second read can
+ * see a `.mori/project.json` the kernel's own construction already left
+ * behind. `projectId` here is that construction-time value, carried alongside
+ * the kernel rather than through it.
+ */
+export type MoriKernelHandle = SqliteMemoryKernel<AgentMessage, AgentEvent> & {
+  readonly projectId: string;
+};
+
+/**
  * The kernel mori runs. Nothing here is lazy about configuration but everything
  * is lazy about disk: the store's directory and database are created by the
  * first observation that passes the capture filter, so a session that only reads
@@ -509,10 +545,13 @@ function persistProjectIdentity(root: string, id: string, warn?: (message: strin
  * that exists but is unusable (parse failure or an id `assertValidId` would
  * reject) is left exactly as a person committed it — this only warns and
  * falls back to the path hash, it never overwrites.
+ *
+ * The returned handle's `projectId` (#230) is this function's `identity.id` —
+ * the SAME value just wired into the kernel above — so a caller reading it
+ * later never re-resolves identity from disk; it only ever reads back what
+ * this call already decided.
  */
-export function createMoriKernel(
-  options: CreateMoriKernelOptions = {},
-): SqliteMemoryKernel<AgentMessage, AgentEvent> {
+export function createMoriKernel(options: CreateMoriKernelOptions = {}): MoriKernelHandle {
   const root = path.resolve(options.root ?? process.cwd());
   const warn = options.warn;
   let warned = false;
@@ -537,7 +576,7 @@ export function createMoriKernel(
   // providers) serves both — mori cannot re-budget a client it did not build.
   const contextEmbedder = options.embedder ?? getEmbedder(sessionStartEmbeddingsConfig(config));
 
-  return new SqliteMemoryKernel<AgentMessage, AgentEvent>({
+  const kernel = new SqliteMemoryKernel<AgentMessage, AgentEvent>({
     projectId: identity.id,
     actor: MORI_ACTOR,
     project: { title: path.basename(root) || root, rootPath: root },
@@ -553,6 +592,7 @@ export function createMoriKernel(
       warn(`mori: 메모리 캡처 실패 — 이번 세션의 관찰 기록은 남지 않습니다: ${errorText(error)}\n`);
     },
   });
+  return Object.assign(kernel, { projectId: identity.id });
 }
 
 function errorText(error: unknown): string {

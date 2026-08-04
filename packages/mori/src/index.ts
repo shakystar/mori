@@ -109,7 +109,11 @@ export async function runCli(
         // one-shot half of this. Never throws (consolidation.ts), so it cannot turn a clean
         // REPL exit into a nonzero one. `sessionEndLlm` skips a store that was never created
         // (a session that only read files) so this leaves no trace on disk either.
-        await consolidateOnSessionEnd(prepared.kernel, sessionEndLlm(prepared.llm, deps), stderr);
+        await consolidateOnSessionEnd(
+          prepared.kernel,
+          sessionEndLlm(prepared.llm, prepared.projectId),
+          stderr,
+        );
       }
     } finally {
       input.close();
