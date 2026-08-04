@@ -22,6 +22,7 @@ import {
   type MemoryContext,
   type ObservedToolCall,
   type ToolCallObserver,
+  type TurnQuery,
 } from "@mori/kernel";
 import {
   getEmbedder,
@@ -217,8 +218,20 @@ export const MAX_QUERY_CHARS = 512;
  * assistant turns and tool results describe what mori itself just did, so
  * retrieving on them would ask memory about mori's own last move rather than
  * about the task. No LLM (#215 non-scope), and nothing accumulated across
- * turns: the kernel already treats an unchanged query as "nothing new to
+ * turns: the kernel already treats a repeat of the same ask as "nothing new to
  * retrieve", which only holds if the same question produces the same string.
+ *
+ * The `turnId` is what makes that cache safe to keep — see the kernel's
+ * `TurnQuery` for why one is required. Mori's is the pair (how many user
+ * messages exist, when the last one arrived), and each half covers the other's
+ * blind spot. Both are constant for the whole of one turn: pi appends tool
+ * results with role `toolResult`, and the message this seam's own injection
+ * produces never enters `Agent.messages` (`transformContext`'s return value is
+ * a local in pi's `streamAssistantResponse`), so nothing a turn does to itself
+ * changes either half. Across turns the count moves — except after a `/clear`
+ * or a context compaction, which reset or shrink it, and there the timestamp
+ * moves instead. The timestamp alone would tie only if two prompts landed in
+ * the same millisecond, and then the count separates them.
  *
  * Secrets are masked with the same list `observedShell` uses, because the same
  * argument applies one step further out: a credential the user pasted into the
@@ -233,15 +246,21 @@ export const MAX_QUERY_CHARS = 512;
  * reads that as "no query this turn" and falls back to the session-start
  * injection.
  */
-export function readTurnQuery(messages: AgentMessage[]): string | undefined {
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const message = messages[index];
-    if (message?.role !== "user") continue;
-    const text = userMessageText(message.content).trim();
-    if (!text) return undefined;
-    return maskSecrets(text).slice(0, MAX_QUERY_CHARS);
+export function readTurnQuery(messages: AgentMessage[]): TurnQuery | undefined {
+  let latest: Extract<AgentMessage, { role: "user" }> | undefined;
+  let userMessages = 0;
+  for (const message of messages) {
+    if (message.role !== "user") continue;
+    userMessages += 1;
+    latest = message;
   }
-  return undefined;
+  if (!latest) return undefined;
+  const text = userMessageText(latest.content).trim();
+  if (!text) return undefined;
+  return {
+    query: maskSecrets(text).slice(0, MAX_QUERY_CHARS),
+    turnId: `${userMessages}:${latest.timestamp}`,
+  };
 }
 
 /** A user message's text, whether pi carries it as a string or content blocks. */
