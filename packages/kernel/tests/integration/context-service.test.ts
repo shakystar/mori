@@ -8,6 +8,7 @@ import { CURRENT_SCHEMA_VERSION, nowIso } from "../../src/domain/common.js";
 import { createProject } from "../../src/domain/entities.js";
 import type { Embedder } from "../../src/index.js";
 import { buildMemoryContext } from "../../src/services/context-service.js";
+import { upsertEmbedding } from "../../src/services/embeddings-store.js";
 import {
   listValidMemories,
   rebuildProjectProjection,
@@ -106,6 +107,18 @@ function insertSegment(id: string, text: string, createdAt: string): void {
     .run(id, "s1", createdAt, 0, null, text);
 }
 
+function seedEmbedding(entityId: string, kind: string, model: string): void {
+  upsertEmbedding(projectId, {
+    entityId,
+    kind,
+    model,
+    dim: 3,
+    vector: [0, 1, 0],
+    textHash: "test-hash",
+    createdAt: NOW,
+  });
+}
+
 describe("buildMemoryContext", () => {
   it("returns {} when the project has no memories, observations, or segments", async () => {
     await rebuildProjectProjection(projectId);
@@ -157,6 +170,12 @@ describe("buildMemoryContext", () => {
     await seedMemory("mem_hot", "chose zephyr as the deploy target", 9, NOW);
     insertSegment("seg_a", "zephyr deploy runbook notes", "2026-01-01T00:00:00.000Z");
     await rebuildProjectProjection(projectId, { reindexSearch: true });
+    // mori#237: the corpus probe only calls embed when at least one channel
+    // has a same-model vector to reuse it against — seed both real channels
+    // via the actual write path (not a direct INSERT) so "reusing it across
+    // the memory and segment channels" is exercised, not vacuously true.
+    seedEmbedding("mem_hot", "memory", "fake-embed");
+    seedEmbedding("seg_a", "segment", "fake-embed");
 
     const calls: string[][] = [];
     const embed = vi.fn(async (texts: string[]) => {
@@ -177,6 +196,59 @@ describe("buildMemoryContext", () => {
 
     const embed = vi.fn(async (texts: string[]) => texts.map(() => [1, 0, 0]));
     await buildMemoryContext(projectId, { embedder: { embed, model: "fake-embed" } });
+
+    expect(embed).not.toHaveBeenCalled();
+  });
+
+  it("mori#237: skips the remote embed when neither corpus has a vector for this model", async () => {
+    await seedMemory("mem_hot", "chose zephyr as the deploy target", 9, NOW);
+    insertSegment("seg_a", "zephyr deploy runbook notes", "2026-01-01T00:00:00.000Z");
+    await rebuildProjectProjection(projectId, { reindexSearch: true });
+    // No upsertEmbedding calls at all — the embeddings table is empty for
+    // both "memory" and "segment", so the query vector could not change
+    // either channel's result even if computed.
+
+    const embed = vi.fn(async (texts: string[]) => texts.map(() => [1, 0, 0]));
+    const withEmbedder = await buildMemoryContext(projectId, {
+      taskTitle: "zephyr deploy",
+      embedder: { embed, model: "fake-embed" },
+    });
+
+    expect(embed).not.toHaveBeenCalled();
+
+    const withoutEmbedder = await buildMemoryContext(projectId, { taskTitle: "zephyr deploy" });
+    expect(withEmbedder).toEqual(withoutEmbedder);
+  });
+
+  it("mori#237: embeds when only the segment corpus has a vector for this model", async () => {
+    insertSegment("seg_a", "zephyr deploy runbook notes", "2026-01-01T00:00:00.000Z");
+    await rebuildProjectProjection(projectId, { reindexSearch: true });
+    // Only the segment channel is embedded — a probe that reads the memory
+    // channel alone would miss this and skip embedding, silently disabling
+    // semantic segment retrieval for projects with no embedded memories yet.
+    seedEmbedding("seg_a", "segment", "fake-embed");
+
+    const embed = vi.fn(async (texts: string[]) => texts.map(() => [1, 0, 0]));
+    await buildMemoryContext(projectId, {
+      taskTitle: "zephyr deploy",
+      embedder: { embed, model: "fake-embed" },
+    });
+
+    expect(embed).toHaveBeenCalledTimes(1);
+  });
+
+  it("mori#237: skips the remote embed when the stored vector's model differs from the embedder's", async () => {
+    await seedMemory("mem_hot", "chose zephyr as the deploy target", 9, NOW);
+    await rebuildProjectProjection(projectId, { reindexSearch: true });
+    // Stored under a since-changed model — the same "invalidates stored
+    // embeddings on model change" rule semanticScoresForKind enforces.
+    seedEmbedding("mem_hot", "memory", "stale-model");
+
+    const embed = vi.fn(async (texts: string[]) => texts.map(() => [1, 0, 0]));
+    await buildMemoryContext(projectId, {
+      taskTitle: "zephyr deploy",
+      embedder: { embed, model: "fake-embed" },
+    });
 
     expect(embed).not.toHaveBeenCalled();
   });
