@@ -240,6 +240,10 @@ export default tseslint.config(
   // pay type info's cost for just the rules that catch missed `await`.
   {
     files: ["**/*.ts"],
+    // Root vitest.config.ts (#244) sits outside both packages' tsconfig.eslint.json
+    // `include` (each package's copy is covered via its own project instead) and
+    // holds no promise-returning code, so it doesn't need type-aware parsing here.
+    ignores: ["vitest.config.ts"],
     languageOptions: {
       parserOptions: {
         project: ["./packages/kernel/tsconfig.eslint.json", "./packages/mori/tsconfig.eslint.json"],

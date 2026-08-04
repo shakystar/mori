@@ -149,3 +149,15 @@ override를 쓰고, **왜 기본값으로 부족한지**(프로세스 스폰, �
 `packages/kernel/tests/integration/cooperative-cancellation.test.ts`의 60000ms가 그 예다).
 기본값 인상만으로 해결되는 경우(암묵 상속에 우연히 걸려 있던 것뿐)라면 override를 새로
 추가하지 않는다.
+
+**리포 루트에서 실행해도 이 값이 적용된다(#244).** vitest는 설정을 project root(기본
+`process.cwd()`) 기준으로만 찾고 패키지 안의 설정을 상위에서 재귀적으로 주워오지 않는다 —
+루트에 아무 설정이 없다면 132번 줄의 `pnpm exec vitest run <파일>`을 리포 루트에서 부를 때
+이 20000ms가 아니라 vitest 기본값(5000ms)으로 조용히 떨어진다. 이를 막기 위해 리포 루트에
+`vitest.config.ts`를 두고 vitest 3의 `test.projects: ["packages/*"]`로 각 패키지를 프로젝트로
+등록했다 — 값을 여기서 다시 선언하지 않고, 루트 실행이 각 패키지의 `vitest.config.ts`를 그
+프로젝트의 설정으로 그대로 읽게 한다. 따라서 132번 줄의 좁혀 돌기 명령은 **패키지 디렉터리
+안에서든 리포 루트에서든** 동일하게 20000ms를 적용한다. 이 루트 설정 파일은 `turbo run test`가
+읽는 경로가 아니므로(각 패키지 태스크는 여전히 자기 디렉터리의 설정만 본다) `turbo run test`의
+동작에는 영향이 없다 — 다만 패키지 밖의 공유 파일이라 `turbo.json`의 `globalDependencies`에
+넣었다.
