@@ -10,7 +10,7 @@
 
 import path from "node:path";
 import { createHash, randomBytes } from "node:crypto";
-import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { linkSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import type { AgentEvent, AgentMessage } from "@earendil-works/pi-agent-core";
 import {
   createId,
@@ -203,10 +203,6 @@ export function renderContextMessage(context: MemoryContext): AgentMessage {
 const IDENTITY_DIR_NAME = ".mori";
 const IDENTITY_FILE_NAME = "project.json";
 
-function identityFilePath(root: string): string {
-  return path.join(root, IDENTITY_DIR_NAME, IDENTITY_FILE_NAME);
-}
-
 /**
  * What reading `.mori/project.json` found — distinguished so a caller can tell
  * "no file, mint a path hash" apart from "a file exists but is not usable,"
@@ -216,16 +212,26 @@ function identityFilePath(root: string): string {
 type IdentityFileState = { kind: "valid"; id: string } | { kind: "missing" | "invalid" };
 
 function readIdentityFile(root: string): IdentityFileState {
+  // Resolved through the same lstat-based guard the write path uses, and for
+  // the same reason: `project.json` itself (not just `.mori`) can be a
+  // committed symlink. A plain `readFileSync` below would follow it wherever
+  // it points — including outside `root` to a device like `/dev/zero`, whose
+  // read never reaches EOF and hangs mori at startup (#217 review round 3).
+  // `resolveWithinRoot` rejects that (and a dangling link) before any read
+  // happens; a rejection here means "a file is there but unusable," same as
+  // any other read failure below, so it falls to `invalid`, not `missing`.
+  const guard = resolveWithinRoot(root, path.join(IDENTITY_DIR_NAME, IDENTITY_FILE_NAME));
+  if (!guard.ok) return { kind: "invalid" };
+
   let raw: string;
   try {
-    raw = readFileSync(identityFilePath(root), "utf8");
+    raw = readFileSync(guard.resolved, "utf8");
   } catch (error) {
     // Only ENOENT means "no file" — the missing branch is what lets
     // `createMoriKernel` mint+persist the path hash. Any other read failure
-    // (EACCES, EISDIR, a `.mori` that is a broken symlink, ...) means a file
-    // is THERE and could be a person's commit, so it must fall to "invalid"
-    // and go through the never-overwrite path, not be silently replaced
-    // (#217 PR #229 review).
+    // (EACCES, EISDIR, ...) means a file is THERE and could be a person's
+    // commit, so it must fall to "invalid" and go through the never-overwrite
+    // path, not be silently replaced (#217 PR #229 review).
     if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return { kind: "missing" };
     return { kind: "invalid" };
   }
@@ -415,14 +421,21 @@ export interface CreateMoriKernelOptions {
  * "adopt" half of #217: this only ever writes the value the root would have
  * resolved to anyway, so it never mints a new id and never moves a store.
  *
- * Written via a temp file + `rename`, not a direct truncating write: two
- * `mori` sessions can start concurrently in the same fresh checkout (two
- * terminals, same repo), and both resolve the identical id, but a direct
- * write lets one process's crash mid-write leave the file torn for the
- * other — which `readIdentityFile` would then read as "invalid" and refuse
- * to touch forever (it treats any on-disk file as possibly human-committed).
- * `rename` within one directory is a single filesystem operation, so a
- * concurrent or interrupted write only ever loses a race, never corrupts.
+ * Written via a temp file + `link`, not a direct truncating write or a
+ * `rename`: two `mori` sessions can start concurrently in the same fresh
+ * checkout (two terminals, same repo). Usually both resolve the identical
+ * id, but a direct write still lets one process's crash mid-write leave the
+ * file torn for the other — which `readIdentityFile` would then read as
+ * "invalid" and refuse to touch forever (it treats any on-disk file as
+ * possibly human-committed). `rename` would fix that (single filesystem
+ * operation) but always succeeds even when `targetPath` already exists,
+ * silently overwriting it — and the two writers need not agree: a `git
+ * checkout` (or any other process) can publish a genuine, different, valid
+ * `project.json` in the window between this call's `resolveProjectIdentity`
+ * and this write. `link` fails with `EEXIST` instead of replacing an
+ * existing target, so whichever writer gets there first is the one that
+ * sticks — the loser's temp file is discarded and the winner's file is
+ * never touched (#217 review round 3).
  *
  * Silent on failure (read-only root, no permission): the caller already has
  * a usable id (the path hash), so a write that cannot land degrades to "try
@@ -453,16 +466,25 @@ function persistProjectIdentity(root: string, id: string, warn?: (message: strin
   try {
     mkdirSync(path.dirname(targetPath), { recursive: true });
     writeFileSync(tempPath, `${JSON.stringify({ id }, null, 2)}\n`, "utf8");
-    renameSync(tempPath, targetPath);
-  } catch (error) {
     try {
-      unlinkSync(tempPath);
-    } catch {
-      // best-effort cleanup; the write/rename failure above is what matters
+      linkSync(tempPath, targetPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code !== "EEXIST") throw error;
+      // Another writer published `targetPath` first (#217 review round 3):
+      // `link` never touches an existing target, so its file is exactly what
+      // that writer committed — this session just discards its own temp copy
+      // below and keeps running with the id it already resolved in memory.
     }
+  } catch (error) {
     warn?.(
       `mori: .mori/project.json 기록 실패 — 다음 실행에서 다시 시도합니다: ${errorText(error)}\n`,
     );
+  } finally {
+    try {
+      unlinkSync(tempPath);
+    } catch {
+      // best-effort cleanup; tempPath may never have been created
+    }
   }
 }
 

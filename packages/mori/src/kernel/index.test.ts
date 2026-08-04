@@ -283,6 +283,29 @@ describe("createMoriKernel — project identity file (#217)", () => {
     }
   });
 
+  it("rejects a project.json symlink that resolves outside root — falls back to the path hash and never reads through it (#217 review round 3)", () => {
+    const pathHashId = moriProjectId(root);
+    const outside = realpathSync(mkdtempSync(join(tmpdir(), "mori-identity-outside-file-")));
+    const outsideTarget = join(outside, "secret.json");
+    const outsideContent = JSON.stringify({ id: "proj_outside_leak000" });
+    writeFileSync(outsideTarget, outsideContent);
+    try {
+      mkdirSync(join(root, ".mori"));
+      symlinkSync(outsideTarget, identityFile());
+      const warnings: string[] = [];
+
+      expect(moriProjectId(root)).toBe(pathHashId);
+      createMoriKernel({ root, env: {}, warn: (message) => warnings.push(message) });
+
+      expect(warnings).toHaveLength(1);
+      // Never followed: the outside file this symlink points at is untouched,
+      // and the id it names never won.
+      expect(readFileSync(outsideTarget, "utf8")).toBe(outsideContent);
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
   it("moriProjectId and moriStoreExists never create the identity file — only createMoriKernel writes", () => {
     moriProjectId(root);
     moriProjectId(root);
