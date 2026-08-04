@@ -113,6 +113,27 @@ export function insertSegments(projectId: string, rows: NewSegmentRow[]): void {
   tx(rows);
 }
 
+/**
+ * Whether every id in `ids` is still a row in `segments`, checked LIVE
+ * against the table rather than any caller's earlier snapshot of it (#255).
+ * `consolidate-service.ts`'s durable-slice check depends on this: a
+ * concurrent process's `pruneSegments` (unguarded by the project lock, see
+ * `storage/project-lock.ts`) can delete some of a boundary's own
+ * just-inserted ids between when that boundary computed "fully stored" and
+ * when it commits the conversation offset that claim justifies. To close
+ * that window the caller must run this INSIDE the same transaction as the
+ * write it gates, not as a separate read beforehand — see
+ * `commitBoundaryCursors`.
+ */
+export function segmentsStillPresent(projectId: string, ids: string[]): boolean {
+  if (ids.length === 0) return true;
+  const placeholders = ids.map(() => "?").join(", ");
+  const row = getDb(projectId)
+    .prepare(`SELECT COUNT(*) AS n FROM segments WHERE id IN (${placeholders})`)
+    .get(...ids) as { n: number };
+  return row.n === ids.length;
+}
+
 export interface PruneOptions {
   /** Delete segments older than this many days. */
   maxAgeDays?: number;

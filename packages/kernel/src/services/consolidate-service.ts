@@ -32,6 +32,7 @@ import { listValidMemories, rebuildProjectProjection } from "./projection-store.
 import {
   insertSegments,
   pruneSegments,
+  segmentsStillPresent,
   type NewSegmentRow,
   type PruneOptions,
 } from "./segment-store.js";
@@ -1446,15 +1447,40 @@ function commitBoundaryCursors(
   cursors: {
     watermarkEventId?: string;
     conversationOffset?: { sourceId: string; offset: number };
+    /**
+     * #255: segment ids `conversationOffset`'s "fully stored" justification
+     * depends on (`consolidate-service.ts`'s `sliceFullyStored`). Checked
+     * LIVE against `segments`, inside this same transaction, immediately
+     * before the write — not by the caller beforehand, and not via the
+     * caller's own `prunedSegmentIds`, because a concurrent process's
+     * `pruneSegments` (unguarded by the project lock, `storage/project-lock.ts`)
+     * can delete some of these between when the caller computed
+     * `sliceFullyStored` and this commit. If any are gone, `conversationOffset`
+     * is dropped (holding the cursor) instead of being written on a premise
+     * that no longer holds.
+     */
+    conversationOffsetGuardIds?: string[];
   },
-): void {
-  if (cursors.watermarkEventId === undefined && cursors.conversationOffset === undefined) return;
+): { conversationOffsetHeld: boolean } {
+  if (cursors.watermarkEventId === undefined && cursors.conversationOffset === undefined) {
+    return { conversationOffsetHeld: false };
+  }
+  let conversationOffsetHeld = false;
   const commit = getDb(projectId).transaction(() => {
     const watermarkEventId = cursors.watermarkEventId;
     if (watermarkEventId !== undefined && !watermarkWouldRegress(projectId, watermarkEventId)) {
       setConsolidateWatermark(projectId, watermarkEventId);
     }
-    const conversationOffset = cursors.conversationOffset;
+    let conversationOffset = cursors.conversationOffset;
+    const guardIds = cursors.conversationOffsetGuardIds;
+    if (
+      conversationOffset !== undefined &&
+      guardIds !== undefined &&
+      !segmentsStillPresent(projectId, guardIds)
+    ) {
+      conversationOffset = undefined;
+      conversationOffsetHeld = true;
+    }
     if (
       conversationOffset !== undefined &&
       conversationOffset.offset > readConversationOffset(projectId, conversationOffset.sourceId)
@@ -1471,8 +1497,12 @@ function commitBoundaryCursors(
   // let through the very stale write it exists to drop. Taking the lock up
   // front is the same reasoning (and the same `busy_timeout = 5000` the opener
   // sets) that `runMigrations` in `storage/db.ts` documents for its own
-  // read-then-write.
+  // read-then-write. #255's `segmentsStillPresent` guard rides the same lock:
+  // taking it up front means a concurrent `pruneSegments` either already
+  // committed before this transaction started (so the guard sees it) or must
+  // wait for this transaction to finish (so it can't land mid-check).
   commit.immediate();
+  return { conversationOffsetHeld };
 }
 
 // --- attempt telemetry (#51) ---------------------------------------------------
@@ -2477,6 +2507,24 @@ export async function consolidate(params: ConsolidateParams): Promise<Consolidat
     // (#139).
     let conversationSliceHeld = false;
     let conversationOffsetTarget: { sourceId: string; offset: number } | undefined;
+    // #255: set only when `conversationOffsetTarget` above is justified SOLELY
+    // by `sliceFullyStored` (not by `shownWhole`/an empty slice) — the one
+    // branch that trusts the segments table rather than what the extractor
+    // actually saw. `sliceFullyStored` is computed from THIS boundary's own
+    // `prunedSegmentIds` and is stale the instant a concurrent process's
+    // `pruneSegments` deletes the same ids afterward (unguarded by the
+    // project lock — `storage/project-lock.ts`'s `pruneSegments` section).
+    // These ids are re-checked LIVE, inside `commitBoundaryCursors`'s own
+    // transaction, immediately before that target is written — not here,
+    // where the tail's rebuild/embeddings/contradiction calls still sit
+    // between this point and the commit and would otherwise leave the same
+    // gap open under a different name. No fallback offset to fall back to if
+    // the guard fails: `sliceFullyStored` can only be true when the raw
+    // buffer is on, and the raw buffer being on is exactly what keeps
+    // `boundExtractionInput` from ever producing a resumable PREFIX (it
+    // reserves nothing when the tail is persisted elsewhere) — so a guard
+    // failure here has no shown-prefix offset to fall back to and holds.
+    let conversationOffsetGuardIds: string[] | undefined;
     if (source && slice) {
       const shownWhole =
         bounded.transcriptTailCoverage === "whole" || bounded.transcriptTailCoverage === "absent";
@@ -2485,8 +2533,11 @@ export async function consolidate(params: ConsolidateParams): Promise<Consolidat
         bounded.transcriptTailPrefixChars !== undefined
           ? resumePoints?.get(bounded.transcriptTailPrefixChars)
           : undefined;
-      if (shownWhole || sliceFullyStored || slice.text.length === 0) {
+      if (shownWhole || slice.text.length === 0) {
         conversationOffsetTarget = { sourceId: source.id, offset: slice.newOffset };
+      } else if (sliceFullyStored) {
+        conversationOffsetTarget = { sourceId: source.id, offset: slice.newOffset };
+        conversationOffsetGuardIds = storedSegmentIds;
       } else if (shownPrefixOffset !== undefined) {
         conversationOffsetTarget = { sourceId: source.id, offset: shownPrefixOffset };
       } else {
@@ -2580,12 +2631,20 @@ export async function consolidate(params: ConsolidateParams): Promise<Consolidat
     // between it and ④ above — see `commitBoundaryCursors`, which instead makes
     // each write monotonic so a dispossessed boundary arriving here late cannot
     // pull either cursor back behind the boundary that took over.
-    commitBoundaryCursors(params.projectId, {
+    const cursorCommit = commitBoundaryCursors(params.projectId, {
       ...(eventWatermarkId !== undefined ? { watermarkEventId: eventWatermarkId } : {}),
       ...(conversationOffsetTarget !== undefined
         ? { conversationOffset: conversationOffsetTarget }
         : {}),
+      ...(conversationOffsetGuardIds !== undefined ? { conversationOffsetGuardIds } : {}),
     });
+    // #255: the live guard inside `commitBoundaryCursors` can decide, at
+    // commit time, that `sliceFullyStored`'s premise no longer holds — the
+    // same "held" outcome the branch above would have reported had it known
+    // that in advance.
+    if (cursorCommit.conversationOffsetHeld) {
+      conversationSliceHeld = true;
+    }
 
     return {
       consolidated: extracted.length,

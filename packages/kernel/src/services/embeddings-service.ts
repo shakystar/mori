@@ -2,9 +2,15 @@ import { createHash } from "node:crypto";
 
 import { nowIso } from "../domain/common.js";
 import type { Embedder } from "../index.js";
+import { getDb } from "../storage/db.js";
 import { listValidMemories } from "./projection-store.js";
-import { listSegments } from "./segment-store.js";
-import { listEmbeddings, upsertEmbedding, type EmbeddingRow } from "./embeddings-store.js";
+import { listSegments, segmentsStillPresent } from "./segment-store.js";
+import {
+  listEmbeddings,
+  upsertEmbedding,
+  type EmbeddingRow,
+  type StoredEmbedding,
+} from "./embeddings-store.js";
 
 /**
  * P3-c — semantic search embeddings, kernel side. Mirrors the LLM consolidator
@@ -127,6 +133,33 @@ export async function ensureEmbeddings(
 }
 
 /**
+ * #255 defect 2: upserts a segment's embedding only if the segment is STILL a
+ * row in `segments` at commit time — checked LIVE, inside the same IMMEDIATE
+ * transaction as the write, not from `ensureSegmentEmbeddings`'s `listSegments`
+ * snapshot taken before its `embedder.embed` await. A concurrent process's
+ * `pruneSegments` (unguarded by the project lock, see `storage/project-lock.ts`)
+ * can delete that id while the embed call is in flight; without this recheck
+ * the upsert lands anyway, resurrecting an `embeddings` row nothing downstream
+ * ever revisits (the next `ensureSegmentEmbeddings` pass only iterates
+ * `listSegments`'s current rows, and `rebuildProjectProjection` never touches
+ * `embeddings`) — an orphan that accumulates rather than heals. Returns false
+ * (no write) when the segment is already gone, so the caller does not count an
+ * orphan as embedded. Same `commit.immediate()` reasoning as
+ * `consolidate-service.ts`'s `commitBoundaryCursors`: the read is a value
+ * ANOTHER PROCESS wrote, so it and the write it gates must not be separable.
+ */
+function upsertSegmentEmbeddingIfLive(projectId: string, embedding: StoredEmbedding): boolean {
+  let wrote = false;
+  const commit = getDb(projectId).transaction(() => {
+    if (!segmentsStillPresent(projectId, [embedding.entityId])) return;
+    upsertEmbedding(projectId, embedding);
+    wrote = true;
+  });
+  commit.immediate();
+  return wrote;
+}
+
+/**
  * Best-effort semantic index for raw transcript `segments` (v10) — the parallel
  * of `ensureEmbeddings` over the segments table, keyed by segment id under
  * kind='segment'. NEVER throws (absent/failed embedder => silent no-op; FTS still
@@ -167,7 +200,7 @@ export async function ensureSegmentEmbeddings(
       const seg = stale[i]!;
       const vector = vectors[i];
       if (!vector || vector.length === 0) continue;
-      upsertEmbedding(projectId, {
+      const wrote = upsertSegmentEmbeddingIfLive(projectId, {
         entityId: seg.id,
         kind: "segment",
         model: embedder.model,
@@ -176,7 +209,7 @@ export async function ensureSegmentEmbeddings(
         textHash: hashText(seg.text),
         createdAt,
       });
-      embedded += 1;
+      if (wrote) embedded += 1;
     }
     return { embedded };
   } catch (error) {
