@@ -132,3 +132,20 @@ vitest run …`) 이 보장이 없다 — 그때는 `pnpm build`를 먼저 돌�
 **좁혀 돌 때의 경로는 `pnpm exec vitest run <파일>`이다** (`pnpm test -- <파일>`이 아니다).
 `pnpm test`는 `turbo run test`라, `--` 뒤의 인자는 vitest가 아니라 turbo가 먼저 해석한다.
 `--watch`·파일 필터처럼 vitest에 넘기고 싶은 것은 전부 vitest를 직접 불러서 준다.
+
+## 타임아웃 정본
+
+각 패키지 루트의 `vitest.config.ts`(`packages/kernel/vitest.config.ts`,
+`packages/mori/vitest.config.ts`)가 `testTimeout`을 명시값(20000ms)으로 못박는다 — vitest
+기본값(5000ms)에 암묵 상속하지 않는다(#223). 값의 산출 근거(CI 실측 꼬리 대비 배수)는 그
+파일들의 주석에 있다. 패키지 루트에 두는 이유는 turbo `test` 태스크의 기본 inputs(그
+패키지의 git 추적 파일 전부)에 그대로 잡혀서, 공유 루트 파일처럼 `turbo.json`의
+`globalDependencies`를 따로 손볼 필요가 없기 때문이다.
+
+기본값보다 더 큰 timeout이 필요한 테스트는 `it(..., { timeout: N }, fn)`로 케이스 단위
+override를 쓰고, **왜 기본값으로 부족한지**(프로세스 스폰, 의도적으로 느린 실제 타이밍
+대기 등 비용 계열이 다른 이유)를 파일 상단이나 그 테스트 바로 위에 주석으로 남긴다
+(`packages/mori/src/bin-entrypoint.test.ts`의 30000ms,
+`packages/kernel/tests/integration/cooperative-cancellation.test.ts`의 60000ms가 그 예다).
+기본값 인상만으로 해결되는 경우(암묵 상속에 우연히 걸려 있던 것뿐)라면 override를 새로
+추가하지 않는다.
