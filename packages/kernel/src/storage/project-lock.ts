@@ -109,12 +109,10 @@
  *
  * "Ends at the next check point" is true only where a next check point can
  * exist, and at a boundary it runs out before the section does. The last one is
- * the `memory.consolidated` append; everything after it — the projection
- * rebuild, `ensureEmbeddings`, `detectContradictions`, `ensureSegmentEmbeddings`,
- * then the cursor commit and the attempt telemetry — has none, and that TAIL
- * holds most of a boundary's wall-clock (three external calls). A holder
- * dispossessed inside it therefore runs to the end, and the doc must not read
- * as though it stopped.
+ * the `memory.consolidated` append; everything after it has none, and that TAIL
+ * holds most of a boundary's wall-clock (up to two projection rebuilds and two
+ * embedder round trips). A holder dispossessed inside it therefore runs to the
+ * end, and the doc must not read as though it stopped.
  *
  * There is no fifth check point to add, and that is a consequence of the rule
  * above rather than an omission: past the append, the memories ARE on disk, so
@@ -122,8 +120,9 @@
  * the same window to the next boundary — a rare race traded for a certain
  * duplicate.
  *
- * What runs after the append is not two writes but four (#227), and they do
- * not all get a guard:
+ * What runs after the append is not two writes but seven, in this order, and
+ * they do not all get a guard (#227; the count below corrects an earlier draft
+ * of this doc that missed three of them — Codex P2 on PR #245):
  *
  * - `pruneSegments` — a lock-free DELETE of this boundary's own segment
  *   retention sweep (`segments`/`embeddings`/`search_fts`, kind='segment').
@@ -131,15 +130,28 @@
  *   tables, built from a snapshot of the event log taken at the START of the
  *   call (`readEvents`), then an `await` over every imported topic's `.md`
  *   file, and only THEN the write transaction.
+ * - `ensureEmbeddings` — best-effort per-memory UPSERTs into `embeddings`,
+ *   keyed by entity id; a no-op without an embedder.
+ * - `detectContradictions` — MUST run after `ensureEmbeddings` (its cosine
+ *   prefilter reads the embeddings table and silently skips a memory with no
+ *   vector yet). When it flags a semantic contradiction it appends
+ *   `memory.superseded` + `conflict.detected` in one transaction and, only
+ *   then, runs a SECOND `rebuildProjectProjection` of its own
+ *   (`contradiction-service.ts`) — the same lock-free replace-all as the entry
+ *   above, opened by the same race.
+ * - `ensureSegmentEmbeddings` — the segment-table analogue of `ensureEmbeddings`.
  * - `commitBoundaryCursors` — the event watermark and conversation offset.
  * - `recordAttempt` — the shared `last_consolidate_attempt` telemetry row.
  *
- * The first two are asked about by nothing — no check point above covers them
- * because none can, they run entirely inside the gap the check points stop
- * short of. `pruneSegments` turns out not to need a guard; `rebuildProjectProjection`
- * does not have that luxury, and the race it opens is Codex's P2 on PR #225 —
- * both are unpacked after the two that follow. The last two ARE guarded, but
- * not to the same strength, and the difference is the part worth stating:
+ * None of the first five gets an ownership check; what differs is how much a
+ * race there can actually cost. `ensureEmbeddings`/`ensureSegmentEmbeddings`
+ * are keyed UPSERTs into a table `rebuildProjectProjection` never touches, so
+ * the worst a race leaves behind is a vector for an entity a stale replace-all
+ * has temporarily hidden — self-healing at the next rebuild, same as the
+ * projection gap below. `pruneSegments` and both `rebuildProjectProjection`
+ * call sites are not that forgiving — both are unpacked after the two that
+ * follow. The last two ARE guarded, but not to the same strength, and the
+ * difference is the part worth stating:
  *
  * - `commitBoundaryCursors` (①) is MONOTONIC, and asks nothing about ownership
  *   at all. Each cursor is compared against what is stored (the event watermark
@@ -175,27 +187,47 @@
  * redesign, the second a change of where the record lives, and #211 held both
  * out of scope (idea #189 is where that residue is queued).
  *
- * ### The lock-free DELETE that turns out to be safe: `pruneSegments`
+ * ### The lock-free DELETE that is safe for `segments`, unsafe for what is built on it: `pruneSegments`
  *
  * `pruneSegments` (`segment-store.ts`) reads which segment ids are aged out or
  * over the retention cap, then deletes exactly those ids from
  * `segments`/`embeddings`/`search_fts` in one transaction — a
  * SELECT-then-DELETE-by-id pair with the same shape of gap this doc is
- * otherwise about. It is safe anyway, for a reason specific to this table:
- * segment rows are INSERT-or-DELETE only, never UPDATE'd, so nothing a
- * concurrent successor does between the SELECT and the DELETE can un-mark an
- * id the SELECT already named aged-out or over-cap. A successor's newly
- * inserted segments are never in that id list regardless of interleaving (the
- * list was fixed before those rows existed), and a successor racing its own
- * `pruneSegments` over the same ids just deletes zero rows the second time —
- * idempotent, not corrupting. `rebuildProjectProjection`'s own segment-FTS
- * reindex (`listSegments(projectId, "union")`, `projection-store.ts`) makes
- * the same point from the other side: unlike the entity tables below, it is
- * queried LIVE inside the synchronous replace-all transaction rather than
+ * otherwise about. The TABLE itself stays consistent no matter how that
+ * interleaves, for a reason specific to it: segment rows are INSERT-or-DELETE
+ * only, never UPDATE'd, so nothing a concurrent successor does can un-mark an
+ * id one of these two SELECTs already named aged-out or over-cap, and a
+ * successor racing its own `pruneSegments` over the same ids just deletes zero
+ * rows the second time — idempotent, not corrupting. `rebuildProjectProjection`'s
+ * own segment-FTS reindex (`listSegments(projectId, "union")`, `projection-store.ts`)
+ * makes the same point from the other side: unlike the entity tables below, it
+ * is queried LIVE inside the synchronous replace-all transaction rather than
  * carried in the pre-`await` snapshot, so whatever `pruneSegments` has
- * committed by the time that transaction runs is exactly what gets
- * reindexed. `segments` is the one piece of a boundary's tail the projection
- * race below does not touch.
+ * committed by the time that transaction runs is exactly what gets reindexed.
+ *
+ * What is NOT safe is the accounting a caller builds on top of it (Codex P2 on
+ * PR #245, correcting an earlier "turns out to be safe" verdict in this doc).
+ * The aged-row SELECT and the over-cap SELECT above are themselves two
+ * separate autocommit statements, not one snapshot bundled with the DELETE —
+ * the aged query runs, then, with nothing holding the two together, the
+ * over-cap query runs against whatever `segments` looks like by then. A
+ * successor's `insertSegments` can land in between, and on an oversized slice
+ * (over `SEGMENT_RETENTION_MAX`) or a caller-supplied smaller cap — the same
+ * condition that already lets a single boundary evict its OWN just-written
+ * chunks within the same call (`consolidate-service.ts`'s
+ * `ConsolidateResult.conversationSliceHeld` doc, case 3) — a `created_at` tie
+ * between two boundaries racing within the same millisecond,
+ * broken only by `ordinal DESC`, can put some of the SUCCESSOR's own
+ * just-inserted ids past the cap instead of the caller's own older ones. If A
+ * (dispossessed, still running this tail) deletes part of B's (the new
+ * holder's) slice this way before B reaches its own `pruneSegments` call, B
+ * never learns those ids are gone: `sliceFullyStored` in `consolidate-service.ts`
+ * only consults the `prunedSegmentIds` B's OWN call returned, never the
+ * table's actual state, so it reads TRUE for a slice that is only partly on
+ * disk — and `run()` then advances B's conversation offset past raw content
+ * whose one durable copy has already been deleted by a process B never knew
+ * was running. `segments` the TABLE is the one piece of a boundary's tail the
+ * projection race below does not touch; `segments` the RETENTION BUFFER is not.
  *
  * ### The lock-free replace-all that is not safe: `rebuildProjectProjection` (Codex P2, PR #225)
  *
@@ -208,7 +240,11 @@
  * ```
  * T1  A passes ④, the memory.consolidated append lands on disk
  * T2  A's rebuildProjectProjection snapshots the event log (readEvents)
- * T3  A awaits its imported topics' .md reads; heartbeat lapses, B takes the lock
+ * T3  A awaits its imported topics' .md reads; a third acquirer's
+ *     detach-then-judge races A's still-live lock ("The overlap that
+ *     remains" above) and loses the restore to B's fresh mkdir, so A's
+ *     instance is disposed and B takes the lock — NOT a heartbeat lapse: a
+ *     live local owner is never reclaimed on age ({@link isAbandoned})
  * T4  B runs an entire boundary of its own: append, rebuild, cursor commit
  * T5  A wakes, replaces the projection tables from its T2 snapshot — B's
  *     memories vanish from the projection (the event log still has them)
@@ -221,35 +257,61 @@
  * past it) while the projection cannot show what it was consumed INTO (B's
  * memories are missing from it) — until something rebuilds again.
  *
- * PR #225 changed what that "until" costs. Before it, ①'s guard did not exist,
- * so T6 rolled the watermark BACK to A's target; the next boundary then
- * reprocessed B's window deterministically, and ITS rebuild restored the
- * projection as a side effect — at the price of the duplicate distillation
- * #132 exists to remove. ①'s guard rejecting that rollback is correct — the
- * duplicate was the actual defect — but it also removes the only thing that
- * was closing this particular gap, and that trade needs to be on the record
- * here, not only in #225's history: before #225 the honest answer to "what
- * covers this tail" was "an unrelated guarantee, incidentally".
+ * PR #225 changed what that "until" costs — though not as unconditionally as
+ * an earlier draft of this doc claimed (Codex P2 on PR #245, corrected here).
+ * Before it, ①'s guard did not exist, so T6 wrote A's target over B's
+ * unconditionally. That is a rollback the next boundary is handed a gap to
+ * reprocess ONLY when B's window reached FARTHER than A's — a newer
+ * observation or a longer conversation slice arriving during the race. In the
+ * narrower case T1–T6 actually describes, where B starts before A has
+ * committed anything and so re-reads the identical stale watermark A did,
+ * A's unconditional write lands an EQUAL target, not a rollback — there is no
+ * gap for a third boundary to find, and what A and B both paid for is the
+ * ordinary duplicate distillation #132 exists to remove, not an additional
+ * loss. And even where a gap does open, "reprocessed B's window
+ * deterministically, and ITS rebuild restored the projection" overstates the
+ * recovery: A's own stale replace-all (T5) already wrote A's memory for the
+ * shared part of the window into the projection, so the next boundary's
+ * `consumedObservationIds` dedup guard (this file's `run()`) suppresses those
+ * same observations again regardless of where the watermark points — what a
+ * pre-#225 rollback recovered was B's memory, not A's, and only for the part
+ * of B's window A's target did not already reach. ①'s guard rejecting the
+ * rollback is correct either way — the duplicate was the actual defect — but
+ * what it removes is narrower than "the only thing closing this gap": before
+ * #225 the honest answer to "what covers this tail" was "an unrelated
+ * guarantee, incidentally, and only when a successor's window outran the one
+ * it deposed".
  *
  * Codex's original framing overstates what survives: "even another
  * consolidation with no new input will not rebuild them" is not what the code
  * does. `rebuildProjectProjection` replaces the entity tables from the WHOLE
  * event log, not a window, so B's memories — still in the log, never lost —
- * come back into the projection at the next rebuild, and rebuilds are not
- * rare: `captureObservation` calls `rebuildProjectProjection` UNCONDITIONALLY
- * after every append (`capture-service.ts`), and a boundary rebuilds whenever
- * it wrote anything (`inputs.length > 0 || segmentsWritten > 0`). The damage
- * is not permanent loss; it is observation staleness bounded by whichever
- * comes first — the project's next capture or its next writing boundary —
- * which on an active project is minutes, not indefinite.
+ * come back into the projection at the next rebuild that actually completes.
+ * That is not unconditionally the next capture (Codex P2 on PR #245,
+ * corrected here): `captureObservation` checks `throwIfDispossessed` right
+ * before its own rebuild call (`capture-service.ts` check point ②) and exits
+ * WITHOUT rebuilding when its own signal has already fired — the identical
+ * tail gap this doc is about, one layer up, on the cheapest path through the
+ * kernel. What is true is that rebuilds are frequent rather than rare — a
+ * boundary rebuilds whenever it wrote anything (`inputs.length > 0 ||
+ * segmentsWritten > 0`), and every capture attempts one — so recovery is
+ * bounded by the next capture or boundary that RUNS TO COMPLETION, not
+ * strictly the next one attempted. On an active project that is still
+ * minutes, not indefinite; a project whose captures keep landing mid-takeover
+ * (a pathological run of bad luck, not the typical case) could see it
+ * stretch further. The damage stays observation staleness, never permanent
+ * loss — the log always has it — but "the next capture" was too strong a
+ * bound to promise it by.
  *
  * The window itself is narrow, and the doc should not hide that either: T4
  * requires B to run an ENTIRE boundary — append, rebuild, cursor commit — all
- * within however long A's topic `.md` reads take (T3). On a boundary with an
- * extraction LLM in the loop that is not a realistic race; it is only within
- * reach on a path with no external call in it (a rule-based consolidator, or
- * a segments-only boundary with `inputs.length === 0`). Narrow is not the same
- * as absent, but it is why Codex rated this P2 rather than P1.
+ * within however long A's topic `.md` reads take (T3), AND T3 itself only
+ * opens through the narrow three-party detach race above, not on every
+ * contended acquire. On a boundary with an extraction LLM in the loop the
+ * timing alone is not a realistic race; it is only within reach on a path
+ * with no external call in it (a rule-based consolidator, or a segments-only
+ * boundary with `inputs.length === 0`). Narrow is not the same as absent, but
+ * it is why Codex rated this P2 rather than P1.
  *
  * Closing it for real needs the store to enforce what a filesystem lock
  * cannot: a projection write that fails against a newer snapshot instead of
