@@ -230,6 +230,7 @@ describe("parseExtractedMemories", () => {
     const items = parseExtractedMemories(
       JSON.stringify([{ kind: "decision", text: longText, salience: 5 }]),
       {
+        maxItemChars: PER_ITEM_MAX_CHARS,
         onTruncate: () => {
           truncatedCount += 1;
         },
@@ -239,6 +240,25 @@ describe("parseExtractedMemories", () => {
     expect(items[0]!.text.length).toBeLessThan(longText.length);
     expect(JSON.stringify(items[0]).length).toBeLessThanOrEqual(PER_ITEM_MAX_CHARS);
     expect(truncatedCount).toBe(1);
+  });
+
+  // #213 (PR #231 review 1, Codex P1): the size cap protects the LLM OUTPUT
+  // reservation, so it belongs to the caller that spends it and to no one
+  // else. `memory-import` (#69/#95) parses agent-distilled items with no
+  // generation call behind them — it must come out the other side untouched,
+  // not silently shortened to a boundary-reply's per-item share. The
+  // "unchanged under the cap" test above cannot see this axis: it only covers
+  // items that were already small enough.
+  it("leaves oversized items intact when no maxItemChars is stated, as on the memory-import path", () => {
+    const longText = "x".repeat(PER_ITEM_MAX_CHARS + 100);
+    let truncateCalls = 0;
+    const items = parseExtractedMemories(
+      JSON.stringify([{ kind: "decision", text: longText, salience: 5 }]),
+      { maxItems: Number.POSITIVE_INFINITY, onTruncate: () => (truncateCalls += 1) },
+    );
+    expect(items).toHaveLength(1);
+    expect(items[0]!.text).toBe(longText);
+    expect(truncateCalls).toBe(0);
   });
 
   it("sanitizes #57 evidence fields instead of failing the entry", () => {
