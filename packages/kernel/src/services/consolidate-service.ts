@@ -894,25 +894,25 @@ function prefixClippedTo(tail: string, n: number): string {
  * injects. That is the whole point of #11: the kernel has no network and no
  * configuration access.
  */
-export class LlmConsolidator implements Consolidator {
-  /**
-   * #213 — true after `extract()` resolves if `parseExtractedMemories`
-   * truncated ≥1 item to fit `PER_ITEM_MAX_CHARS`. `Consolidator.extract`'s
-   * return type is fixed at `Promise<ExtractedMemory[]>` (the interface every
-   * extractor — rule-based, LLM, custom — implements), so this can't ride
-   * back on the return value; `consolidate()` reads this field right after
-   * calling `extract()` instead, the same way it already knows the concrete
-   * extractor type to pick `extractorKind`/`backendLabel`.
-   *
-   * Safe under today's only call site — `consolidate()` constructs a fresh
-   * `LlmConsolidator` per boundary and awaits exactly one `extract()` call on
-   * it before reading this field — but NOT safe if a caller ever invokes
-   * `extract()` twice concurrently on the SAME instance: the two calls would
-   * race to overwrite this field and the read could reflect the wrong one.
-   * Do not reuse one `LlmConsolidator` across concurrent extractions.
-   */
-  lastExtractionTruncated = false;
+/**
+ * #213 — extractions that truncated ≥1 item to fit {@link PER_ITEM_MAX_CHARS}.
+ *
+ * `Consolidator.extract`'s return type is fixed at `Promise<ExtractedMemory[]>`
+ * (the interface every extractor — rule-based, LLM, custom — implements), so
+ * the fact can't ride back on the return VALUE. It rides on the return value's
+ * IDENTITY instead: `parseExtractedMemories` allocates a fresh array per call,
+ * so the array `consolidate()` is holding names exactly one extraction.
+ *
+ * An instance field on `LlmConsolidator` would have been simpler and wrong —
+ * `consolidate()` accepts a caller-supplied `params.consolidator`, so one
+ * instance can serve two boundaries at once, and their write-then-read pairs
+ * would interleave and swap flags. Keying on the per-call array removes the
+ * shared cell entirely rather than documenting a rule callers can't see.
+ * Weakly held, so an entry dies with the array it describes.
+ */
+const extractionTruncatedResults = new WeakSet<ExtractedMemory[]>();
 
+export class LlmConsolidator implements Consolidator {
   constructor(private readonly llm: ConsolidatorLlm) {}
 
   async extract(
@@ -926,7 +926,7 @@ export class LlmConsolidator implements Consolidator {
         truncated = true;
       },
     });
-    this.lastExtractionTruncated = truncated;
+    if (truncated) extractionTruncatedResults.add(items);
     return items;
   }
 }
@@ -1706,11 +1706,11 @@ export interface ConsolidateResult {
   /**
    * #213 — true when `parseExtractedMemories` truncated ≥1 extracted item to
    * fit `PER_ITEM_MAX_CHARS` (a schema-valid, item-count-compliant reply that
-   * still overran the per-item output budget). Always `rule-based`/`custom`
-   * extractors never trigger this — only `LlmConsolidator` calls
-   * `parseExtractedMemories` — but the field stays on every outcome, same as
-   * `conversationSliceHeld`, so a store that always looks fine can be told
-   * apart from one quietly losing the tail of its memories.
+   * still overran the per-item output budget). `rule-based` never reports it —
+   * only `LlmConsolidator` runs `parseExtractedMemories` — but the field stays
+   * on every outcome, same as `conversationSliceHeld`, so a store that always
+   * looks fine can be told apart from one quietly losing the tail of its
+   * memories.
    */
   extractionTruncated: boolean;
 }
@@ -1993,12 +1993,9 @@ export async function consolidate(params: ConsolidateParams): Promise<Consolidat
       throw error;
     }
 
-    // #213: only `LlmConsolidator` can produce this — `parseExtractedMemories`
-    // is the sole truncation point, and only its own `extract()` calls it.
-    // Read right after the call, same place `extractorKind`/`backendLabel`
-    // were already resolved from the concrete consolidator type above.
-    const extractionTruncated =
-      consolidator instanceof LlmConsolidator ? consolidator.lastExtractionTruncated : false;
+    // #213: keyed by the array THIS call got back, so concurrent boundaries
+    // sharing one caller-supplied consolidator can't read each other's flag.
+    const extractionTruncated = extractionTruncatedResults.has(extracted);
 
     // Supersede only what the extractor was actually SHOWN — `bounded`, not the
     // full `existing` list. Budget-trimmed memories are valid but invisible to
