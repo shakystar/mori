@@ -244,6 +244,96 @@ interface FoldedSupersedeResolution {
 }
 
 /**
+ * The open candidates that sit on a cycle of the author-dependency graph —
+ * the CYCLE CORE of {@link resolveFoldedHints} step 3.
+ *
+ * The edges are exactly what `authorSurvives` waits on: candidate c depends on
+ * every OPEN candidate that targets c's author (`c.supersededBy`), because the
+ * author's fate stays unknown until all of them are decided. A candidate is on
+ * a cycle iff its strongly connected component has more than one member — a
+ * one-member component would need a self-edge, i.e. `c.target ===
+ * c.supersededBy`, which the static filter above already dropped, so it is
+ * checked rather than assumed and costs one lookup.
+ *
+ * Being on a cycle is what makes a candidate irreducible: every candidate that
+ * could settle its author is itself waiting, around the cycle, on this one. A
+ * candidate merely queued BEHIND a cycle has no such edge back and is left
+ * open on purpose — the next sweep is where it gets its turn (#222).
+ *
+ * Tarjan's algorithm, iterated with an explicit stack: the recursion depth
+ * would otherwise be the candidate count, which is caller-supplied input.
+ *
+ * Cost is O(V+E) per stall and it is not paid repeatedly: deciding candidates
+ * only ever REMOVES nodes (and with them edges), and removing nodes cannot
+ * create a cycle — so once the first stall settles every candidate on a cycle,
+ * what is left is a DAG and every later stall finds an empty core, which is
+ * the loop's exit. The folded-hint count is not bounded by IMPORT_MAX_ITEMS
+ * (the cap bounds hints APPLIED, not candidates), so this mattering is not
+ * hypothetical.
+ */
+function findCyclicCore(open: ReadonlyArray<FoldedSupersedeCandidate>): FoldedSupersedeCandidate[] {
+  /** Open rivals per target — the successor list of any candidate authored by it. */
+  const openRivalsByTarget = new Map<string, FoldedSupersedeCandidate[]>();
+  for (const candidate of open) {
+    const rivals = openRivalsByTarget.get(candidate.target);
+    if (rivals) rivals.push(candidate);
+    else openRivalsByTarget.set(candidate.target, [candidate]);
+  }
+  const successorsOf = (candidate: FoldedSupersedeCandidate): FoldedSupersedeCandidate[] =>
+    openRivalsByTarget.get(candidate.supersededBy) ?? [];
+
+  const index = new Map<FoldedSupersedeCandidate, number>();
+  const lowlink = new Map<FoldedSupersedeCandidate, number>();
+  const onStack = new Set<FoldedSupersedeCandidate>();
+  const componentStack: FoldedSupersedeCandidate[] = [];
+  const core: FoldedSupersedeCandidate[] = [];
+  let counter = 0;
+
+  const enter = (
+    node: FoldedSupersedeCandidate,
+  ): { node: FoldedSupersedeCandidate; next: number } => {
+    index.set(node, counter);
+    lowlink.set(node, counter);
+    counter += 1;
+    componentStack.push(node);
+    onStack.add(node);
+    return { node, next: 0 };
+  };
+
+  for (const root of open) {
+    if (index.has(root)) continue;
+    const frames = [enter(root)];
+    while (frames.length > 0) {
+      const frame = frames[frames.length - 1]!;
+      const successors = successorsOf(frame.node);
+      if (frame.next < successors.length) {
+        const successor = successors[frame.next]!;
+        frame.next += 1;
+        if (!index.has(successor)) frames.push(enter(successor));
+        else if (onStack.has(successor))
+          lowlink.set(frame.node, Math.min(lowlink.get(frame.node)!, index.get(successor)!));
+        continue;
+      }
+      frames.pop();
+      if (lowlink.get(frame.node) === index.get(frame.node)) {
+        const component: FoldedSupersedeCandidate[] = [];
+        for (;;) {
+          const member = componentStack.pop()!;
+          onStack.delete(member);
+          component.push(member);
+          if (member === frame.node) break;
+        }
+        if (component.length > 1 || successors.includes(frame.node)) core.push(...component);
+      }
+      const parent = frames[frames.length - 1];
+      if (parent)
+        lowlink.set(parent.node, Math.min(lowlink.get(parent.node)!, lowlink.get(frame.node)!));
+    }
+  }
+  return core;
+}
+
+/**
  * #165: the folded-hint loop used to honor hints in a single sequential pass,
  * checking each one's `supersededBy` against only the retirements that had
  * already happened EARLIER in that same pass. That misses the reverse
@@ -289,9 +379,9 @@ interface FoldedSupersedeResolution {
  * 3. A sweep that decides nothing does not mean the work is done: it proves
  *    that every candidate still open is either in an irreducible cycle (no
  *    sweep will ever settle its author) or is queued behind one for a target.
- *    Settle that CYCLE CORE — every open candidate whose author's fate is
- *    unknowable — as ignored, all of it at once, and resume sweeping. The loop
- *    ends only when a stalled sweep leaves no such core.
+ *    Settle that CYCLE CORE — the open candidates that genuinely sit ON a
+ *    cycle, see {@link findCyclicCore} — as ignored, all of it at once, and
+ *    resume sweeping. The loop ends only when a stalled sweep leaves no core.
  *
  * Both halves of step 3 are load-bearing. Settling the core TOGETHER is what
  * keeps a mutual cycle (`a→b`, `b→a`) dropping both hints, which is the
@@ -305,15 +395,45 @@ interface FoldedSupersedeResolution {
  * lose it in the return value entirely — neither honored nor a cap drop, the
  * very hole ② below closes.
  *
+ * #222: the core used to be "every open candidate whose author's fate is
+ * unknowable" (`authorSurvives(...) === undefined`), which is strictly WIDER
+ * than the cycle. A candidate is caught by that test as soon as its author is
+ * in a cycle — but sharing an author with the cycle is not being in it. With
+ * `cX: a→b`, `cY: b→a`, `cZ: a→d`, the first stall settled all three, yet
+ * dropping the cycle is exactly what proves a SURVIVES, so cZ was eligible on
+ * the merits and d should have been retired. Being already decided, cZ never
+ * came back — honored no, cap drop no, invisible to the caller, the same hole
+ * ② closes at the cap boundary. The core is now the candidates on a cycle of
+ * the author-dependency graph, and cZ (on no cycle) simply takes its turn in
+ * the next sweep, where `authorSurvives(a) === true`.
+ *
  * **What guarantees termination:** a decision is never revisited, and every
  * iteration makes at least one — either the sweep decides a candidate, or the
- * stall settles a non-empty cycle core. A stall with candidates still open
- * always has one: a candidate blocked purely by an earlier rival is blocked by
- * an OPEN rival, and the first open rival for a target cannot itself be
- * blocked that way, so it is open only because its author is unknowable. Hence
- * at most `candidates.length` iterations. Nothing is ever un-decided, which is
- * exactly what the old exclusion set bought and this keeps without paying in
- * correctness.
+ * stall settles a non-empty cycle core. Narrowing the core to actual cycles
+ * (#222) keeps that second half true; the argument, checkable against the code
+ * above, is that at a stall with candidate set O still open:
+ *
+ * - every open candidate is (A) author-unknown, or (B) author-known but not
+ *   the first open rival for its target. Nothing else survives a sweep: a
+ *   retired author decides it ignored, a claimed target decides it ignored,
+ *   and a known-surviving author that IS the first open rival decides it
+ *   honored or capped.
+ * - A is non-empty. Take any b in B; it is blocked by an open rival for its
+ *   target, so that target has a FIRST open rival f, and f cannot be in B
+ *   (nothing open precedes it for that target), so f is in A.
+ * - every a in A has an open rival r for its author's target — that is what
+ *   makes the author unknown — so the first open rival for `a.supersededBy`
+ *   exists, and by the previous point it is itself in A. Call it `next(a)`:
+ *   a total map A → A, and `a → next(a)` is a real edge of the dependency
+ *   graph (`next(a).target === a.supersededBy`).
+ * - a total self-map on a finite non-empty set has a cycle: iterate `next`
+ *   from any member and some node must repeat. Those nodes are on a cycle of
+ *   the dependency graph, hence in a component {@link findCyclicCore} returns.
+ *
+ * So a stall with anything still open yields a non-empty core, and the loop
+ * cannot spin: at most `candidates.length` iterations. Nothing is ever
+ * un-decided, which is exactly what the old exclusion set bought and this
+ * keeps without paying in correctness.
  *
  * **Budget (#206 ②).** The cap is applied HERE rather than to the returned
  * list, because eligibility depends on which hints are actually written: a hint
@@ -404,12 +524,11 @@ function resolveFoldedHints(
     // candidate still open is either in an irreducible cycle (no sweep will
     // ever settle its author) or queued behind one for a target. Settle that
     // cycle core as ignored and resume; only an empty core ends the loop.
-    // Both halves of "the core, all of it, at once" are load-bearing — see the
-    // function doc.
-    const cyclicCore = candidates.filter(
-      (candidate) =>
-        !decisions.has(candidate) && authorSurvives(candidate.supersededBy) === undefined,
-    );
+    // Both halves of "the core, all of it, at once" are load-bearing, and the
+    // core is the candidates ON a cycle rather than every one whose author is
+    // undecided (#222) — see the function doc, including why a stall with
+    // anything still open always leaves a non-empty core.
+    const cyclicCore = findCyclicCore(candidates.filter((candidate) => !decisions.has(candidate)));
     if (cyclicCore.length === 0) break;
     for (const candidate of cyclicCore) decisions.set(candidate, "ignored");
   }

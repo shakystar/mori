@@ -1175,6 +1175,61 @@ describe("importMemories — supersede hints (#114 ③)", () => {
     },
   );
 
+  // Same shape as the test above, moved one step in: the candidate waiting on
+  // the cycle is not merely a rival for the cycle's target, its AUTHOR is a
+  // cycle member. cX ("a" retires B) and cY ("b" retires A) are the 2-cycle;
+  // cZ ("a" retires D) shares cX's author but names a target nothing else
+  // touches. Judging the core by "is this candidate's author still undecided"
+  // swept cZ in with the cycle, and dropping the cycle is exactly what proves
+  // A LIVES — so cZ was eligible all along and D should have been retired. It
+  // came back in neither honoredSupersedes nor droppedSupersedesByCap, the same
+  // invisibility #206 ② closed at the cap boundary.
+  it.each([
+    ["input order", [0, 1, 2]],
+    ["reversed", [2, 1, 0]],
+    ["rotated", [1, 2, 0]],
+  ])(
+    "#222: a candidate whose author is IN a mutual cycle still wins its own target (%s)",
+    async (_label, order) => {
+      const byText = await seedChainMemories(["a", "b", "d"]);
+      const aId = byText.get("a")!;
+      const bId = byText.get("b")!;
+      const dId = byText.get("d")!;
+
+      const hints = [
+        { kind: "decision", text: "a", salience: 7, supersedesMemoryId: bId },
+        { kind: "decision", text: "b", salience: 7, supersedesMemoryId: aId },
+        { kind: "decision", text: "a", salience: 7, supersedesMemoryId: dId },
+      ];
+
+      const result = await importMemories({
+        projectId,
+        actor: "test",
+        source: "docs",
+        itemsJson: JSON.stringify(order.map((index) => hints[index]!)),
+      });
+
+      expect(result).toEqual({
+        imported: 0,
+        skippedDuplicates: 3,
+        droppedByCap: 0,
+        honoredSupersedes: 1,
+        droppedSupersedesByCap: 0,
+      });
+      const superseded = (await readEvents(projectId)).filter(
+        (event) => event.type === "memory.superseded",
+      );
+      expect(superseded).toHaveLength(1);
+      // D is the only retirement: A and B are named only by the dropped cycle.
+      expect(superseded[0]!.payload).toMatchObject({ supersedes: dId });
+      expect(
+        listValidMemories(projectId)
+          .map((row) => row.memory.text)
+          .sort(),
+      ).toEqual(["a", "b"]);
+    },
+  );
+
   it("#206 ②: a hint the cap could not apply does not exclude the hint that depended on it", async () => {
     const byText = await seedChainMemories(["u", "x", "m", "n", "t"]);
     const xId = byText.get("x")!;
