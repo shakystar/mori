@@ -108,20 +108,46 @@
  * ### Where the check points stop, and what covers the rest (#211)
  *
  * "Ends at the next check point" is true only where a next check point can
- * exist, and at a boundary it runs out before the section does. The last one is
- * the `memory.consolidated` append; everything after it has none, and that TAIL
- * holds most of a boundary's wall-clock (up to two projection rebuilds, two
- * embedder round trips, and — whenever a configured judge flags a candidate
- * pair — one LLM call per pair compared, `detectContradictions`'s judge loop;
- * #227 corrects an earlier count that omitted the judge calls, Codex P2 on PR
- * #245). A holder dispossessed inside it therefore runs to the end, and the
- * doc must not read as though it stopped.
+ * exist, and at a boundary it runs out before the section does. The last one
+ * is check point ④, immediately before the rest of the tail; everything after
+ * it has none. What gates entry into that rest is not the
+ * `memory.consolidated` append alone: the rebuild below runs on
+ * `inputs.length > 0 || segmentsWritten > 0` (`consolidate-service.ts:2499`),
+ * so a conversation-only boundary — no memories extracted (`inputs.length ===
+ * 0`) but raw segments written from the transcript slice — still reaches
+ * `pruneSegments`, `rebuildProjectProjection` (its segment-FTS reindex
+ * included), and `ensureSegmentEmbeddings`, with no `memory.consolidated`
+ * event ever appended (#248, correcting an earlier draft that named the
+ * append as the tail's only gate — Codex P2 on PR #245, third round). That
+ * TAIL holds most of a boundary's wall-clock (up to two projection rebuilds,
+ * two embedder round trips, and — whenever a configured judge flags a
+ * candidate pair — one LLM call per pair compared, `detectContradictions`'s
+ * judge loop, which only runs on the `inputs.length > 0` branch, so a
+ * segment-only tail is shorter but no better protected; #227 corrects an
+ * earlier count that omitted the judge calls, Codex P2 on PR #245). A holder
+ * dispossessed inside it therefore runs to the end, and the doc must not read
+ * as though it stopped.
  *
  * There is no fifth check point to add, and that is a consequence of the rule
- * above rather than an omission: past the append, the memories ARE on disk, so
- * stopping there would leave them distilled with the cursor unmoved and hand
- * the same window to the next boundary — a rare race traded for a certain
- * duplicate.
+ * above rather than an omission — though what is already on disk, and what a
+ * fifth check point would protect, differs by which branch let the tail
+ * start. Where memories were extracted: past the append, the memories ARE on
+ * disk, so stopping there would leave them distilled with the cursor unmoved
+ * and hand the same window to the next boundary — a rare race traded for a
+ * certain duplicate. Where none were, only `segmentsWritten > 0`: there is no
+ * append to stop after — the raw segments are already on disk before the tail
+ * even starts (check point ④ sits after the raw-segment write, per the check
+ * point list above). What a fifth check point would instead protect is the
+ * segment-FTS reindex inside `rebuildProjectProjection` — but
+ * `commitBoundaryCursors` (①), including the CONVERSATION offset it advances
+ * on `sliceFullyStored` (this file's `run()`, which does not consult
+ * `inputs.length` at all), sits at the very end of `run()`, after that
+ * reindex. Stopping before it therefore means neither cursor moves
+ * (`consolidate-service.ts:2383-2388`), same as check point ④ already
+ * guarantees on the memory-extraction branch: the watermark stays exactly
+ * where `run()` found it, and the next boundary re-chunks and re-inserts the
+ * same slice — a duplicate `pruneSegments` bounds and heals, not a lost
+ * SEGMENT PROJECTION behind an already-advanced offset.
  *
  * What runs after the append, in order, each classified by what a race there
  * can actually cost (#227; corrects an earlier draft that missed three writes
@@ -234,7 +260,9 @@
  *     above) and loses the restore to B's fresh mkdir, so A's instance is
  *     disposed and B takes the lock — NOT a heartbeat lapse: a live local
  *     owner is never reclaimed on age ({@link isAbandoned})
- * T4  B runs an entire boundary of its own: append, rebuild, cursor commit
+ * T4  B runs a boundary of its own: append, rebuild, cursor commit — the full
+ *     sequence, though T5 below only needs B's first two to land before it;
+ *     see the requirement note past this diagram
  * T5  A wakes, replaces the projection tables from its T2 snapshot — B's
  *     memories vanish from the projection (the event log still has them)
  * T6  A's commitBoundaryCursors compares against stored state and loses — ①'s
@@ -294,19 +322,32 @@
  *
  * The window itself is narrow, and the doc should not hide that either — but
  * "no external call in it" is narrower than an earlier draft made it sound
- * (#227, correcting that draft; Codex P2 on PR #245). T4 requires B to run an
- * ENTIRE boundary — append, rebuild, cursor commit — all within T3, AND T3
- * itself only opens through the narrow three-party detach race above, not on
- * every contended acquire. T3 is short relative to an extraction LLM call, but
- * this is only the FIRST rebuild's T3; `detectContradictions` runs later in
- * the same tail and opens the identical race around its OWN
- * `rebuildProjectProjection` call, regardless of whether extraction used an
- * LLM at all — any boundary with a configured judge and a decision pair over
- * the cosine threshold pays an LLM round trip there. A tail with judge calls
- * in it is a LONGER tail, so the real requirement is no external call
- * ANYWHERE in the tail, not just no extraction LLM — narrower than "a
- * rule-based consolidator" alone guarantees. Narrow is not the same as
- * absent, but it is why Codex rated this P2 rather than P1.
+ * (#227, correcting that draft; Codex P2 on PR #245). What T4 actually needs
+ * is narrower still than #227 left it (#248, correcting THAT draft; Codex P2
+ * on PR #245, third round): the damage at T5 only needs B's OWN
+ * `memory.consolidated` append and B's OWN `rebuildProjectProjection` to land
+ * before A's write transaction starts, not the whole of T4. B's
+ * `commitBoundaryCursors` — the last call in a boundary
+ * (`consolidate-service.ts`, after the rebuild and the embedder/judge calls)
+ * — does not have to finish inside T3 at all; it can land after A's T5, even
+ * after A's T6, since ①'s monotonic guard there compares A's target against
+ * whatever IS stored at commit time and drops it correctly either way. The T4
+ * line above still lists all three calls because that is what a full
+ * boundary actually runs, not because the cursor commit is part of what has
+ * to fit inside T3. AND T3 itself only opens through the narrow three-party
+ * detach race above, not on every contended acquire. T3 is short relative to
+ * an extraction LLM call, but this is only the FIRST rebuild's T3;
+ * `detectContradictions` runs later in the same tail and opens the identical
+ * race around its OWN `rebuildProjectProjection` call, regardless of whether
+ * extraction used an LLM at all — any boundary with a configured judge and a
+ * decision pair over the cosine threshold pays an LLM round trip there. A
+ * tail with judge calls in it is a LONGER tail, so the real requirement is no
+ * external call ANYWHERE in the tail, not just no extraction LLM — narrower
+ * than "a rule-based consolidator" alone guarantees. Narrow is not the same
+ * as absent, and dropping the cursor-commit requirement makes it wider than
+ * #227 had it, not narrower — it is still why Codex rated this P2 rather than
+ * P1, on the strength of the three-party race and the no-external-call
+ * requirement alone.
  *
  * Closing it for real needs the store to enforce what a filesystem lock
  * cannot: a projection write that fails against a newer snapshot instead of
