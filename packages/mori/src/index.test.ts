@@ -12,7 +12,7 @@ import type {
 import { createAssistantMessageEventStream, InMemoryCredentialStore } from "@earendil-works/pi-ai";
 import type { AgentMessage, StreamFn } from "@earendil-works/pi-agent-core";
 import type { ConsolidatorLlm } from "@mori/kernel";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { MoriKernel } from "./agent/index.js";
 import { EXPERIMENTAL_OPENAI_OAUTH_ENV, OPENAI_OAUTH_PROVIDER_ID } from "./auth/experimental.js";
 import type { ReplInputSource, ReplLine } from "./cli/repl-input.js";
@@ -189,6 +189,24 @@ function captureOutput() {
 }
 
 describe("runCli", () => {
+  // `prepareAgent` (cli/runtime.ts) builds a real `MoriKernel` rooted at `deps.root ??
+  // process.cwd()` whenever a test doesn't inject `deps.kernel` — and that kernel
+  // construction eagerly persists `.mori/project.json` under that root (kernel/index.ts's
+  // `createMoriKernel`), not lazily on first observation. Tests below that reach past the
+  // auth gate without injecting `kernel` used to leave that identity file under
+  // `packages/mori/.mori/` (`process.cwd()` when vitest runs via `turbo run test`), an
+  // untracked artifact every `pnpm test` run left behind (#275). Giving them an isolated
+  // `root` keeps the write inside a throwaway tmpdir instead.
+  let cliRoot: string;
+
+  beforeEach(() => {
+    cliRoot = mkdtempSync(join(tmpdir(), "mori-cli-root-"));
+  });
+
+  afterEach(() => {
+    rmSync(cliRoot, { recursive: true, force: true });
+  });
+
   it("fails fast with OAuth-first setup guidance when no credentials are available", async () => {
     const io = captureOutput();
 
@@ -219,6 +237,7 @@ describe("runCli", () => {
         stderr: io.stderr,
         streamFn: fakeStreamFn("hello from mori"),
         credentialStore: new InMemoryCredentialStore(),
+        root: cliRoot,
       },
     );
 
@@ -347,6 +366,7 @@ describe("runCli", () => {
         stderr: io.stderr,
         streamFn: fakeStreamFn("hello from mori"),
         credentialStore: store,
+        root: cliRoot,
       },
     );
 
@@ -372,6 +392,7 @@ describe("runCli", () => {
         stderr: io.stderr,
         streamFn: fakeStreamFn("hello from mori"),
         credentialStore: store,
+        root: cliRoot,
       },
     );
 
@@ -419,6 +440,7 @@ describe("runCli", () => {
             return reply(model, context, options);
           },
           openReplInput: () => input.source,
+          root: cliRoot,
         },
       );
 
@@ -573,6 +595,7 @@ describe("runCli", () => {
         stderr: io.stderr,
         streamFn: fakeStreamFn("hello from gpt"),
         credentialStore: new InMemoryCredentialStore(),
+        root: cliRoot,
       },
     );
 
@@ -628,6 +651,7 @@ describe("runCli", () => {
       {
         stdout: io.stdout,
         stderr: io.stderr,
+        root: cliRoot,
       },
     );
 
@@ -842,7 +866,12 @@ describe("runCli", () => {
       const exitCode = await runCli(
         ["hi"],
         { XDG_CONFIG_HOME: configDir, ANTHROPIC_API_KEY: "sk-ant-test" },
-        { stdout: io.stdout, stderr: io.stderr, streamFn: fakeStreamFn("hello from mori") },
+        {
+          stdout: io.stdout,
+          stderr: io.stderr,
+          streamFn: fakeStreamFn("hello from mori"),
+          root: cliRoot,
+        },
       );
 
       expect(exitCode).toBe(0);
