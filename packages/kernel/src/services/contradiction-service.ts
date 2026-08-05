@@ -2,11 +2,11 @@ import type { ConsolidatorLlm } from "../index.js";
 import type { Embedder } from "../index.js";
 import { createConflict, type Conflict, type MemorySupersededPayload } from "../domain/entities.js";
 import type { DomainEvent } from "../domain/events.js";
-import type { MemoryRecord } from "../projections/projector.js";
+import { reduceProjectState, SELF_LANE, type MemoryRecord } from "../projections/projector.js";
 import { cosineSimilarity } from "./embeddings-service.js";
 import { listEmbeddings } from "./embeddings-store.js";
-import { listValidMemories, rebuildProjectProjection } from "./projection-store.js";
-import { appendEvents, isStaleHeadError, readHeadEventId } from "../storage/event-store.js";
+import { rebuildProjectProjection } from "./projection-store.js";
+import { appendEvents, isStaleHeadError, readEvents } from "../storage/event-store.js";
 
 /**
  * Semantic contradiction detection between `decision`-kind memories — an
@@ -146,8 +146,13 @@ function pickWinner(a: MemoryRecord, b: MemoryRecord): [MemoryRecord, MemoryReco
  * ever re-judged in the same call. A memory that survives as winner keeps
  * scanning the rest of the snapshot in the same pass, so if it contradicts
  * two different memories, both are applied here; only a memory that itself
- * loses stops being scanned further (a later call re-scans the post-supersede
- * valid set and only compares still-valid memories).
+ * loses stops being scanned further.
+ *
+ * That snapshot is a REPLAY OF THE EVENT LOG (#294), not a read of the
+ * projection table, so a later call sees every supersede this module already
+ * appended whether or not the projection rebuild that would have shown it
+ * committed. See the basis read for the duplicate that sourcing it from the
+ * projection produced.
  *
  * #253: every append is a compare-and-append against the head this snapshot
  * was taken at. A refusal means another writer moved the log while a judge was
@@ -160,19 +165,56 @@ export async function detectContradictions(
   const { projectId, embedder, judge, actor } = params;
   if (!embedder) return [];
 
-  // #253 (#189 A): the head as of the instant this pass's judgment basis was
-  // taken. Read BEFORE the snapshot below, never after — see
-  // `AppendEventsOptions.expectedHead` for why that order is the safe one.
-  // Every append in the loop carries it, so a verdict computed from this
-  // snapshot can no longer land on a log that moved while the judge was
-  // thinking (`project-lock.ts` classifies this whole call as UNSAFE tail
-  // work: it runs past the boundary's last dispossession check point, and one
-  // judge LLM round trip per compared pair is how long the window stays open).
-  let expectedHead = (await readHeadEventId(projectId)) ?? null;
+  // #294 (#189 ㉰): the judgment basis is a LOG REPLAY, not the projection
+  // table — the same shape (and for the same reason) as
+  // `memory-import-service.ts`'s `readValidMemoriesFromLog`. The projection
+  // only shows THIS module's own verdicts once a rebuild commits, and the
+  // rebuild at the end of this function is conditional and can lose its CAS
+  // (`rebuildProjectProjection` returns `{ committed: false }` rather than
+  // throwing). A basis read from the projection therefore still shows a loser
+  // this module already superseded as valid, so the next pass re-judges the
+  // same pair — and because `createConflict` mints a fresh id per call, that
+  // re-judgment lands as a DUPLICATE `conflict.detected` + `memory.superseded`
+  // instead of being absorbed. Replaying the log makes each verdict its own
+  // basis: whatever this module appended is visible to the next pass
+  // immediately, rebuild or no rebuild.
+  //
+  // Deliberately placed AFTER the `embedder` guard above: a store with
+  // embeddings off must not pay a full replay to learn it has nothing to do.
+  //
+  // No genesis check here, unlike `readValidMemoriesFromLog` — that one refuses
+  // a project with no `project.created` because an import must fail BEFORE it
+  // appends. This function is best-effort tail work for both its callers (see
+  // the catch site below for why it must not throw), and a log with no genesis
+  // reduces to no memories, which the `< 2` return already handles.
+  const events = await readEvents(projectId);
 
-  const decisions = listValidMemories(projectId)
-    .map((row) => row.memory)
-    .filter((memory) => memory.kind === "decision");
+  // #253 (#189 A): the head OF THIS VERY READ — basis and head now come from
+  // ONE array, so the two cannot disagree about which appends they saw. The
+  // read-ordering discipline that used to live here (head first, projection
+  // after, per `AppendEventsOptions.expectedHead`) existed only because they
+  // came from two different sources; a single source removes both the rule and
+  // the #263 residue it could not cover. Every append in the loop carries it,
+  // so a verdict computed from this basis can no longer land on a log that
+  // moved while the judge was thinking (`project-lock.ts` classifies this whole
+  // call as UNSAFE tail work: it runs past the boundary's last dispossession
+  // check point, and one judge LLM round trip per compared pair is how long the
+  // window stays open).
+  let expectedHead = events.at(-1)?.id ?? null;
+
+  // The same set the projection-table read this replaced produced — the valid
+  // self-lane memory selector in `projection-store.ts` (`invalid_at IS NULL` +
+  // `source_project_id IS NULL`, i.e. `laneWhere("self")`), plus this module's
+  // own `kind === "decision"` narrowing: validity window still open
+  // (`invalidAt` unset) and self-lane, because a foreign writer's memory is not
+  // local truth (SoT-040 — it must neither supersede nor be superseded by a
+  // local decision).
+  const decisions = Object.values(reduceProjectState(events, projectId).memories).filter(
+    (memory) =>
+      !memory.invalidAt &&
+      (memory.sourceProjectId ?? SELF_LANE) === SELF_LANE &&
+      memory.kind === "decision",
+  );
   if (decisions.length < 2) return [];
 
   // Filtered to the active embedder's model (mirrors semanticScoresForKind /

@@ -2,7 +2,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createConsolidatedMemory, createProject } from "../../src/domain/entities.js";
 import type { ConsolidatedMemoryKind } from "../../src/domain/entities/memory.js";
@@ -14,8 +14,8 @@ import {
   makeLlmJudge,
   type Judge,
 } from "../../src/services/contradiction-service.js";
-import { ensureEmbeddings } from "../../src/services/embeddings-service.js";
-import { listEmbeddings } from "../../src/services/embeddings-store.js";
+import { ensureEmbeddings, hashText } from "../../src/services/embeddings-service.js";
+import { listEmbeddings, upsertEmbedding } from "../../src/services/embeddings-store.js";
 import {
   listOpenConflicts,
   listValidMemories,
@@ -23,6 +23,45 @@ import {
 } from "../../src/services/projection-store.js";
 import { closeAll } from "../../src/storage/db.js";
 import { appendEvent, readEvents } from "../../src/storage/event-store.js";
+
+/**
+ * Why one call is mocked here (TESTING.md "예외: 타이밍 레이스·장애 주입").
+ *
+ * `detectContradictions` writes its verdict to the log and then rebuilds the
+ * projection, and #189 ㉰ is what happens when that rebuild does NOT commit:
+ * `rebuildProjectProjection` returns `{ committed: false }` when every attempt
+ * loses its snapshot compare-and-swap (#270), which in production means another
+ * process — a successor that took the project lock away mid-tail
+ * (`storage/project-lock.ts` T1–T5) — kept the log moving underneath it. One
+ * process cannot schedule itself into that window: the rebuild's losing window
+ * opens between its own `readEvents` and the write transaction it opens after
+ * its `await`s, and a second connection would simply block on that transaction
+ * and commit after it.
+ *
+ * So the seam is `rebuildProjectProjection` returning its own documented
+ * `{ committed: false }` — not an invented failure, but the exact value the real
+ * function returns on retry exhaustion. Everything else in the module passes
+ * through `importOriginal` (the fixture's own rebuilds run for real), only an
+ * explicitly armed call behaves differently, and the assertions are observable
+ * final state: which memories the projection returns, and how many
+ * `memory.superseded` / `conflict.detected` events are in the log — never the
+ * mock's call log.
+ */
+const rebuildSeam = vi.hoisted(() => ({ uncommitted: false }));
+
+vi.mock("../../src/services/projection-store.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../src/services/projection-store.js")>();
+  return {
+    ...actual,
+    rebuildProjectProjection: async (
+      projectId: string,
+      opts?: Parameters<typeof actual.rebuildProjectProjection>[1],
+    ) => {
+      if (rebuildSeam.uncommitted) return { committed: false };
+      return actual.rebuildProjectProjection(projectId, opts);
+    },
+  };
+});
 
 let sandbox: string;
 let projectId: string;
@@ -44,6 +83,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  rebuildSeam.uncommitted = false;
   closeAll();
   delete process.env.MEMORIZE_ROOT;
   await rm(sandbox, { recursive: true, force: true });
@@ -64,6 +104,8 @@ async function seedMemory(
   text: string,
   createdAt: string,
   kind: ConsolidatedMemoryKind = "decision",
+  /** Provenance override — set it to put the memory in a FOREIGN lane (M2). */
+  sourceProjectId?: string,
 ): Promise<string> {
   const memory = {
     ...createConsolidatedMemory({
@@ -82,6 +124,7 @@ async function seedMemory(
     scopeType: "session",
     scopeId: projectId,
     actor: "test",
+    ...(sourceProjectId ? { sourceProjectId } : {}),
     payload: memory,
   });
   await rebuildProjectProjection(projectId);
@@ -272,6 +315,130 @@ describe("contradiction-service", () => {
     const validIds = listValidMemories(projectId).map((row) => row.memory.id);
     expect(validIds).toContain(olderId);
     expect(validIds).toContain(newerId);
+  });
+
+  it("replays the same basis set the projection read gave — invalid and foreign-lane memories excluded (#294)", async () => {
+    const FOREIGN = "proj_contradiction_bob";
+    const MEM_A = "Decision A: the writer batches its appends";
+    const MEM_B = "Decision B: the writer appends one at a time instead";
+    const MEM_INVALID = "Decision C: the writer does not append at all";
+    const MEM_FOREIGN = "Decision D: a union writer's own append policy";
+    const MEM_OTHER_KIND = "The append benchmark ran for forty minutes";
+
+    // Model carrier only — every vector below is written directly, so the same
+    // similarity holds for the invalid and foreign memories as for the valid
+    // ones and the prefilter cannot be what excludes them.
+    const embedder = fakeEmbedder(VECTORS, "fake-embed-basis");
+    const validA = await seedMemory(MEM_A, "2026-02-01T00:00:00.000Z");
+    const validB = await seedMemory(MEM_B, "2026-02-02T00:00:00.000Z");
+    const invalid = await seedMemory(MEM_INVALID, "2026-02-03T00:00:00.000Z");
+    const foreign = await seedMemory(MEM_FOREIGN, "2026-02-04T00:00:00.000Z", "decision", FOREIGN);
+    const otherKind = await seedMemory(MEM_OTHER_KIND, "2026-02-05T00:00:00.000Z", "progress");
+
+    // Close C's window, so the fixture has a decision that is in the log but
+    // out of the valid set.
+    await appendEvent({
+      type: "memory.superseded",
+      projectId,
+      scopeType: "project",
+      scopeId: projectId,
+      actor: "test",
+      payload: { supersedes: invalid, supersededBy: validB, reason: "seeded invalidation" },
+    });
+    await rebuildProjectProjection(projectId);
+
+    // Identical vectors under the ACTIVE model for ALL five, invalid and
+    // foreign included: without them the `!vec` guard would drop those two
+    // whatever the basis filter did, and the assertion below would hold
+    // vacuously.
+    for (const [id, text] of [
+      [validA, MEM_A],
+      [validB, MEM_B],
+      [invalid, MEM_INVALID],
+      [foreign, MEM_FOREIGN],
+      [otherKind, MEM_OTHER_KIND],
+    ]) {
+      upsertEmbedding(projectId, {
+        entityId: id!,
+        kind: "memory",
+        model: embedder.model,
+        dim: 3,
+        vector: [1, 0, 0],
+        textHash: hashText(text!),
+        createdAt: "2026-02-06T00:00:00.000Z",
+      });
+    }
+
+    // cos = 1 for every pair, so the judge is handed the basis in full and the
+    // ids it saw ARE the basis (never contradicting, so nothing is appended and
+    // no pair is skipped as already-resolved).
+    const judged = new Set<string>();
+    const observingJudge: Judge = async (pair) => {
+      judged.add(pair.a.id);
+      judged.add(pair.b.id);
+      return { contradicts: false };
+    };
+
+    const results = await detectContradictions({
+      projectId,
+      embedder,
+      judge: observingJudge,
+      actor: "test",
+    });
+    expect(results).toEqual([]);
+
+    // The set the replaced projection read produced: SQL `invalid_at IS NULL`
+    // + self lane, then this module's own `kind === "decision"` narrowing.
+    const projectionBasis = listValidMemories(projectId)
+      .map((row) => row.memory)
+      .filter((memory) => memory.kind === "decision")
+      .map((memory) => memory.id)
+      .sort();
+
+    expect(projectionBasis).toEqual([validA, validB].sort());
+    expect([...judged].sort()).toEqual(projectionBasis);
+  });
+
+  it("does not re-adjudicate a pair whose verdict no projection rebuild ever committed (#294, #189 ㉰)", async () => {
+    const embedder = fakeEmbedder(VECTORS);
+    const olderId = await seedMemory(MEM_PG, "2026-01-01T00:00:00.000Z");
+    const newerId = await seedMemory(MEM_SQLITE, "2026-01-02T00:00:00.000Z");
+    await ensureEmbeddings(projectId, embedder);
+
+    // First pass: the verdict becomes durable in the log, and the rebuild that
+    // would have shown it to a projection reader loses its CAS and writes
+    // nothing (see the seam rationale at the top of this file).
+    rebuildSeam.uncommitted = true;
+    const first = await detectContradictions({
+      projectId,
+      embedder,
+      judge: alwaysContradicts,
+      actor: "test",
+    });
+    expect(first).toHaveLength(1);
+
+    // ㉰'s precondition, asserted rather than assumed: the projection still
+    // shows the loser as valid, so a projection-sourced basis would hand the
+    // very same pair to the judge again.
+    expect(
+      listValidMemories(projectId)
+        .map((row) => row.memory.id)
+        .sort(),
+    ).toEqual([olderId, newerId].sort());
+
+    const second = await detectContradictions({
+      projectId,
+      embedder,
+      judge: alwaysContradicts,
+      actor: "test",
+    });
+
+    // Pre-#294 this second pass re-judged the pair and `createConflict` minted
+    // a fresh id, so the duplicate verdict was appended rather than absorbed.
+    expect(second).toEqual([]);
+    const types = (await readEvents(projectId)).map((event) => event.type);
+    expect(types.filter((type) => type === "memory.superseded")).toHaveLength(1);
+    expect(types.filter((type) => type === "conflict.detected")).toHaveLength(1);
   });
 
   it("a surviving winner keeps scanning and both of its contradictions apply in one call (#118 item 4)", async () => {
