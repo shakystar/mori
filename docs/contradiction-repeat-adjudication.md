@@ -26,7 +26,10 @@
 
 ## 0. 기준선과 결함의 모양
 
-- 기준 커밋: `dbfc7ab` (PR #288 머지 직후, `main`). 인용한 줄 번호는 이 시점의 것이다.
+- 기준 커밋: `db6ff67` (PR #293 머지 직후, `main`). 인용한 줄 번호는 이 시점의 것이다.
+  첫 판은 `dbfc7ab` 기준이었고, 그 사이의 유일한 커밋 `db6ff67`은
+  `docs/compaction-consolidation-boundary.md` 한 파일만 바꿨으므로 이 문서가 인용하는
+  `packages/kernel/**`는 두 커밋에서 바이트 동일하다.
 - 선행 게이트: #284가 [PR #286](https://github.com/shakystar/mori/pull/286) `d7eb12a`로
   닫혀서 이 산정의 조건이 충족됐다 (#189의 07:51 코멘트).
 
@@ -180,17 +183,40 @@ unconditionally, `reindexSearch: false` ones included"_ 는 **실물에서 참�
 
 즉 "유니크 제약으로 중복 append를 거부한다"는 이 리포에서 검증된 수단이다. 다만 ㉰에
 쓰려면 **호출자가 이벤트 id를 지정하는 새 이음매**가 필요하다 (`AppendEventInput.id`).
-그것은 이벤트 정체성 변경이고, #282가 값을 낸 종류의 대가를 진다:
 
-- 중복이 **예외**가 되어 `detectContradictions`의 꼬리에서 throw된다. 그 꼬리는 던지면
-  안 되는 자리이고, 왜 안 되는지가 이미 적혀 있다 (`contradiction-service.ts:271-283`:
-  두 호출자 모두 커서 커밋 전에 이것을 돌리므로, 여기서 던지면 창이 미소비로 남아
-  _"buying a rare race with a certain duplicate"_).
-  → `isDuplicateGenesisError` 모양의 판별자와 삼킴 경로를 하나 더 만들어야 한다.
-- `memory.superseded`는 **전혀 건드리지 못한다.** 그 이벤트의 `scopeId`는 projectId이고
-  (`contradiction-service.ts:247-253`), payload에는 id가 없으며, 이벤트 id 민팅 자리는
-  동일하게 `event-store.ts:286`이다. 결정적 conflict id를 도입해도 중복
-  `memory.superseded`는 그대로 남는다.
+**그 이음매를 넣으면 (가)는 ㉰를 실제로 완전히 닫는다.** 두 이벤트는 **한 번의
+`appendEvents` 호출**에 배열로 들어가고 (`contradiction-service.ts:245-270` —
+`memory.superseded`가 `[0]`, `conflict.detected`가 `[1]`), `appendEvents`는 그 배열
+전체를 `db.transaction` **하나**로 돌린다 (`event-store.ts:303-313`). 그러므로 두 번째
+insert가 `SQLITE_CONSTRAINT_UNIQUE`로 던지면 **첫 번째 insert도 함께 롤백된다** — 중복
+`conflict.detected`도, 중복 `memory.superseded`도 남지 않는다. 이 성질은 부작용이 아니라
+**의도된 설계**이고 소스 주석이 그렇게 적어 놨다 (`contradiction-service.ts:232-235`):
+
+> _"One confirmed contradiction is logically a single operation — both events go through
+> appendEvents (one db.transaction) **so a failure on the second insert can never leave the
+> loser durably superseded without the conflict that explains why** (#118 item 3)."_
+
+`appendEvents`의 JSDoc도 같은 말을 한다 — _"The refusal rolls back exactly like any other
+throw in the block, so there is no partial append to clean up"_ (`event-store.ts:272-273`).
+
+따라서 (가)의 각하는 **효과가 부족해서가 아니라 대가 때문**이다. 이음매를 넣을 때 남는
+대가는 셋이고, 셋 다 실물에서 확인된다:
+
+1. **이벤트 정체성 변경.** `AppendEventInput`에 id 필드를 여는 것은 "이벤트 id는 append
+   경로가 민팅한다"는 오늘의 불변을 깬다 (`event-store.ts:13-28`, `:286`). #282가 값을
+   낸 자리가 정확히 "가장 자연스러워 보이는 후보가 결함을 가드 밖으로 옮기는 거래"였고,
+   이벤트 정체성은 그 종류의 오판 비용이 가장 비싼 축이다.
+2. **예외 판별·삼킴 경로 추가.** 중복이 예외로 `detectContradictions`의 꼬리에서
+   올라오는데, 그 꼬리는 던지면 안 되는 자리다 (`contradiction-service.ts:271-283`:
+   두 호출자 모두 커서 커밋 전에 이것을 돌리므로, 여기서 던지면 창이 미소비로 남아
+   _"buying a rare race with a certain duplicate"_ — `:277-278`). 그러므로
+   `isDuplicateGenesisError`(`event-store.ts:100-106`) 모양의 판별자와 삼킴 경로를 하나
+   더 만들어야 하고, **그 판별자는 "우리가 기대한 중복"과 "다른 UNIQUE 위반"을 구별해야
+   한다** — 후자를 같이 삼키면 진짜 append 실패가 조용히 사라진다.
+3. **judge LLM 왕복은 어차피 이미 지불됐다.** 거부는 append 시점에 일어나므로 §2.4의
+   손해 (c)(낭비된 판정 왕복)는 (가)로 **줄어들지 않는다.** ㉰가 만드는 손해 중 오늘
+   유일하게 값이 붙는 것이 바로 그것이므로(§2.3: 표면 소비자 0건), (가)는 **오늘 실제로
+   드는 비용을 하나도 없애지 못한 채** 위 1·2를 지불한다.
 
 ### 3.3 projector의 divergent-id throw와는 충돌하지 않는다
 
@@ -263,13 +289,31 @@ genesis id 두 개)이고, 바로 위 주석이 _"A repeated SAME id (idempotent
 
 basis를 `listValidMemories`(프로젝션) 대신 **로그 replay**로 잡으면, 첫 패스가 append한
 `memory.superseded`가 이미 로그에 있으므로 두 번째 패스의 basis에서 패배자는 `invalidAt`을
-갖는다 → 재판정 자체가 일어나지 않는다. **어떤 리빌드도 커밋될 필요가 없다.**
-§1.3의 도달 조건 넷이 전부 무의미해진다.
+갖는다 → 재판정 자체가 일어나지 않는다. **㉰의 유효성 판정에는 어떤 리빌드도 커밋될 필요가
+없어지고**, §1.3의 도달 조건 넷이 전부 무의미해진다.
 
 구현 모양은 새로 발명할 것이 없다 — `memory-import-service.ts:210-230`의
 `readValidMemoriesFromLog`가 **같은 이유로 이미 존재한다**: 프로젝션 캐시가 아니라
 이벤트 로그가 멱등성의 정본이라는 것(`memory-import-service.ts:52-57`).
 `kind === "decision"` 필터만 얹으면 된다.
+
+**한정 — 이 패스가 프로젝션에서 완전히 독립하지는 않는다.** 반례를 찾다가 하나 나왔고,
+권고를 바꾸지는 않지만 후속 이슈가 알아야 한다. `detectContradictions`의 코사인 프리필터는
+`listEmbeddings(projectId, "memory", embedder.model)`로 벡터를 읽고, 벡터가 없는 메모리는
+**조용히 건너뛴다** (`contradiction-service.ts:184-186`, `:201-202`·`:207-208`의
+`if (!vecA) continue` / `if (!vecB) continue`). 그런데 그 벡터를 채우는 `ensureEmbeddings`는
+**여전히 `listValidMemories`(프로젝션)를 읽는다** (`embeddings-service.ts:95`). 그러므로
+리빌드가 커밋되지 않으면 새 메모리는 벡터가 없고, 후보②의 replay basis에 들어와도
+프리필터에서 탈락한다.
+
+이것이 결론을 흔들지 않는 이유는 방향이 반대이기 때문이다: 그것은 **누락**(비교되지 않음)
+이지 ㉰가 문제 삼는 **중복**이 아니고, 오늘도 똑같이 일어나며(그래서 `consolidate-service.ts:2641-2643` 주석이
+`detectContradictions`를 `ensureEmbeddings` **뒤에** 두라고 적어 놨다) 후보②가 악화시키지
+않는다. 다만 _"후보②는 판정을 로그 위에 온전히 올린다"_ 는 **과장이므로 쓰지 않는다** —
+후보②가 로그 위로 올리는 것은 **유효성 집합**이고, **커버리지(어느 쌍이 비교되는가)는
+그대로 프로젝션 경유**다. `embeddings`는 리빌드의 replace-all 대상이 아니므로
+(`SINGLETON_TABLES` + `ENTITY_TABLES`에 없다 — `projection-store.ts:99-112`) 리빌드가
+기존 벡터를 지우지는 않는다.
 
 ### 5.2 ㉰ 관점에서 #282의 moot 판정과 값이 달라지는가: 예
 
@@ -291,57 +335,141 @@ basis를 `listValidMemories`(프로젝션) 대신 **로그 replay**로 잡으면
 리포는 이 문제를 이미 세 곳에서 같은 방법으로 닫았다 — **basis와 그것을 증명하는 head를
 한 배열에서 뽑는다**: `readValidMemoriesFromLog`(#253,
 `memory-import-service.ts:224-228`), `attemptProjectionRebuild`(#270,
-`projection-store.ts:376-379`), 그리고 #262의 dedup 스냅샷. `detectContradictions`는
-**그 규율이 적용되지 않은 마지막 자리**이고, 후보②는 그 자리를 채운다.
+`projection-store.ts:376-379`), 그리고 #262의 dedup 스냅샷. 후보②는 `detectContradictions`에
+같은 규율을 적용한다.
 
-### 5.3 실측
+**닫는 자리와 남는 자리를 정확히 적는다 — 후보②는 이 부류의 마지막 자리가 아니다.**
+
+| basis/head가 갈리는 자리            | 실물                                                                                                                           | 후보②가 닫나             |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ | ------------------------ |
+| `detectContradictions`              | head는 `readHeadEventId`(`contradiction-service.ts:171`), basis는 `listValidMemories`(`:173`)                                  | **닫는다**               |
+| `consolidateBoundary`의 재증류 판정 | head는 `readHeadEventId`(`consolidate-service.ts:2141`), 근거는 `consumedObservationIds`(`:2167`)·`listValidMemories`(`:2214`) | **닫지 않는다 — 남는다** |
+
+두 번째 행은 추측이 아니라 그 자리의 주석이 **스스로 적어 놓은 갈림**이다
+(`consolidate-service.ts:2451-2459`):
+
+> _"a takeover whose append already landed BEFORE this boundary read `expectedHead` above,
+> but whose rebuild/cursor-commit is still pending, leaves `expectedHead` correctly
+> reflecting 'no further log movement' while one or both of this boundary's evidence
+> sources are still the pre-takeover ones — CAS passes and this boundary redistills
+> observations the other holder just consolidated. **#263 tracks closing that gap**"_
+
+즉 후보②가 사는 것은 _"마지막 자리를 없앤다"_ 가 아니라 **_"같은 부류의 한 자리를,
+리포가 이미 세 번 쓴 그 방법으로 닫는다"_** 이다. `consolidateBoundary`의 갈림은 #263이
+따로 추적하고 있고 이 산정의 후속 이슈 범위에도 들어가지 않는다 (§7.1).
+
+### 5.3 실측 (총 로그 길이 기준)
+
+**측정 축을 고쳤다.** 이 문서의 첫 판은 `n`을 `decision` 메모리 개수로 잡고 로그 길이를
+`n + 1`로 두었는데, 그것은 **틀린 축**이다. 후보②는 `readEvents` +
+`reduceProjectState`이고 `readEvents`에는 타입 필터가 없다 —
+`SELECT * FROM events ORDER BY seq` 전량이다 (`event-store.ts:377`, `readEvents`는
+`readEventsWithIntegrity`를 그대로 돌려준다 `:381-384`). 구현 모양으로 제시한
+`readValidMemoriesFromLog`도 마찬가지로 전량 replay다
+(`memory-import-service.ts:213-214`). 실제 스토어에서 `decision`은 로그의 소수이고
+`observation.captured`가 압도적 다수이므로, decision 축의 수치는 비용을 **과소평가한다.**
+아래는 `n`을 **총 로그 이벤트 수**로 다시 잡은 재측정이며, 첫 판의 표를 **폐기하고 대체**한다.
 
 측정 방법:
 
 - 스크립트: 임시 파일(커밋하지 않음). 전문과 원출력은 PR 본문에 첨부.
-- 셀마다 **13회** 실행, **앞 3회를 워밍업으로 폐기**, 남은 **10회의 중앙값**을 싣는다
-  (#277이 쓴 형식).
-- `n` = 로그의 `decision` 메모리 개수. 로그 길이는 `n + 1` (genesis 1건 포함).
-- 스토어는 `n`마다 새로 만들고 `reindexSearch: true` 리빌드를 1회 돌린 뒤 측정 —
-  따라서 SQLite 페이지 캐시가 **워밍된 상태**의 수치다 (콜드 스타트가 아니다).
-- 환경: Node v22.23.2, better-sqlite3, 리눅스 컨테이너. 절대값이 아니라 **열 사이의 비**가
-  판정 재료다.
+- 셀마다 **23회** 실행, **앞 3회를 워밍업으로 폐기**, 남은 **20회**에서 최소값과 중앙값을
+  둘 다 싣는다.
+- 샘플마다 `global.gc()`를 **타이머 밖에서** 먼저 돌린다 (`node --expose-gc`). replay는
+  이벤트당 객체 하나를 할당하므로, 강제하지 않으면 한 샘플이 앞 샘플의 쓰레기를 물려받아
+  측정이 GC 일시정지 측정으로 변질된다 — 강제 전에는 같은 5000건 `readEvents`가 연속
+  반복에서 20 ms와 796 ms로 찍혔다. 각 샘플은 **자기 자신의 할당 비용은 그대로 낸다.**
+- **최소값을 싣는 이유**: 이 상자는 2 vCPU 컨테이너이고 측정 중 load average가 1.0–1.4다.
+  선점 노이즈는 시간을 **더하기만** 하므로 최소값이 실제 비용에 가장 가깝고, 중앙값은
+  노이즈가 섞인 상한이다. 둘 다 싣고 결론은 **둘 다에서 성립하는 것만** 쓴다.
+- 이벤트 믹스 = 25건 반복 단위 (실제 스토어 모양을 본뜬 것):
+  **observation.captured 18 / memory.consolidated 4(progress·rationale) /
+  memory.consolidated 1(decision) / memory.injected 1 / session.started 1.**
+  → **decision은 로그의 4%**, 메모리 행 전체가 20%. genesis(`project.created`)가 모든
+  로그의 1번 이벤트다. 메모리 텍스트는 전부 다르게 만들어
+  `dedupeMemoriesBySource`(`projector.ts:234-265`)가 접지 않게 했다.
+- 스토어는 셀마다 새로 만들고 `reindexSearch: true` 리빌드를 1회 돌린 뒤 측정 — SQLite
+  페이지 캐시가 **워밍된 상태**의 수치다 (콜드 스타트가 아니다).
+- 환경: Node v22.23.2, better-sqlite3, 2 vCPU 리눅스 컨테이너. **절대값이 아니라 열 사이의
+  비가 판정 재료다** (§5.4).
 
-|    n | 로그 길이 | `listValidMemories`+필터 (오늘의 basis) | `readHeadEventId` (오늘의 추가 조회) | replay basis (후보②) | 참고: `rebuild(reindexSearch:true)` |
-| ---: | --------: | --------------------------------------: | -----------------------------------: | -------------------: | ----------------------------------: |
-|    0 |         1 |                                 0.02 ms |                              0.01 ms |              0.07 ms |                             0.86 ms |
-|   50 |        51 |                                 0.16 ms |                              0.01 ms |              0.46 ms |                             2.25 ms |
-|  200 |       201 |                                 0.41 ms |                              0.01 ms |              0.95 ms |                             5.54 ms |
-| 1000 |      1001 |                                 2.83 ms |                              0.01 ms |              4.96 ms |                            22.58 ms |
-| 5000 |      5001 |                                11.12 ms |                              0.01 ms |             39.31 ms |                           758.48 ms |
+|    n (총 이벤트) | 메모리 행 | decision | `listValidMemories`+필터 (오늘) | `readHeadEventId` (오늘) | replay basis (후보②) min/중앙 | 참고: `rebuild(reindexSearch:true)` min/중앙 |
+| ---------------: | --------: | -------: | ------------------------------: | -----------------------: | ----------------------------: | -------------------------------------------: |
+| 1 (genesis only) |         0 |        0 |                  0.12 / 0.14 ms |           0.11 / 0.12 ms |                0.24 / 0.27 ms |                               1.09 / 1.22 ms |
+|               50 |        10 |        2 |                  0.19 / 0.23 ms |           0.12 / 0.14 ms |                0.57 / 0.74 ms |                               1.80 / 2.57 ms |
+|              200 |        40 |        8 |                  0.25 / 0.33 ms |           0.12 / 0.14 ms |                1.36 / 1.62 ms |                              4.24 / 78.77 ms |
+|             1000 |       200 |       40 |                  0.54 / 0.74 ms |           0.12 / 0.14 ms |               5.81 / 79.32 ms |                            16.35 / 165.05 ms |
+|             5000 |      1000 |      200 |                  2.14 / 3.95 ms |           0.12 / 0.14 ms |             85.38 / 563.63 ms |                          561.92 / 1362.67 ms |
+|            20000 |      4000 |      800 |                8.64 / 121.05 ms |           0.13 / 0.17 ms |          1664.10 / 2401.36 ms |                         2338.97 / 2486.31 ms |
 
 `replay basis` 열은 `readEvents` + `reduceProjectState` + valid/self/decision 필터 +
 head 추출을 한 덩어리로 잰 것이다 — 후보②가 하는 일 전부이며, 오늘의 두 조회(basis +
-head)를 **대체**한다.
+head)를 **대체**한다. 20000 셀은 이슈가 준 격자에 없지만, 로그가 append-only라 스토어
+수명과 함께 단조 증가한다는 점 때문에 추세를 보려고 하나 더 뒀다.
 
-한계비용 = `replay` − (`projection` + `head`):
+한계비용 = `replay` − (`projection` + `head`), 그리고 **replay ÷ rebuild 비**:
 
-|    n |  한계비용 |
-| ---: | --------: |
-|    0 |  +0.04 ms |
-|   50 |  +0.29 ms |
-|  200 |  +0.53 ms |
-| 1000 |  +2.12 ms |
-| 5000 | +28.18 ms |
+|     n | 한계비용 min | 한계비용 중앙 | replay/rebuild 비 min | replay/rebuild 비 중앙 |
+| ----: | -----------: | ------------: | --------------------: | ---------------------: |
+|     1 |     +0.00 ms |      +0.01 ms |                  0.22 |                   0.22 |
+|    50 |     +0.26 ms |      +0.38 ms |                  0.32 |                   0.29 |
+|   200 |     +0.99 ms |      +1.15 ms |                  0.32 |                   0.02 |
+|  1000 |     +5.15 ms |     +78.44 ms |                  0.36 |                   0.48 |
+|  5000 |    +83.12 ms |    +559.54 ms |                  0.15 |                   0.41 |
+| 20000 |  +1655.32 ms |   +2280.15 ms |                  0.71 |                   0.97 |
 
-### 5.4 비용 해석
+첫 판이 낸 수치(n=1000 → +2.1 ms, n=5000 → +28 ms)는 **버린다.** 같은 격자를 총 로그
+길이로 다시 잡으면 한계비용은 그보다 한두 자릿수 크고, 20000건에서는 **초 단위**다.
 
-- 이 비용은 **`detectContradictions`가 실제로 도는 경계에서만** 발생한다. 그 함수는
-  `inputs.length > 0`인 경계에서만 호출되고(`consolidate-service.ts:2646-2653`),
-  embedder가 없으면 첫 줄에서 반환한다(`contradiction-service.ts:161`). replay를 그
-  가드 **뒤에** 두면 임베딩이 꺼진 스토어의 비용은 0이다.
-- 같은 경계가 이미 리빌드 1~2회(위 표의 `rebuild` 열)와 embedder 왕복 2회, 그리고 후보
-  쌍마다 judge LLM 왕복 1회를 낸다(`project-lock.ts:120-128`이 이 꼬리 구성을 적어
-  놨다). n=5000에서도 한계비용 28 ms는 **LLM 왕복 한 번보다 두 자릿수 작다.**
-- 비교 기준: #282가 비용으로 각하한 always-reindex는 #277 실측 기준 capture마다
-  n=1000 → ~319 ms였다. 위 표의 `rebuild` 열(22.6 ms @1000, 758 ms @5000)이 같은
-  단위의 오늘 값이다. 후보②의 한계비용은 그보다 **두 자릿수 싸고**, 캡처 핫패스가
-  아니라 이미 비싼 경계 꼬리에서만 낸다.
+### 5.4 비용 해석 — 결론을 측정에 맞춘다
+
+첫 판은 _"후보②의 한계비용은 rebuild보다 두 자릿수 싸다"_ 로 권고를 떠받쳤다. **재측정은
+그 문장을 지지하지 않는다.** 위 표에서 한계비용은 rebuild와 **같은 자릿수**이고, 20000건
+셀에서는 rebuild의 0.7–1.0배까지 올라간다. 권고를 다시 세우려면 다른 근거가 필요하고,
+그 근거는 실물에 있다.
+
+**결정적 사실: 두 호출자 모두 `detectContradictions`를 부르기 직전에 전량 리빌드를 이미
+한 번 끝낸다.**
+
+- 경계: `if (inputs.length > 0 || segmentsWritten > 0)` 게이트 안에서
+  `rebuildProjectProjection(..., { reindexSearch: true })`
+  (`consolidate-service.ts:2630-2631`) → 그 다음 `if (inputs.length > 0)` 안에서
+  `detectContradictions` (`:2646-2653`). 뒤 게이트가 성립하면 앞 게이트는 **반드시**
+  성립하므로, 이것은 확률이 아니라 **보장**이다.
+- import: `rebuildProjectProjection(..., { reindexSearch: true })`
+  (`memory-import-service.ts:815`) → 바로 다음 줄 `detectContradictions` (`:817`).
+
+그리고 **리빌드는 replay + 쓰기**다 — 같은 `readEvents` 전량 replay를 안에 품고 있다
+(§1.1, `projection-store.ts:378-379`의 `readEvents` + `:447-449`의 replace-all). 그래서 후보②의 한계비용은 위 표의
+`replay/rebuild 비`가 말하는 그대로 **직전에 이미 지불한 리빌드의 0.15–0.97배**이고,
+이 비는 로그 길이가 20배 늘어도 1을 넘지 않는다. 즉 후보②는 새로운 비용 곡선을
+들여오지 않는다 — **이미 이 경로가 타고 있는 곡선 위에서 상수배 1 미만을 더한다.**
+
+나머지 해석 셋:
+
+- **호출자는 둘이고, 오늘 프로덕션 도달은 경계 하나뿐이다.**
+  `detectContradictions`는 경계(`consolidate-service.ts:2646-2653`)와
+  import(`memory-import-service.ts:817`) 두 곳에서 호출되며, 주석 자신이 _"this function
+  is tail work for **both its callers** (a consolidation boundary and an import)"_ 라고
+  적는다 (`contradiction-service.ts:273-274`). import 경로는 오늘 `packages/kernel/src/index.ts`에서
+  export되지 않아 프로덕션 호출부가 0건이므로(#189 "확인된 사실") **오늘 비용을 내는 것은
+  경계뿐이지만, 배선되는 날 이 경로가 후보②의 비용을 그대로 상속한다.**
+- **embedder가 꺼진 스토어의 비용은 0이다.** `detectContradictions`는 첫 줄이
+  `if (!embedder) return []`이므로(`contradiction-service.ts:161`) replay를 그 가드
+  **뒤에** 두면 임베딩이 없는 스토어는 한 건도 replay하지 않는다. 이것은 후속 구현의
+  수용 기준이다 (§7.1).
+- **비교 기준 (#282가 비용으로 각하한 always-reindex).** 그것이 비쌌던 이유는 절대값이
+  아니라 **자리**였다 — capture마다(#277 실측 n=1000 → ~319 ms) 내는 핫패스 비용이었다.
+  후보②는 capture가 아니라 이미 리빌드·embedder 왕복·pair마다 judge LLM 왕복을 내고 있는
+  **경계 꼬리**에서만 낸다 (`project-lock.ts:120-128`이 이 꼬리 구성을 적어 놨다).
+  20000건 셀의 +1.7 s조차 같은 경계가 방금 낸 리빌드 2.3 s보다 작다.
+
+**그럼에도 재측정이 드러낸 것을 축소하지 않는다**: 20000건 스토어에서 이 경로는 이미
+경계당 초 단위이고, 로그는 append-only라 되돌아가지 않는다(#289 비범위의
+invalidate-not-delete 규율). 그 곡선은 후보②가 만든 것이 아니라 **투영 설계 전체가 이미
+타고 있는 것**이며(리빌드가 capture마다 전량 replay한다 — `capture-service.ts:314`),
+스냅샷/증분 replay로 그 곡선을 꺾는 일은 이 산정과 다른 축의 별건이다. 후보②를 채택하든
+안 하든 그 축은 그대로 남는다.
 
 ## 6. Q6 — 리포가 이미 내린 판정과의 대조
 
@@ -375,14 +503,23 @@ head)를 **대체**한다.
 근거 셋:
 
 1. ㉰를 **근본에서** 닫는다 — 어떤 리빌드도 커밋될 필요가 없어지고, §1.3의 도달 조건이
-   전부 사라진다. 중복 `conflict.detected`와 중복 `memory.superseded`를 **둘 다** 없앤다
-   ((가)는 전자의 프로젝션 행만 접는다).
+   전부 사라진다. 중복 `conflict.detected`와 중복 `memory.superseded`를 **둘 다** 없애면서,
+   ㉰가 오늘 실제로 물리는 유일한 값인 **낭비된 judge LLM 왕복**(§2.4 손해 (c))도 없앤다 —
+   재판정 자체가 일어나지 않으므로 judge를 부르지 않는다. (가)는 이음매까지 넣어야
+   중복을 없애고, 그렇게 해도 그 왕복은 이미 지불된 뒤에 append에서 거부되므로 못 없앤다
+   (§3.2).
 2. ㉰의 희귀함만으로는 값이 안 나온다는 것을 인정한 위에서 — 이 변경이 실제로 사는 것은
-   **basis와 head가 서로 다른 출처에서 오는 마지막 자리**를 없애는 것이다
-   (`event-store.ts:246-256`이 남긴 구멍, #263). 리포는 같은 규율을 이미 세 곳에서
-   적용했고(#253/#270/#262), 여기만 남았다.
-3. 비용이 측정됐고(§5.3) 작다 — n=1000에서 +2.1 ms, n=5000에서 +28 ms, embedder가
-   없으면 0. 이벤트 정체성을 건드리지 않으므로 #282가 경고한 오판 비용을 지지 않는다.
+   `detectContradictions`의 **basis/head 갈림 하나**를, 리포가 이미 세 곳에서 쓴 그
+   방법(basis와 head를 한 `readEvents` 배열에서 뽑기, #253/#270/#262)으로 닫는 것이다
+   (`event-store.ts:246-256`이 남긴 구멍, #263). **이것은 그 부류의 마지막 자리가 아니다** —
+   `consolidateBoundary`의 같은 부류 갈림(`consolidate-service.ts:2451-2459`, #263이 추적)은
+   **남는다**. §5.2의 표가 닫는 자리와 남는 자리를 각각 명시한다.
+3. 비용이 재측정됐고(§5.3, 총 로그 길이 축), **직전에 이미 지불한 리빌드의 0.15–0.97배로
+   상한이 잡힌다** — 두 호출자 모두 `detectContradictions` 직전에 전량 리빌드를 끝내기
+   때문이고(`consolidate-service.ts:2630-2631` → `:2647`,
+   `memory-import-service.ts:815` → `:817`), 그 비는 로그가 20배 길어져도 1을 넘지
+   않는다. embedder가 없으면 0. 이벤트 정체성을 건드리지 않으므로 #282가 경고한 오판
+   비용을 지지 않는다. **첫 판이 쓴 _"두 자릿수 싸다"_ 는 틀렸고 폐기한다** (§5.4).
 
 후속 구현 이슈는 **1개**이고 **선행 없음**이다 (#282가 _"후속 이슈는 1개"_ 로 낸 형식).
 수용 기준 초안:
@@ -398,35 +535,72 @@ head)를 **대체**한다.
 - `contradiction-service.ts:303-304`의 리빌드는 **그대로 둔다** — 그것은 basis가 아니라
   다른 독자를 위한 것이고, #284의 마커가 이미 그 실패를 회복시킨다.
 
+**후속 이슈가 닫지 않는 것**(범위를 여기서 못박는다):
+
+- `consolidateBoundary`의 basis/head 갈림 (`consolidate-service.ts:2451-2459`) — **#263의
+  몫이고 이 후속 이슈의 범위가 아니다.** 후보②는 `detectContradictions`만 옮긴다.
+- 전량 replay의 로그 길이 확장성 (§5.4 말미) — 스냅샷/증분 replay는 리빌드와 후보②에
+  똑같이 걸리는 별개 축이고, 후보② 채택 여부와 무관하게 남는다.
+- import 경로의 배선 (`importMemories`가 export되지 않는다는 #189 확인된 사실) — 배선하는
+  사람이 후보②의 비용을 상속한다(§5.4)는 사실만 적어 두고, 배선 자체는 하지 않는다.
+
 ### 7.2 각하 1 — 후보 (가) 결정적 conflict id
 
-각하한다. 결정적 id는 두 번째 append를 **거부시키지 못한다**: 이벤트 id는 payload와
-무관하게 `appendEvents`가 민팅하고(`event-store.ts:286`), `AppendEventInput`에는 id를
-받는 필드가 없다(`:13-28`). 거부시키려면 호출자 지정 이벤트 id라는 새 이음매를 열어
-`events.id` UNIQUE(`db.ts:297`)에 기대야 하는데, 그것은 이벤트 정체성 변경이고, 그
-대가로 던지면 안 되는 꼬리(`contradiction-service.ts:271-283`)에서 중복이 예외로
-올라오므로 `isDuplicateGenesisError` 모양의 판별자와 삼킴 경로를 하나 더 만들어야 한다.
-그렇게까지 해도 중복 `memory.superseded`는 남는다 — 그 이벤트의 id 민팅 자리가 동일하고
-payload에 conflict id가 없기 때문이다. 새 이음매 없이 id만 결정적으로 바꾸는 축소판은
-`conflicts` 테이블 2행 → 1행이라는 프로젝션 접힘 하나를 사는데, 그 표면에는 오늘 소비자가
-0건이고(§2.3), `conflict-service.ts:41-54`가 세운 선례("프로덕션 호출자가 없는 경로는
-첫 호출자를 배선하는 사람이 가드한다")가 정확히 이런 지출을 미루라고 말한다. 덧붙여
-정규화를 놓치면 id는 결정적이지도 않다(§3.4). **다만 복제본 간 수렴 이득(§4 말미)은
+각하한다. **효과가 없어서가 아니라 대가 때문이다** — 이 문단은 그 구별 위에 선다.
+
+**(가)를 이음매 없이 쓰면 ㉰를 거의 못 닫는다.** 이벤트 id는 payload와 무관하게
+`appendEvents`가 민팅하고(`event-store.ts:286`), `AppendEventInput`에는 id를 받는 필드가
+없으므로(`:13-28`) 결정적 conflict id는 payload에만 실린다. 두 번째 append는 통과하고,
+얻는 것은 `conflicts` 테이블 2행 → 1행이라는 프로젝션 접힘 하나뿐이다(§3.5). 그 표면에는
+오늘 소비자가 0건이고(§2.3), `conflict-service.ts:41-54`가 세운 선례("프로덕션 호출자가
+없는 경로는 첫 호출자를 배선하는 사람이 가드한다")가 정확히 이런 지출을 미루라고 말한다.
+
+**(가)에 호출자 지정 이벤트 id라는 이음매를 더하면 ㉰는 실제로 완전히 닫힌다.** 두
+이벤트가 한 `appendEvents` 배열로 들어가고(`contradiction-service.ts:245-270`) 그 배열이
+`db.transaction` 하나이므로(`event-store.ts:303-313`), 두 번째 insert의 UNIQUE 위반이
+배치 전체를 롤백시켜 중복 `conflict.detected`와 중복 `memory.superseded`가 **둘 다**
+남지 않는다 — 소스 주석이 그 성질을 의도로 적어 놨다(`contradiction-service.ts:232-235`).
+그럼에도 각하하는 이유는 셋이고, 각각이 후보②에는 없는 대가다(§3.2 상술):
+
+1. **이벤트 정체성 변경.** "이벤트 id는 append 경로가 민팅한다"는 불변을 깨는 것이고,
+   #282가 값을 낸 자리가 정확히 "가장 자연스러워 보이던 후보가 결함을 가드 밖으로 옮기는
+   거래"였다. 후보②는 이 축을 건드리지 않는다.
+2. **예외 판별·삼킴 경로 추가.** 중복이 던지면 안 되는 꼬리
+   (`contradiction-service.ts:271-283`)에서 예외로 올라오므로
+   `isDuplicateGenesisError`(`event-store.ts:100-106`) 모양의 판별자가 하나 더 필요하고,
+   그 판별자가 "기대한 중복"과 "다른 UNIQUE 위반"을 잘못 뭉뚱그리면 진짜 append 실패가
+   조용히 사라진다.
+3. **오늘 실제로 드는 비용을 하나도 없애지 못한다.** 거부는 append 시점이므로 낭비된
+   judge LLM 왕복(§2.4 손해 (c))은 그대로 지불되는데, 표면 소비자가 0건인 오늘 그것이
+   ㉰의 유일한 실비다. 후보②는 재판정 자체를 없애 그 왕복까지 없앤다.
+
+덧붙여 정규화를 놓치면 id는 결정적이지도 않다(§3.4). **다만 복제본 간 수렴 이득(§4 말미)은
 실재하므로, 동기화 수신 경로가 배선되는 날 이 후보는 그 축에서 다시 저울에 올라야 한다.**
 
 ### 7.3 각하 2 — 아무것도 하지 않는다 (이 문서로 끝낸다)
 
-각하한다. 이것이 가장 팽팽한 후보였다: ㉰는 도달 조건이 넷이고(§1.3), 창은 커밋하는
-리빌드 하나로 닫히며(§1.2), 표면 소비자는 0건이다(§2.3). 오직 ㉰만 놓고 비용·편익을
-계산하면 "아무것도 안 함"이 이긴다 — 이 점은 인정한다. 각하하는 이유는 후보②가 사는 것이
-㉰의 희귀함이 아니기 때문이다: 오늘 `detectContradictions`는 **head는 로그에서, basis는
-프로젝션에서** 읽는 유일하게 남은 판정 경로이고, `AppendEventsOptions.expectedHead`의
-doc이 그 조합에서 CAS가 통과해도 basis가 뒤처져 있을 수 있다고 명시한다
+각하한다. 이것이 가장 팽팽한 후보였고, **재측정(§5.3) 이후 더 팽팽해졌다** — 첫 판이
+이 각하를 떠받친 _"비용이 두 자릿수 싸다"_ 가 틀린 축에서 나온 수치였기 때문이다. 그
+문장을 걷어낸 자리에 다시 세운다.
+
+㉰만 놓고 보면 "아무것도 안 함"이 이긴다 — 도달 조건이 넷이고(§1.3), 창은 커밋하는 리빌드
+하나로 닫히며(§1.2), 표면 소비자는 0건이다(§2.3). 이 점은 인정한다. 각하하는 이유는
+후보②가 사는 것이 ㉰의 희귀함이 아니기 때문이다: `detectContradictions`는 **head는
+로그에서, basis는 프로젝션에서** 읽고, `AppendEventsOptions.expectedHead`의 doc이 그
+조합에서 CAS가 통과해도 basis가 뒤처져 있을 수 있다고 명시한다
 (`event-store.ts:246-256`). ㉰는 그 구조적 어긋남이 오늘 만들어내는 **관측 가능한 증상
 하나**일 뿐이고, 증상만 희귀하다고 근거의 어긋남을 남겨 두면 다음 증상은 다른 이슈 번호로
 다시 온다 — #263 → #270, #277 → #282 → #284가 같은 사슬을 세 번 돈 것이 그 증거다.
-비용이 측정되어(§5.3) 두 자릿수 싸다는 것이 이 각하를 지탱한다. 비용이 always-reindex
-수준이었다면 결론은 반대였을 것이다.
+(이 문장을 §5.2가 정정한 범위 안에서 읽어야 한다: 후보②가 닫는 것은 이 부류의 **마지막
+자리가 아니라 한 자리**이고, `consolidateBoundary`의 갈림은 #263에 남는다.)
+
+**비용 쪽 근거는 바뀌었다.** 재측정 후에도 각하가 서는 근거는 "싸다"가 아니라
+**"이미 내고 있는 것보다 더 내지 않는다"** 이다: 두 호출자 모두 `detectContradictions`
+직전에 전량 리빌드를 끝내므로(`consolidate-service.ts:2630-2631` → `:2647`,
+`memory-import-service.ts:815` → `:817`) 후보②의 한계비용은 그 리빌드의 0.15–0.97배로
+상한이 잡히고, 그 비는 로그 길이에 따라 발산하지 않는다(§5.4). 만약 재측정이 이 상한을
+깼다면 — 즉 replay가 리빌드보다 비쌌다면 — 이 각하는 뒤집혔을 것이고, 그 경우의 정당한
+결론은 "고치지 않는다"였을 것이다(#289 Q1이 그 결론도 정당하다고 적었다).
 
 ### 7.4 각하 3 — 리빌드의 `committed`를 보고 재판정을 건너뛴다
 
