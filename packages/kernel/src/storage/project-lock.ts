@@ -140,21 +140,27 @@
  * point list above). What a fifth check point would instead protect is the
  * segment-FTS reindex inside `rebuildProjectProjection` — but
  * `commitBoundaryCursors` (①), including the CONVERSATION offset it advances
- * on `sliceFullyStored` (this file's `run()`, which does not consult
- * `inputs.length` at all), sits at the very end of `run()`, after that
- * reindex. Stopping before it therefore means neither cursor moves
- * (`consolidate-service.ts:2383-2388`), same as check point ④ already
- * guarantees on the memory-extraction branch: the watermark stays exactly
- * where `run()` found it, and the next boundary re-chunks and re-inserts the
- * same slice — a duplicate `pruneSegments` bounds and heals, not a lost
- * SEGMENT PROJECTION behind an already-advanced offset.
+ * on `sliceFullyStored` (`consolidate-service.ts`'s `consolidate()`, which
+ * does not consult `inputs.length` at all), sits at the very end of
+ * `consolidate()`, after that reindex. Stopping before it therefore means
+ * neither cursor moves (`consolidate-service.ts:2383-2388`), same as check
+ * point ④ already guarantees on the memory-extraction branch: the watermark
+ * stays exactly where `consolidate()` found it, and the next boundary
+ * re-chunks and re-inserts the same slice — a duplicate `pruneSegments`
+ * bounds and heals, not a lost SEGMENT PROJECTION behind an already-advanced
+ * offset.
  *
  * What runs after the append, in order, each classified by what a race there
  * can actually cost (#227; corrects an earlier draft that missed three writes
  * and over- or under-stated two more — Codex P2 on PR #245, two rounds):
  *
- * - `pruneSegments` — UNSAFE for what is built on it, though `segments` the
- *   table is not (see below).
+ * - `pruneSegments` — the lock-free DELETE races exactly as before (see
+ *   below); what #255 closes is the accounting a caller built on top of it.
+ *   `segments` the table was always immune. The boundary that wrote the
+ *   pruned ids no longer trusts its own stale `prunedSegmentIds` snapshot —
+ *   `commitBoundaryCursors` re-verifies LIVE, inside its own commit
+ *   transaction, that those ids are still rows before advancing the
+ *   conversation offset they justify (see below, and ① below).
  * - `rebuildProjectProjection` — UNSAFE: a stale replace-all can overwrite a
  *   newer projection (see below).
  * - `ensureEmbeddings` — SAFE ENOUGH: a keyed UPSERT into `embeddings`, a
@@ -167,11 +173,23 @@
  *   from the judged pair, so a dispossessed judge's stale verdict and a
  *   successor's both land as permanent, separate log entries; it also fires a
  *   second `rebuildProjectProjection`, exposed to the same race as above.
- * - `ensureSegmentEmbeddings` — UNSAFE: races `pruneSegments` from the other
- *   side of the same DELETE (see below).
+ * - `ensureSegmentEmbeddings` — the DELETE on the other side of the same
+ *   `pruneSegments` race still lands under it exactly as before (see below);
+ *   what #255 closes is what an in-flight embed call used to leave behind.
+ *   `upsertSegmentEmbeddingIfLive` re-checks LIVE, inside its own commit
+ *   transaction, that the segment is still a `segments` row before writing
+ *   its vector — SKIPPED, not orphaned, when it is not
+ *   (`embeddings-service.ts`, #255 defect 2; see below).
  * - `commitBoundaryCursors` (①) — SAFE: MONOTONIC against stored state inside
  *   the commit transaction, so it holds whether or not this holder ever learns
- *   it was dispossessed (PR #210 Codex P1).
+ *   it was dispossessed (PR #210 Codex P1). Since #255 the same IMMEDIATE
+ *   transaction also carries a second, unrelated guard:
+ *   `conversationOffsetGuardIds` re-verifies LIVE, via `segmentsStillPresent`,
+ *   that the segments `sliceFullyStored` trusted are still on disk before
+ *   writing the conversation offset they justify — a concurrent
+ *   `pruneSegments` that beat this transaction to it drops that write instead
+ *   of landing it on a stale premise (`conversationSliceHeld` surfaces the
+ *   drop as "held", the same signal a check point failure would give).
  * - `recordAttempt` (②) — PARTIALLY GUARDED: declines once this holder's
  *   signal has fired, but the signal lags the actual takeover by up to one
  *   heartbeat, so a successor fast enough to finish inside that lag can still
@@ -180,7 +198,7 @@
  *   — closing it needs a lock redesign or a relocated record, both out of
  *   #211's and this doc's scope (idea #189).
  *
- * ### The lock-free DELETE that is safe for `segments`, unsafe for what is built on it: `pruneSegments`
+ * ### The lock-free DELETE that is safe for `segments`, and — since #255 — for what gets built on it too: `pruneSegments`
  *
  * `pruneSegments` (`segment-store.ts`) reads which segment ids are aged out or
  * over the retention cap, then deletes exactly those ids from
@@ -201,8 +219,9 @@
  * committed by the time that transaction runs is exactly what gets reindexed.
  *
  * What is NOT safe is the accounting a caller builds on top of it (Codex P2 on
- * PR #245, correcting an earlier "turns out to be safe" verdict in this doc).
- * The aged-row SELECT and the over-cap SELECT above are themselves two
+ * PR #245, correcting an earlier "turns out to be safe" verdict in this doc) —
+ * or rather, was not, until #255 closed it at the point that accounting gets
+ * spent. The aged-row SELECT and the over-cap SELECT above are themselves two
  * separate autocommit statements, not one snapshot bundled with the DELETE —
  * the aged query runs, then, with nothing holding the two together, the
  * over-cap query runs against whatever `segments` looks like by then. A
@@ -215,27 +234,38 @@
  * broken only by `ordinal DESC`, can put some of the SUCCESSOR's own
  * just-inserted ids past the cap instead of the caller's own older ones. If A
  * (dispossessed, still running this tail) deletes part of B's (the new
- * holder's) slice this way before B reaches its own `pruneSegments` call, B
- * never learns those ids are gone: `sliceFullyStored` in `consolidate-service.ts`
- * only consults the `prunedSegmentIds` B's OWN call returned, never the
- * table's actual state, so it reads TRUE for a slice that is only partly on
- * disk — and `run()` then advances B's conversation offset past raw content
- * whose one durable copy has already been deleted by a process B never knew
- * was running. `segments` the TABLE is the one piece of a boundary's tail the
- * projection race below does not touch; `segments` the RETENTION BUFFER is not.
+ * holder's) slice this way before B reaches its own `pruneSegments` call, the
+ * INTERLEAVE itself still happens exactly as it always did — #255 touches
+ * neither this DELETE nor the two SELECTs above it. What no longer follows
+ * from it is B's offset silently advancing over the gap: `sliceFullyStored`
+ * in `consolidate-service.ts` is still computed from only the
+ * `prunedSegmentIds` B's OWN call returned, but that premise is no longer
+ * trusted as final — `commitBoundaryCursors` re-checks it LIVE, via
+ * `segmentsStillPresent`, inside the same transaction that would otherwise
+ * write the conversation offset it justifies (#255). If any of B's ids are
+ * gone by then, that write is dropped instead of landing: the offset holds,
+ * `ConsolidateResult.conversationSliceHeld` surfaces the hold, and the next
+ * boundary re-chunks and re-stores the same slice rather than resuming past
+ * content whose one durable copy is gone. `segments` the TABLE is the one
+ * piece of a boundary's tail the projection race below does not touch;
+ * `segments` the RETENTION BUFFER still races the same way as always — only
+ * the CONSEQUENCE of that race changed, from a silently advanced offset to an
+ * observable hold.
  *
- * A second gap sits on the `embeddings` side of the same DELETE (Codex P2 on
- * PR #245, this round). `ensureSegmentEmbeddings` (`embeddings-service.ts`)
- * snapshots `listSegments` before its embedder `await`, then upserts each
- * stale one back into `embeddings` by `seg.id`, with no recheck that the
- * segment still exists. A `pruneSegments` call that deletes that id from
- * `segments`/`embeddings`/`search_fts` while the embedder call is in flight
- * does not stop the upsert from landing anyway — an orphaned `embeddings` row
- * for a segment `segments` no longer has. Nothing downstream retargets it: the
- * next `ensureSegmentEmbeddings` pass only iterates `listSegments`'s current
- * rows, never orphaned `embeddings` ids, and `rebuildProjectProjection` does
- * not touch `embeddings` at all (above). Cleaning it up is idea #189's, not
- * this doc's.
+ * A second gap sat on the `embeddings` side of the same DELETE (Codex P2 on
+ * PR #245; closed by #255, this round). `ensureSegmentEmbeddings`
+ * (`embeddings-service.ts`) still snapshots `listSegments` before its embedder
+ * `await`, and the DELETE still races that `await` exactly as before — #255
+ * removes neither the snapshot nor the race. What changed is the write at the
+ * other end: a stale segment's vector no longer lands in `embeddings` by a
+ * plain upsert keyed on `seg.id`. `upsertSegmentEmbeddingIfLive` re-checks
+ * LIVE, inside its own commit transaction, that the segment is still a
+ * `segments` row before writing; if a `pruneSegments` call deleted it from
+ * `segments`/`embeddings`/`search_fts` while the embedder call was in flight,
+ * the write is skipped and not counted toward `embedded` (#255 defect 2) —
+ * where the old behavior landed an orphaned `embeddings` row nothing
+ * downstream retargeted, the new one leaves no row to orphan. Cleaning up
+ * orphans that predate #255 is idea #189's, not this doc's.
  *
  * ### The lock-free replace-all that is not safe: `rebuildProjectProjection` (Codex P2, PR #225)
  *
@@ -289,7 +319,8 @@
  * deterministically, and ITS rebuild restored the projection" overstates the
  * recovery: A's own stale replace-all (T5) already wrote A's memory for the
  * shared part of the window into the projection, so the next boundary's
- * `consumedObservationIds` dedup guard (this file's `run()`) suppresses those
+ * `consumedObservationIds` dedup guard (`consolidate-service.ts`'s
+ * `consolidate()`) suppresses those
  * same observations again regardless of where the watermark points — what a
  * pre-#225 rollback recovered was B's memory, not A's, and only for the part
  * of B's window A's target did not already reach. ①'s guard rejecting the
