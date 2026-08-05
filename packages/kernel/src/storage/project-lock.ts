@@ -112,7 +112,7 @@
  * is check point ④, immediately before the rest of the tail; everything after
  * it has none. What gates entry into that rest is not the
  * `memory.consolidated` append alone: the rebuild below runs on
- * `inputs.length > 0 || segmentsWritten > 0` (`consolidate-service.ts:2499`),
+ * `inputs.length > 0 || segmentsWritten > 0` (`consolidate-service.ts:2591`),
  * so a conversation-only boundary — no memories extracted (`inputs.length ===
  * 0`) but raw segments written from the transcript slice — still reaches
  * `pruneSegments`, `rebuildProjectProjection` (its segment-FTS reindex
@@ -143,7 +143,7 @@
  * on `sliceFullyStored` (`consolidate-service.ts`'s `consolidate()`, which
  * does not consult `inputs.length` at all), sits at the very end of
  * `consolidate()`, after that reindex. Stopping before it therefore means
- * neither cursor moves (`consolidate-service.ts:2383-2388`), same as check
+ * neither cursor moves (`consolidate-service.ts:2654-2660`), same as check
  * point ④ already guarantees on the memory-extraction branch: the watermark
  * stays exactly where `consolidate()` found it, and the next boundary
  * re-chunks and re-inserts the same slice — a duplicate `pruneSegments`
