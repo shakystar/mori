@@ -2588,6 +2588,35 @@ export async function consolidate(params: ConsolidateParams): Promise<Consolidat
     // search_fts for memories AND re-emits the kind='segment' rows from the
     // segments table, so a memory-0-but-conversation boundary still indexes
     // raw detail.
+    //
+    // #282 (#189 residue ㉯): the return value is DROPPED here, and that is a
+    // fact about this call site, not an omission the types catch. Since #270
+    // this call can return `{ committed: false }` — every attempt lost the
+    // compare-and-swap and NOTHING was written (see
+    // `RebuildProjectProjectionResult`) — and control falls straight through to
+    // `commitBoundaryCursors` at the end of this function regardless. So the
+    // cursor advances past a window whose true-reindex never landed, and
+    // neither monotonicity guard there notices: `watermarkWouldRegress`
+    // compares the target against the STORED watermark only, and
+    // `segmentsStillPresent` guards only the conversation offset — no guard
+    // anywhere looks at whether the rebuild projected. The memories this
+    // boundary appended do still reach the projection TABLES (any later
+    // rebuild replays the full log unconditionally, `reindexSearch: false`
+    // ones included), but they reach `search_fts` only via a LATER rebuild
+    // that both requests `reindexSearch: true` AND commits — and the gate
+    // right below makes requesting one conditional on a boundary having new
+    // memories or new segments, so a run of quiet boundaries leaves them
+    // unsearchable with no bound on how long. Partial in-boundary cover exists
+    // but is doubly conditional: `detectContradictions` further down defaults
+    // to `reindexSearch: true`, so on a boundary where it actually supersedes
+    // something its own rebuild replays this boundary's memories into
+    // `search_fts` too — provided THAT rebuild commits, which it reports and
+    // its caller likewise drops.
+    //
+    // Deliberately NO policy here. What this call site should do with
+    // `committed: false` is not decided yet — #282 priced the candidates
+    // (hold the cursor / retry inline / durable recovery marker) and the
+    // implementation issue is owner's to cut.
     if (inputs.length > 0 || segmentsWritten > 0) {
       await rebuildProjectProjection(params.projectId, { reindexSearch: true });
     }
