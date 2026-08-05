@@ -177,15 +177,20 @@ export interface RebuildProjectProjectionOptions {
    * concurrency condition — it is that pre-existing race's consequence on
    * `search_fts` specifically, not merely on the tables.
    *
-   * Self-healing exists but is NOT bounded: the next `search_fts` catch-up
-   * needs a LATER boundary whose own `reindexSearch: true` rebuild both
-   * runs — `consolidateBoundary` gates it on `inputs.length > 0 ||
+   * Self-healing used to be UNBOUNDED: the next `search_fts` catch-up needed
+   * a LATER boundary whose own `reindexSearch: true` rebuild both ran —
+   * `consolidateBoundary` gates it on `inputs.length > 0 ||
    * segmentsWritten > 0`; `detectContradictions` gates its own on
-   * `results.length > 0` — and commits. A run of quiet boundaries (nothing
-   * extracted, nothing superseded, no segments written) leaves the gap open
-   * indefinitely, the same caveat `docs/compaction-consolidation-boundary.md`
-   * §2.1 already makes about boundary cadence, applied here to `search_fts`
-   * specifically.
+   * `results.length > 0` — and committed, so a run of quiet boundaries
+   * (nothing extracted, nothing superseded, no segments written) left the gap
+   * open indefinitely. #284 bounds it at ONE rebuild without touching any
+   * caller: {@link rebuildProjectProjection} now sets a write-ahead marker in
+   * `meta` before every effective-`true` rebuild, clears it only in the
+   * transaction that repopulated `search_fts`, and promotes a `false` request
+   * to `true` while it stands — so the next rebuild of this project closes the
+   * gap even if it is a capture's `false` one. `false` therefore no longer
+   * means "the index is untouched" unconditionally: it means that only when no
+   * gap is outstanding, which is the same condition (2) below already states.
    *
    * This is an invariant spread across four files, not something the type
    * system enforces: a future writer that can create or modify a searchable
@@ -264,6 +269,41 @@ export interface RebuildProjectProjectionResult {
 const REBUILD_STALE_HEAD_RETRIES = 2;
 
 /**
+ * The write-ahead search-reindex recovery marker (#284, from #282's pricing of
+ * #189 residue ㉯). Set in `meta` BEFORE an effective-`reindexSearch: true`
+ * rebuild runs, cleared inside the transaction that repopulates `search_fts`;
+ * while it stands, a `reindexSearch: false` request is promoted to `true`.
+ *
+ * Lives in the SAME per-project `meta` table (`storage/db.ts`, v2) that
+ * `consolidate-service`'s three cursor keys use, and follows their
+ * `<owner>_<what>` naming. Adding a key is not a schema change, so this needed
+ * no migration — `meta` predates every store this code will ever open.
+ *
+ * The value is a placeholder: the marker is a BIT, and deliberately does not
+ * record which rebuild set it (see the clearing site for the replay invariant
+ * that makes the identity irrelevant).
+ */
+const SEARCH_REINDEX_PENDING_META_KEY = "prj_search_reindex_pending";
+
+/** True when a `reindexSearch: true` rebuild has been started but never committed. */
+function hasSearchReindexPending(projectId: string): boolean {
+  const row = getDb(projectId)
+    .prepare("SELECT value FROM meta WHERE key = ?")
+    .get(SEARCH_REINDEX_PENDING_META_KEY) as { value: string } | undefined;
+  return row !== undefined;
+}
+
+/** Declare the intent to reindex, before anything is read or written. */
+function markSearchReindexPending(projectId: string): void {
+  getDb(projectId)
+    .prepare(
+      "INSERT INTO meta (key, value) VALUES (?, ?) " +
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+    )
+    .run(SEARCH_REINDEX_PENDING_META_KEY, "1");
+}
+
+/**
  * Recompute the full projection from the event log and replace every
  * projection table in a SINGLE transaction (replace-all semantics).
  * reduceProjectState is the single reduction authority; this function is only
@@ -279,12 +319,35 @@ const REBUILD_STALE_HEAD_RETRIES = 2;
  * "The lock-free replace-all"). What it does NOT give is freshness for the
  * READER: this bounds how stale a committed rebuild can be, not how stale the
  * projection a consumer reads is (#263 axis 1, still open on #189).
+ *
+ * #284 (#189 residue ㉯): a lost CAS on a `reindexSearch: true` rebuild no
+ * longer leaves `search_fts` short of the projection tables indefinitely. The
+ * recovery is HERE, not at the five call sites — none of which changed, and
+ * none of which has to check `committed` — as a write-ahead marker in `meta`:
+ * declare the intent to reindex before reading anything, clear it only inside
+ * the transaction that actually repopulated `search_fts`, and promote a later
+ * `reindexSearch: false` request to `true` while it still stands. So the gap a
+ * lost CAS opens is closed by the NEXT rebuild of this project, whichever one
+ * that is — including the `false` one every `captureObservation` runs, which is
+ * what turns "unbounded" (#277) into "one rebuild".
  */
 export async function rebuildProjectProjection(
   projectId: string,
   opts: RebuildProjectProjectionOptions = {},
 ): Promise<RebuildProjectProjectionResult> {
-  const reindexSearch = opts.reindexSearch ?? true;
+  // The promotion is gated on the marker precisely so this does NOT degrade
+  // into always-reindexing, which #282 priced and rejected (#277 measured the
+  // cost: n=1000 → ~319ms, n=5000 → ~1.9s per reindex). A `false` request with
+  // no gap standing stays `false` and never sets the marker itself — were it
+  // to, every capture would arm the next rebuild and the always-reindex cost
+  // would come back in disguise.
+  const reindexSearch = (opts.reindexSearch ?? true) || hasSearchReindexPending(projectId);
+  // Write-ahead, and OUTSIDE the retry loop: the marker records the intent of
+  // this call, which does not change between attempts. Crashing after this
+  // point (or losing every attempt below) leaves it standing, which is the
+  // safe direction — an extra reindex costs time, a missed one costs
+  // searchability.
+  if (reindexSearch) markSearchReindexPending(projectId);
   for (let attempt = 0; ; attempt += 1) {
     // Nothing is written on a lost attempt (the CAS sits before the first
     // DELETE, inside the transaction), so re-reading the log and recomputing
@@ -397,7 +460,10 @@ async function attemptProjectionRebuild(
     // unconditionally on this path but does not check whether it committed
     // before advancing its cursor (see the option doc for the code sites and
     // for why, today, only project-lock.ts's pre-existing "overlap that
-    // remains" can cost that rebuild its compare-and-swap).
+    // remains" can cost that rebuild its compare-and-swap). `reindexSearch`
+    // here is the EFFECTIVE value the caller's request was resolved to,
+    // #284's marker promotion included — so this stays `false` only while no
+    // gap is outstanding, which is exactly when the divergence is safe.
     if (reindexSearch) {
       db.prepare("DELETE FROM search_fts").run();
     }
@@ -637,6 +703,28 @@ async function attemptProjectionRebuild(
     // OTHER listSegments/listSegmentTexts call site must stay self-only.
     for (const seg of listSegments(projectId, "union")) {
       indexEntity(seg.id, "segment", seg.text, seg.sourceProjectId ?? null);
+    }
+    // #284: clear the write-ahead marker in the SAME transaction that just
+    // wiped and repopulated `search_fts` above. Outside it — before the tx, or
+    // after `writeAll.immediate()` returns — a crash in between would drop the
+    // marker while the index it promises is only partly there, silently
+    // reopening the very gap the marker exists to close. Reached only past the
+    // CAS `return`, so a rebuild that wrote nothing clears nothing.
+    //
+    // Why the marker does not have to remember WHICH rebuild set it: every
+    // rebuild replays the FULL log (`attemptProjectionRebuild` reads all of
+    // `readEvents`, not a suffix), so one committed true-rebuild puts every
+    // searchable entity reachable at its snapshot head into `search_fts` —
+    // whatever boundary left them out. And a rebuild can only commit if the
+    // head never moved between its own read and this transaction, so anything
+    // already in the log when the marker went up is in the snapshot this
+    // commit just projected. Segments — the one searchable kind that is NOT
+    // event-derived, so the head CAS says nothing about it — are covered by a
+    // different half of the same argument: `listSegments` above runs INSIDE
+    // this transaction, so it sees every segment committed before it, the
+    // marker-setter's included. One bit is therefore enough.
+    if (reindexSearch) {
+      db.prepare("DELETE FROM meta WHERE key = ?").run(SEARCH_REINDEX_PENDING_META_KEY);
     }
     committed = true;
   });
