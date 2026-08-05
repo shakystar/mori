@@ -143,11 +143,11 @@ export interface RebuildProjectProjectionOptions {
    * `REBUILD_STALE_HEAD_RETRIES` retries, return `{ committed: false }`
    * instead of writing anything (see that type's doc) — and its two
    * `reindexSearch: true` callers do not check the return value:
-   * `consolidateBoundary` (consolidate-service.ts:2591-2592) calls it and
-   * falls straight through to `commitBoundaryCursors` (:2654) regardless of
+   * `consolidateBoundary` (consolidate-service.ts:2858) calls it and
+   * falls straight through to `commitBoundaryCursors` (:2920) regardless of
    * the result, advancing the boundary's cursor past events whose
    * true-reindex never landed; `detectContradictions`, nested inside it
-   * (contradiction-service.ts:304), does the same. When that happens, the
+   * (contradiction-service.ts:346), does the same. When that happens, the
    * entities those events created sit in the projection TABLES (any
    * subsequent rebuild, including a `false` one, puts them there
    * unconditionally) but not in `search_fts`, until some LATER rebuild both
