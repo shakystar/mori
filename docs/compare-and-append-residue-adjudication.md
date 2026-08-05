@@ -113,7 +113,7 @@ packages/kernel/src/storage/db.ts:420:      INSERT INTO events_new
 | `sqlite-memory-kernel.ts:613` (`memory.injected`)                          | 단수  | 있음 — `buildMemoryContext` (`:505`), 프로젝션                                           | **아니다** — payload의 출처이지 전제조건이 아니다 | 없음 | 해당 없음 (read-then-write 아님)              |
 | `sqlite-memory-kernel.ts:878` (`project.created`)                          | 단수  | 있음 — `hasGenesisEvent` (`:868` → `event-store.ts:72-81`), **로그 직접**                | 그렇다                                            | 없음 | 다른 수단으로 덮임 — v18 partial unique index |
 | `capture-service.ts:293` (`observation.captured`)                          | 단수  | **없음** — 앞선 두 단계가 순수 함수다                                                    | 해당 없음                                         | 없음 | 해당 없음 (read-then-write 아님)              |
-| `conflict-service.ts:77` (`conflict.resolved`)                             | 단수  | 있음 — `getConflict` (`:55`), 프로젝션                                                   | 그렇다 — `:59` 전이 검사의 입력                   | 없음 | **열림**                                      |
+| `conflict-service.ts:97` (`conflict.resolved`)                             | 단수  | 있음 — `getConflict` (`:75`), 프로젝션                                                   | 그렇다 — `:79` 전이 검사의 입력                   | 없음 | **열림**                                      |
 | `consolidate-service.ts:2693` (`memory.consolidated` 외)                   | 복수  | 있음 — `probeBoundaryStart` (`:2238`) · 대화 슬라이스 (`:2254`) · `readEvents` (`:2331`) | 그렇다                                            | 있음 | 덮임                                          |
 | `memory-import-service.ts:810` (`memory.consolidated` 외)                  | 복수  | 있음 — `readValidMemoriesFromLog` (`:627` → `:210-230`), **로그**                        | 그렇다                                            | 있음 | 덮임                                          |
 | `contradiction-service.ts:287` (`memory.superseded` + `conflict.detected`) | 복수  | 있음 — `readEvents` (`:190`), **로그**                                                   | 그렇다                                            | 있음 | 덮임                                          |
@@ -192,7 +192,7 @@ append한다. 전형적인 read-then-write이고, 두 프로세스가 새 스토
 `#270`의 리빌드 자체 CAS(`projection-store.ts:441`, `headEventId(db) !== snapshotHead`면
 커밋하지 않는다). 로그 append 축이 아니므로 Q1 표의 판정에는 영향이 없다.
 
-### Q1.4 `conflict-service.ts:77` — `conflict.resolved` — **열림**
+### Q1.4 `conflict-service.ts:97` — `conflict.resolved` — **열림**
 
 스팬은 `resolveConflict`(`:40`) 안에서 **`:55`에서 시작해 `:77`에서 끝난다**:
 
@@ -401,7 +401,7 @@ transaction"_.
 | ------- | --------------------------------------- | --------- | ------------------------------------------------- |
 | `#132②` | `consolidate-service.ts:2238` → `:2693` | 닫힘      | #132(락) + #253(CAS) + #298/PR #299(근거 결속)    |
 | `#114②` | `memory-import-service.ts:627` → `:810` | 닫힘      | #114(뮤텍스+로그 근거) + #137③ + #253(CAS+재시도) |
-| `#118⑤` | `conflict-service.ts:55` → `:77`        | **열림**  | — (#118이 명문화만 하기로 확정)                   |
+| `#118⑤` | `conflict-service.ts:75` → `:97`        | **열림**  | — (#118이 명문화만 하기로 확정)                   |
 
 **못 찾은 것은 없다.** #301 본문이 대비를 요구한 "`#114②`가 `capture-service`가
 아니라면 어느 자리인가"는 `memory-import-service.ts:627`→`:810`으로 특정됐다.
@@ -429,7 +429,7 @@ Q1의 `열림`은 1건이고 단수형을 쓰므로 이 절은 해당된다. **C
 
 **파급 실측**: 강제로 고쳐야 하는 호출부 **0건**. 인자가 후위 옵셔널이므로 기존 126개
 매치 전부 그대로 컴파일된다. 실제로 손대는 곳은 정의 1곳 + CAS를 켤 호출부 1곳
-(`conflict-service.ts:77`) = **2곳**.
+(`conflict-service.ts:97`) = **2곳**.
 
 - **장점**: 파급이 가장 작다. "CAS를 걸 수 있는 API가 그 자리에 없다"는 사실 자체가 없어지고,
   나중에 다른 단수형 자리(오늘은 없다)가 필요해져도 옵션이 이미 있다.
@@ -447,7 +447,7 @@ Q1의 `열림`은 1건이고 단수형을 쓰므로 이 절은 해당된다. **C
 
 `appendEvents(projectId, [input], { expectedHead })`.
 
-**파급 실측**: 프로덕션 **1곳**(`conflict-service.ts:77-84` → `appendEvents` 호출로 치환,
+**파급 실측**: 프로덕션 **1곳**(`conflict-service.ts:97-104` → `appendEvents` 호출로 치환,
 import 줄 `:5`도 함께). 테스트 파급은 이 함수를 부르는 파일 **2개** —
 `tests/integration/conflict-service.test.ts`(`resolveConflict` 7건),
 `tests/integration/two-reader-equivalence.test.ts`(2건). 두 파일 모두 `resolveConflict`의
@@ -491,7 +491,7 @@ that lock here — or wrap the span in a transaction"_.
 `memory-import-service.ts:210-230`(#253), `projection-store.ts:441`(#270),
 `consolidate-service.ts:2331`(#298).
 
-**파급 실측**: 프로덕션 **1곳**(`conflict-service.ts:55` 치환 + `:77` 치환 + import 조정).
+**파급 실측**: 프로덕션 **1곳**(`conflict-service.ts:75` 치환 + `:97` 치환 + import 조정).
 `getConflict`의 다른 호출부는 이 파일의 `readConflict`(`:17`)뿐이고 그것은 순수 리더라
 바뀌지 않는다. 테스트 파급은 (b)와 같은 2개 파일.
 
