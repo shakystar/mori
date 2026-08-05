@@ -238,6 +238,15 @@ export interface AppendEventsOptions {
    * two then makes the basis newer than the head and the check errs toward a
    * spurious rejection (costs a re-read), where the reverse order would let the
    * check PASS on a basis that is already stale.
+   *
+   * That guarantee covers only a race BETWEEN the two reads — an append
+   * landing after the basis was already read. It says nothing about a basis
+   * that was ALREADY stale before either read: when "the basis" is a derived
+   * cursor or projection that a concurrent writer advances separately from
+   * its own append (e.g. committed at the very end of that writer's own
+   * run, after its append already landed), head-before-basis ordering here
+   * does not guarantee that cursor has caught up — the check can still PASS
+   * while the caller's basis is behind the log. See #263.
    */
   expectedHead?: string | null;
 }
