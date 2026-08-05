@@ -253,7 +253,12 @@ export interface AppendEventsOptions {
    * its own append (e.g. committed at the very end of that writer's own
    * run, after its append already landed), head-before-basis ordering here
    * does not guarantee that cursor has caught up — the check can still PASS
-   * while the caller's basis is behind the log. See #263.
+   * while the caller's basis is behind the log. See #296
+   * (`docs/consolidate-evidence-binding-adjudication.md`), which adjudicated
+   * that gap for `consolidateBoundary` and closed it by binding the basis to
+   * the log: derive the basis and this head from ONE `readEvents` array and
+   * the two cannot disagree about which appends they saw, which is the shape
+   * every caller of this option now uses (#253, #270, #298).
    */
   expectedHead?: string | null;
 }

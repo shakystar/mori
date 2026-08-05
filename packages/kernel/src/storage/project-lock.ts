@@ -112,7 +112,7 @@
  * is check point ④, immediately before the rest of the tail; everything after
  * it has none. What gates entry into that rest is not the
  * `memory.consolidated` append alone: the rebuild below runs on
- * `inputs.length > 0 || segmentsWritten > 0` (`consolidate-service.ts:2591`),
+ * `inputs.length > 0 || segmentsWritten > 0` (`consolidate-service.ts:2775`),
  * so a conversation-only boundary — no memories extracted (`inputs.length ===
  * 0`) but raw segments written from the transcript slice — still reaches
  * `pruneSegments`, `rebuildProjectProjection` (its segment-FTS reindex
