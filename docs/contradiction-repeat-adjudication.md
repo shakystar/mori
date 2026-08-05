@@ -114,12 +114,36 @@ unconditionally, `reindexSearch: false` ones included"_ 는 **실물에서 참�
 
 `projector.ts:562-576`은 `state.memories[payload.supersedes]`에 `invalidAt`과
 `supersededBy`를 덮어쓴다. 두 이벤트의 `supersedes`/`supersededBy`가 같으므로 **행은
-하나로 접힌다.** 다만 `invalidAt = event.createdAt`이라 **두 번째(나중) 이벤트의 시각이
-이긴다** — 유효 창이 첫 supersede가 아니라 재판정 시점에 닫힌 것으로 기록된다. 관측 가능한
-차이는 시점 재생(`getProjectStateAtRevision`, `projection-store.ts:779`)에서 두 append
-사이 구간의 답이 "아직 valid"로 바뀌는 것 하나다. `reason`은 프로젝션에 실리지 않으므로
-(위 case가 읽지 않는다) 로그에만 남는다 — judge의 자유 서술이 매번 달라도 프로젝션은
-동일하다.
+하나로 접힌다.** 다만 `invalidAt = event.createdAt`(`projector.ts:572`)이라 **두 번째(나중)
+이벤트의 시각이 이긴다** — 유효 창이 첫 supersede가 아니라 재판정 시점에 닫힌 것으로
+기록된다.
+
+**손해가 굳는 자리를 정확히 짚는다 — 시점 재생이 아니다.**
+`getProjectStateAtRevision`은 `readEventsUpTo`가 돌려준 **접두**를 그대로 접는다
+(`projection-store.ts:779-784`), 그리고 그 접두는 `seq <= watermark`의 포함 상한이다
+(`event-store.ts:452-465`). 그러므로 "두 append 사이 구간"을 시점 재생으로 물으면 그 접두에
+**첫 supersede가 이미 들어 있고**, 답은 그때도 "invalid"다. 중복 이벤트는 그 답을 바꾸지
+못한다 — 시점 재생은 이 손해가 **드러나지 않는** 경로다.
+
+손해가 실제로 굳는 자리는 **전량 replay로 세운 최종 프로젝션의 `invalidAt` 값**이다.
+리빌드는 로그 전체를 `seq` 순으로 접고(`event-store.ts:377` → `projection-store.ts:378-379`)
+나중 이벤트가 이기므로, `memories.invalid_at` 열에 첫 supersede 시각이 아니라 **재판정
+시각**이 쓰인다 (`projection-store.ts:656-673`의 `invalidAt: memory.invalidAt ?? null`).
+
+**그 값을 오늘 읽는 소비자는 0건이다** (§2.3과 같은 방식으로 전수 확인).
+
+| `invalidAt`을 만지는 프로덕션 자리                          | 무엇으로 쓰나                                                   | 값이 보이나                               |
+| ----------------------------------------------------------- | --------------------------------------------------------------- | ----------------------------------------- |
+| `listValidMemories` (`projection-store.ts:1024`)            | `invalid_at IS NULL` — **불리언 술어**                          | 안 보임                                   |
+| `readValidMemoriesFromLog` (`memory-import-service.ts:222`) | `!memory.invalidAt` — **불리언 술어**                           | 안 보임                                   |
+| `dedupeMemoriesBySource` (`projector.ts:237`)               | `if (memory.invalidAt) continue` — **불리언 술어**              | 안 보임                                   |
+| 임베딩 스코프 (`embeddings-store.ts:161`)                   | `invalid_at IS NULL` — **불리언 술어**                          | 안 보임                                   |
+| `projector.ts:599` (`memory.retracted`)                     | `existing.invalidAt ?? event.createdAt` — **보존용 읽기**       | 값을 읽지만 다시 `invalidAt`으로만 흘러감 |
+| `getMemory` (`projection-store.ts:994-1006`)                | 무효 메모리도 레코드째 돌려준다 — **값이 드러나는 유일한 독자** | **호출부 0건**, `index.ts` export 0건     |
+| `getProjectStateAtRevision` (`projection-store.ts:779`)     | 접두 재생 (위) — 애초에 드러나지 않음                           | **호출부 0건**                            |
+
+`reason`은 프로젝션에 실리지 않으므로(`projector.ts:570-574`가 읽지 않는다) 로그에만
+남는다 — judge의 자유 서술이 매번 달라도 프로젝션은 동일하다.
 
 ### 2.2 중복 `conflict.detected` — 두 행이 남는다
 
@@ -152,7 +176,9 @@ unconditionally, `reindexSearch: false` ones included"_ 는 **실물에서 참�
 
 - (a) `conflicts` 2행 + `memory_index.openConflicts` 2엔트리 — **오늘 소비자 0건**, 첫
   소비자가 배선되는 날 표면화된다.
-- (b) 시점 재생에서 `invalidAt`이 재판정 시점으로 밀림 (§2.1).
+- (b) **최종 프로젝션의 `invalidAt`이 첫 supersede가 아니라 재판정 시점으로 밀림** (§2.1) —
+  시점 재생에서는 드러나지 않고, 그 값을 읽는 프로덕션 소비자도 **오늘 0건**이다(§2.1의 표).
+  즉 (b)는 (a)와 같은 부류다: 첫 소비자가 배선되는 날 표면화된다.
 - (c) **낭비된 judge LLM 왕복 1회** — 이것만은 오늘 즉시 발생하고, 유일하게 값이 붙는
   손해다.
 - (d) append-only 로그에 영구히 남는 중복 이벤트 2건 (지울 수 없다 — 이 리포의
@@ -245,26 +271,94 @@ genesis id 두 개)이고, 바로 위 주석이 _"A repeated SAME id (idempotent
 
 ## 4. Q4 — 정당한 재판정이 존재하는가
 
-> **정당한 재판정이 존재하는가: 아니오.** 오늘의 배선에서 한 번 판정된 쌍이 다시
-> 판정되어야 하는 경로는 없다. 근거 셋:
+> **정당한 재판정이 존재하는가: 예.** 한 쌍이 **append 없이** 판정 패스를 빠져나가는
+> 분기가 여럿 있고, 그 분기로 빠진 쌍은 둘 다 valid로 남아 **다음 경계·import 패스에서
+> 정당하게 다시 판정된다.** 소스 주석 자신이 이 함수를 _"a repeated best-effort sweep —
+> the next boundary or import runs it again over current data"_ 라고 규정한다
+> (`contradiction-service.ts:281-283`).
 >
-> 1. **메모리 텍스트는 불변이다.** `DomainEventType`에 메모리 본문을 바꾸는 이벤트가 없다 —
->    `memory.consolidated` / `memory.superseded` / `memory.retracted` / `memory.injected`가
->    전부다 (`domain/events.ts:64-76`). "텍스트가 바뀌어서 다시 판정" 경로는 존재하지 않는다.
-> 2. **패배자는 되살아나지 못한다.** `invalidAt`을 **되돌리는** 이벤트가 없다 —
->    `memory.superseded`(`projector.ts:562-576`)와
->    `memory.retracted`(`projector.ts:577-605`) 둘 다 설정만 하고, 지우는 case가 없다.
->    `listValidMemories`는 `invalid_at IS NULL`만 읽으므로(`projection-store.ts:1024`)
->    패배자는 영구히 basis 밖이고, 같은 쌍은 다시 비교되지 않는다.
-> 3. **승자는 결정적이다.** `pickWinner`는 `(createdAt, id)` 규칙이라
->    (`contradiction-service.ts:125-133`) 재판정이 일어나도 판정 결과 자체는 같다 —
->    "다시 판정해서 다른 답이 나와야 하는" 경우가 없다.
+> **다만 결정적 conflict id는 그 재판정을 막지 못한다: 아니오.** 아래 분기들은 전부
+> **append가 0건**이라 그 쌍의 conflict id가 애초에 민팅·기록되지 않는다. 나중의 양성
+> 판정은 그 쌍의 **첫 번째** append이고, 충돌할 상대가 없다. 결정적 id가 거부하는 것은
+> *이미 양성으로 판정돼 append까지 끝난 쌍*의 두 번째 append뿐이며, 그것이 정확히 ㉰다.
 
-따라서 결정적 conflict id가 막을 "정당한 재판정"은 없고, id에 버전이나 경계 id를 더
-섞을 필요도 없다. **(가)는 위험해서 각하되는 것이 아니라 append에 닿지 못해서 각하된다**
-(§3.1).
+### 4.1 append 없이 쌍이 valid로 남는 분기 — 루프 전수
 
-회색지대 둘을 명시해 둔다.
+`detectContradictions`의 판정 루프에서 제어가 빠져나가는 자리는 열 곳이고, 그중
+**쌍을 둘 다 valid로 남기는** 것은 일곱이다.
+
+| 자리                                              | 조건                        | 쌍이 valid로 남나                       |
+| ------------------------------------------------- | --------------------------- | --------------------------------------- |
+| `:161` `if (!embedder) return []`                 | embedder 미배선             | **예** — 패스 전체가 무판정             |
+| `:176` `if (decisions.length < 2) return []`      | decision < 2                | **예** — 세 번째 decision이 생기면 판정 |
+| `:200` `alreadyResolved.has(a.id)` → `continue`   | `a`가 이 패스에서 이미 패배 | 아니오 — `a`는 무효화됐다               |
+| `:202` `if (!vecA) continue`                      | `a`의 벡터 없음             | **예** — 벡터가 채워지면 판정           |
+| `:206` `alreadyResolved.has(b.id)` → `continue`   | `b`가 이 패스에서 이미 패배 | 아니오 — `b`는 무효화됐다               |
+| `:208` `if (!vecB) continue`                      | `b`의 벡터 없음             | **예**                                  |
+| `:209` `cosineSimilarity(vecA, vecB) < threshold` | 프리필터 탈락               | **예**                                  |
+| `:215` `if (!verdict.contradicts) continue`       | judge 음성                  | **예** — 이번 반송의 핵심               |
+| `:286` `break` (staleBasis)                       | CAS 거부로 패스 포기        | **예** — 남은 쌍 전부 무판정            |
+| `:299` `if (loser.id === a.id) break`             | `a`가 졌다                  | 아니오 — `a`는 무효화됐다               |
+
+`:200`·`:206`·`:299` 셋만 "이미 판정이 내려진 뒤"의 패스 내 단축이고, 나머지 일곱은
+**판정이 아예 없었던** 자리다.
+
+### 4.2 그중 `:215`(judge 음성)가 가장 실재한다
+
+`verdict.contradicts`가 거짓이면 `continue`이고 append가 없다 (`:215`). 그 경로는
+`alreadyResolved`에 아무것도 넣지 않는다 — `alreadyResolved.add(loser.id)`는 `:293`,
+즉 양성 판정 뒤에만 실행된다. 두 메모리는 둘 다 valid로 남아 다음 패스의
+`listValidMemories` basis(`:173`)에 그대로 다시 오르고, 프리필터를 다시 통과하고,
+**judge에 다시 간다.**
+
+그리고 judge의 음성은 "그 쌍은 모순이 아니다"라는 안정된 사실이 아니다.
+`makeLlmJudge`(`contradiction-service.ts:95-105`)를 보면 음성이 나오는 자리가 셋이다:
+
+- `if (!llm) return { contradicts: false }` (`:97`) — **LLM 미배선 스토어는 모든 쌍이 음성**이다.
+  `consolidate-service.ts:2650`이 `makeLlmJudge(params.llm)`로 부르고 `params.llm`은 선택적이다.
+- `catch { return { contradicts: false } }` (`:101-103`) — **LLM 일시 장애도 음성**이다.
+- 실제 LLM 응답 (`:99-100`) — 비결정적이다.
+
+즉 LLM이 배선되거나 장애에서 복구되면, 전에 음성이던 같은 쌍이 **정당하게 양성**이 된다.
+이것은 가설이 아니라 오늘의 배선에서 바로 도달하는 경로다.
+
+프리필터(`:209`) 쪽도 패스 간에 고정이 아니다. 임계값은 호출자 파라미터이고
+(`cosineThreshold?: number` — `:122`, `:187`), 벡터는 `embedder.model`로 필터되며
+(`:184-186`), 모델이 바뀌면 `ensureEmbeddings`가 `current.model !== embedder.model`로
+전량을 다시 임베딩한다 (`embeddings-service.ts:101-106`). 같은 쌍의 코사인이 패스마다
+다를 수 있다.
+
+### 4.3 양성으로 판정된 쌍에 한해서는 재판정이 없다
+
+Q4가 (가)의 반대 위험으로 물은 것은 이쪽이다 — **결정적 id가 거부하게 될 그 쌍**이 다시
+판정되어야 하는가. 확인한 범위에서는 아니다. 근거 셋:
+
+1. **메모리 텍스트는 불변이다.** `DomainEventType`에 메모리 본문을 바꾸는 이벤트가 없다 —
+   `memory.consolidated` / `memory.superseded` / `memory.retracted` / `memory.injected`가
+   전부다 (`domain/events.ts:64-76`). "텍스트가 바뀌어서 다시 판정" 경로는 없다.
+2. **패배자는 되살아나지 못한다 — 다만 그 보장은 projector가 아니라 id 민팅에 얹혀 있다.**
+   `invalidAt`을 **지우는** case는 없다: `memory.superseded`(`projector.ts:570-574`)와
+   `memory.retracted`(`projector.ts:595-602`) 둘 다 설정만 하고, 후자는
+   `existing.invalidAt ?? event.createdAt`으로 오히려 **보존**한다. 그러나 지우는 case가
+   없다는 것만으로는 부족하다 — `memory.consolidated` case는 레코드를 **통째로 덮어쓰므로**
+   (`projector.ts:551-559`의 `state.memories[memory.id] = memory`) 같은 memory id를 실은
+   그 이벤트가 supersede 뒤에 한 번 더 오면 `invalidAt`이 **사라진다.** 오늘 그 경로가
+   닫혀 있는 이유는 projector가 아니라 **두 appender가 전부 새 id를 민팅**하기 때문이다
+   (경계는 `consolidate-service.ts:2325`의 `createConsolidatedMemory` → `:2339-2345`의 append,
+   import는 `memory-import-service.ts:729`의 같은 팩토리 → `:743-750`의 append). 남의 이벤트를 받아들이는
+   경로가 생기는 날 이 근거는 다시 대조해야 한다 (아래 회색지대).
+3. **승자는 결정적이다.** `pickWinner`는 `(createdAt, id)` 규칙이라
+   (`contradiction-service.ts:125-133`) 같은 쌍을 다시 판정해도 승패가 뒤집히지 않는다 —
+   "다시 판정해서 다른 답이 나와야 하는" 경우가 없다.
+
+따라서 (가)의 반대 위험은 성립하지 않는다: **결정적 conflict id는 §4.1의 일곱 분기가
+만드는 정당한 재판정을 하나도 막지 않고**(그 분기들은 append를 남기지 않으므로 충돌할 id가
+없다), 그것이 거부하는 유일한 append는 이미 양성으로 확정된 쌍의 두 번째 것이다. id에
+버전이나 경계 id를 더 섞을 필요도 없다 — 섞어야 하는 경우는 "같은 쌍이 같은 양성 판정을
+두 번 정당하게 남겨야 하는 경우"인데, 위 근거 셋이 그 경우를 배제한다.
+**(가)의 각하는 위험 때문이 아니라 대가 때문이다** (§7.2).
+
+### 4.4 회색지대 둘
 
 - **복제본 사본**: `dedupeMemoriesBySource`(`projector.ts:234-265`)가 같은 lane의
   동일 내용 메모리를 접는데, 그 dedup 패배자는 `invalidAt`이 붙는다(`:258-262`) —
@@ -274,9 +368,11 @@ genesis id 두 개)이고, 바로 위 주석이 _"A repeated SAME id (idempotent
 - **동기화 수신**: 오늘 이 리포에는 남의 이벤트를 로그로 받아들이는 경로가 없다 —
   `memory.retracted`를 append하는 프로덕션 코드는 0건이고 테스트뿐이며,
   `readEvents`를 쓰는 비-스토어 코드도 두 곳뿐이다(`projection-store.ts:378`,
-  `memory-import-service.ts:213`). 수신 경로가 생겨도 근거 2(`invalidAt`은 되돌아가지
-  않는다)는 유지되므로 결론은 바뀌지 않지만, 근거 1·3의 전제(단일 writer)는 그때
-  다시 대조해야 한다.
+  `memory-import-service.ts:213`). 수신 경로가 생기면 §4.3 근거 **1·2·3을 전부** 다시
+  대조해야 한다. 특히 근거 2가 그렇다 — 그 보장은 projector가 아니라 "두 appender가 전부
+  새 id를 민팅한다"에 얹혀 있고, 남이 보낸 `memory.consolidated`가 이미 무효화된 memory
+  id를 실어 오면 `projector.ts:551-559`의 통째 덮어쓰기가 `invalidAt`을 지운다. 즉
+  **수신 경로는 근거 2를 깨는 가장 짧은 길이다.**
 
 부수적으로: 결정적 conflict id는 **복제본 간 수렴**에는 이득이다 — 두 복제본이 같은 쌍을
 독립적으로 판정하면 오늘은 서로 다른 id 두 개가 union 뒤 둘 다 살아남고, 결정적 id면
@@ -289,8 +385,10 @@ genesis id 두 개)이고, 바로 위 주석이 _"A repeated SAME id (idempotent
 
 basis를 `listValidMemories`(프로젝션) 대신 **로그 replay**로 잡으면, 첫 패스가 append한
 `memory.superseded`가 이미 로그에 있으므로 두 번째 패스의 basis에서 패배자는 `invalidAt`을
-갖는다 → 재판정 자체가 일어나지 않는다. **㉰의 유효성 판정에는 어떤 리빌드도 커밋될 필요가
-없어지고**, §1.3의 도달 조건 넷이 전부 무의미해진다.
+갖는다 → **그 쌍의** 재판정 자체가 일어나지 않는다. **㉰의 유효성 판정에는 어떤 리빌드도
+커밋될 필요가 없어지고**, §1.3의 도달 조건 넷이 전부 무의미해진다. (여기서 사라지는 것은
+**양성으로 판정돼 패배자가 무효화된 쌍**의 재판정뿐이다. 음성으로 판정된 쌍은 오늘도
+후보② 뒤에도 매 패스 다시 판정되고, 그것은 결함이 아니라 설계다 — §4.2.)
 
 구현 모양은 새로 발명할 것이 없다 — `memory-import-service.ts:210-230`의
 `readValidMemoriesFromLog`가 **같은 이유로 이미 존재한다**: 프로젝션 캐시가 아니라
@@ -505,7 +603,9 @@ invalidate-not-delete 규율). 그 곡선은 후보②가 만든 것이 아니�
 1. ㉰를 **근본에서** 닫는다 — 어떤 리빌드도 커밋될 필요가 없어지고, §1.3의 도달 조건이
    전부 사라진다. 중복 `conflict.detected`와 중복 `memory.superseded`를 **둘 다** 없애면서,
    ㉰가 오늘 실제로 물리는 유일한 값인 **낭비된 judge LLM 왕복**(§2.4 손해 (c))도 없앤다 —
-   재판정 자체가 일어나지 않으므로 judge를 부르지 않는다. (가)는 이음매까지 넣어야
+   **양성으로 판정된 그 쌍에 한해** 재판정 자체가 일어나지 않으므로 judge를 다시 부르지
+   않는다. (음성으로 판정된 쌍은 오늘도, 후보② 뒤에도 매 패스 judge에 다시 간다 — §4.2.
+   후보②가 옮기는 것은 basis이지 프리필터·judge 경로가 아니다.) (가)는 이음매까지 넣어야
    중복을 없애고, 그렇게 해도 그 왕복은 이미 지불된 뒤에 append에서 거부되므로 못 없앤다
    (§3.2).
 2. ㉰의 희귀함만으로는 값이 안 나온다는 것을 인정한 위에서 — 이 변경이 실제로 사는 것은
@@ -543,6 +643,13 @@ invalidate-not-delete 규율). 그 곡선은 후보②가 만든 것이 아니�
   똑같이 걸리는 별개 축이고, 후보② 채택 여부와 무관하게 남는다.
 - import 경로의 배선 (`importMemories`가 export되지 않는다는 #189 확인된 사실) — 배선하는
   사람이 후보②의 비용을 상속한다(§5.4)는 사실만 적어 두고, 배선 자체는 하지 않는다.
+- **음성 판정 쌍의 반복 judge 왕복.** `:215`가 append 없이 `continue`하므로 같은 쌍이
+  매 패스 judge에 다시 간다(§4.2). 오늘도 그렇고 후보②도 바꾸지 않는다. 이것은 설계
+  의도이지(`contradiction-service.ts:281-283`의 _"a repeated best-effort sweep"_) 결함이
+  아니므로 이 후속 이슈에서 건드리지 않는다. **후속 이슈가 _"한 번 판정된 쌍은 다시
+  판정되지 않는다"_ 를 불변으로 전제해서는 안 된다** — 그 전제는 오늘도 거짓이다.
+  성립하는 것은 _"양성으로 판정돼 append까지 끝난 쌍은 다시 판정되지 않는다"_ 뿐이고,
+  그것도 §4.3이 확인한 범위(단일 writer, id 민팅) 안에서다.
 
 ### 7.2 각하 1 — 후보 (가) 결정적 conflict id
 
@@ -572,7 +679,8 @@ invalidate-not-delete 규율). 그 곡선은 후보②가 만든 것이 아니�
    조용히 사라진다.
 3. **오늘 실제로 드는 비용을 하나도 없애지 못한다.** 거부는 append 시점이므로 낭비된
    judge LLM 왕복(§2.4 손해 (c))은 그대로 지불되는데, 표면 소비자가 0건인 오늘 그것이
-   ㉰의 유일한 실비다. 후보②는 재판정 자체를 없애 그 왕복까지 없앤다.
+   ㉰의 유일한 실비다. 후보②는 **그 쌍의** 재판정 자체를 없애 그 왕복까지 없앤다
+   (음성 판정 쌍의 왕복은 어느 후보도 없애지 않는다 — §4.2·§7.1).
 
 덧붙여 정규화를 놓치면 id는 결정적이지도 않다(§3.4). **다만 복제본 간 수렴 이득(§4 말미)은
 실재하므로, 동기화 수신 경로가 배선되는 날 이 후보는 그 축에서 다시 저울에 올라야 한다.**
