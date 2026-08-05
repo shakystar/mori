@@ -149,7 +149,7 @@ unconditionally, `reindexSearch: false` ones included"_ 는 **실물에서 참�
 
 `projector.ts:467-469`는 `conflict.detected`/`conflict.resolved`를 `event.scopeId`로
 키잉한다. `detectContradictions`는 `scopeId`에 **conflict 자신의 id**를 싣고
-(`contradiction-service.ts:256-262`, 그렇게 하는 이유는 `conflict-service.ts:71-76`),
+(`contradiction-service.ts:256-262`, 그렇게 하는 이유는 `conflict-service.ts:91-96`),
 그 id는 호출마다 새로 민팅되므로 **키가 다르다** → `conflicts` 테이블에 **두 행**이 남는다.
 이슈 본문의 예상과 일치한다.
 
