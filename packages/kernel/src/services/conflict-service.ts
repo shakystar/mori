@@ -52,6 +52,26 @@ export async function resolveConflict(params: ResolveConflictParams): Promise<Co
   // lock (`storage/project-lock.ts`) for exactly these spans. Whoever wires the
   // first real caller must take that lock here — or wrap the span in a
   // transaction (#118 item 5 — deliberately no CAS added here).
+  //
+  // TRIGGER (#301 §Q4): the PR that wires the first production caller of this
+  // function closes this span in the SAME PR — a caller landing without it is
+  // the whole defect, not a follow-up. Which shape depends on where that caller
+  // sits, and #301 §Q3 priced all four:
+  //   - Inside the kernel seam (like `observe`/`consolidate`, which take
+  //     `withProjectLock` at sqlite-memory-kernel.ts:724/:794 and pass a signal
+  //     down): the lock belongs to the kernel, not here. Take a `signal` param
+  //     and check it, as capture-service.ts:291 does.
+  //   - Outside that seam (like `importMemories`): the shape is
+  //     memory-import-service.ts's — a per-project mutex (:85), a LOG-derived
+  //     basis (:210-230) replacing the `getConflict` read below, and
+  //     `appendEvents(projectId, inputs, { expectedHead })` with a pre-append
+  //     retry (:239-273).
+  // Adding `expectedHead` ALONE does not close it: the basis below is the
+  // `conflicts` projection, and a CAS pass says only that the log did not move
+  // — not that the projection was fresh (#301 §Q1.8, PR #299 review). Whichever
+  // shape is taken, add the interleave test with it: two callers resolving the
+  // same `detected` conflict, asserting the loser is refused rather than
+  // silently landing a forbidden transition.
   const existing = getConflict(params.projectId, params.conflictId);
   if (!existing) {
     throw new MemorizeError(`Conflict not found: ${params.conflictId}`);
