@@ -16,19 +16,18 @@ import type {
   ConversationSource,
   Embedder,
 } from "../index.js";
-import { laneOf, laneWhereSql, SELF_LANE } from "../projections/projector.js";
+import { laneOf, laneWhereSql, reduceProjectState, SELF_LANE } from "../projections/projector.js";
 import { getDb } from "../storage/db.js";
 import {
   appendEvents,
-  readEventsSince,
+  readEvents,
   readGenesisEventsSync,
-  readHeadEventId,
   type AppendEventInput,
 } from "../storage/event-store.js";
 import { throwIfDispossessed } from "../storage/project-lock.js";
 import { detectContradictions, makeLlmJudge } from "./contradiction-service.js";
 import { ensureEmbeddings, ensureSegmentEmbeddings } from "./embeddings-service.js";
-import { listValidMemories, rebuildProjectProjection } from "./projection-store.js";
+import { rebuildProjectProjection } from "./projection-store.js";
 import {
   insertSegments,
   pruneSegments,
@@ -1256,7 +1255,8 @@ function writeMeta(projectId: string, key: string, value: string): void {
  * Read/write the consolidation watermark event id. Exported thin accessors so a
  * future gc path does not duplicate the meta key: gc needs them to repair the
  * cursor when a physically-reclaimed observation IS the watermark — otherwise
- * `readEventsSince` falls back to "everything" and re-consolidates the whole log.
+ * the boundary's window slice falls back to "everything" (an id the log no
+ * longer carries) and rescans the whole log every time.
  */
 export function getConsolidateWatermark(projectId: string): string | undefined {
   return readMeta(projectId, WATERMARK_META_KEY);
@@ -1359,8 +1359,8 @@ export function resumePointsOf(
  * `seq` of the event with this id, or `undefined` when the log does not hold
  * it. `seq` is the events table's `INTEGER PRIMARY KEY`, assigned in append
  * order, and it is ALREADY the authority on what a watermark means:
- * `readEventsSince` resolves the stored id to its `seq` and returns everything
- * strictly after it. So "is this watermark ahead of that one" has exactly one
+ * a boundary's window is everything strictly after the `seq` of the event the
+ * stored id names. So "is this watermark ahead of that one" has exactly one
  * correct answer and it is this comparison — NOT a comparison of the ids
  * themselves, which `createId` builds as `evt_<base36 ms>_<random>` and which
  * therefore tie (and then order arbitrarily) for two events appended in the
@@ -1875,23 +1875,67 @@ export function chunkConversation(text: string, maxChars: number = SEGMENT_MAX_C
 // --- the boundary --------------------------------------------------------------
 
 /**
- * Observation ids already consumed by ANY consolidated memory (valid or
- * superseded). The dedup safety net for watermark loss: events survive
- * export/migrate, but the per-project meta table (and thus the watermark) does
- * not — without this guard a fresh meta table would make the next boundary
- * re-consolidate the project's entire observation history into duplicate
- * memories.
+ * The cost gate's probe over the observation window (#298, adjudication §Q6
+ * acceptance criterion 3).
+ *
+ * Binding the boundary's evidence to the log means `run()` replays the WHOLE
+ * log, and §Q3's measurements price that at +179 ms on a 20k-event store. A
+ * boundary with nothing of its own to do must not pay it, so this answers the
+ * two questions the noop short-circuit needs — is there ANY self-lane
+ * observation in the window, and how far may the cursor skip — entirely inside
+ * SQLite, reading no event rows into JS. Same shape as the backlog aggregate in
+ * `getConsolidationStatus`, and it classifies lanes through the same
+ * `laneWhereSql`/`isUnionLog` pair the window filter below uses, so the probe
+ * and the window can never disagree about a lane.
+ *
+ * This is NOT evidence. Its only possible effect is to send the boundary down
+ * the noop path, which appends nothing; it can never inform a distillation.
+ * `selfObservations === 0` implies the post-dedup window is empty as well, so
+ * the gate fires strictly INSIDE the set of cases that were already noops.
  */
-function consumedObservationIds(projectId: string): Set<string> {
-  const rows = getDb(projectId).prepare("SELECT data FROM memories").all() as Array<{
-    data: string;
-  }>;
-  const consumed = new Set<string>();
-  for (const row of rows) {
-    const memory = JSON.parse(row.data) as ConsolidatedMemory;
-    for (const id of memory.sourceObservationIds ?? []) consumed.add(id);
+function probeObservationWindow(
+  projectId: string,
+  watermark: string | undefined,
+): { selfObservations: number; lastObservationId?: string } {
+  const db = getDb(projectId);
+  let sinceSeq = 0;
+  if (watermark) {
+    const row = db.prepare("SELECT seq FROM events WHERE id = ?").get(watermark) as
+      { seq: number } | undefined;
+    // An unknown watermark means "scan from the start" — the same fallback the
+    // window slice in `run()` takes when the id is absent from the array (and
+    // what `readEventsSince` documented before it), so probe and window keep
+    // covering the same range.
+    if (row) sinceSeq = row.seq;
   }
-  return consumed;
+  const { sql: laneSql, params: laneParams } = laneWhereSql(projectId, isUnionLog(projectId));
+  // ONE statement for both answers, and it has to stay one. Split across two
+  // reads, an `observation.captured` landing between them can be counted by
+  // neither the self-lane COUNT (taken first, before it existed) and named by
+  // the id probe (taken second) — the gate would then fire AND skip the cursor
+  // past a fresh, unconsumed self-lane observation, losing it for good. A
+  // single statement reads one consistent snapshot, so the id can only ever
+  // name a row the count already saw. `lastObservationId` is deliberately
+  // lane-BLIND, matching the post-replay noop below, which advances past the
+  // whole scanned range (foreign-lane and already-consumed rows included).
+  const row = db
+    .prepare(
+      "SELECT " +
+        `SUM(CASE WHEN ${laneSql} THEN 1 ELSE 0 END) AS selfObservations, ` +
+        "(SELECT id FROM events WHERE type = 'observation.captured' AND seq > ? " +
+        "ORDER BY seq DESC LIMIT 1) AS lastObservationId " +
+        "FROM events WHERE type = 'observation.captured' AND seq > ?",
+    )
+    .get(...laneParams, sinceSeq, sinceSeq) as {
+    // NULL, not 0, when the window holds no observation at all — `SUM` over an
+    // empty set.
+    selfObservations: number | null;
+    lastObservationId: string | null;
+  };
+  return {
+    selfObservations: row.selfObservations ?? 0,
+    ...(row.lastObservationId !== null ? { lastObservationId: row.lastObservationId } : {}),
+  };
 }
 
 export interface ConsolidateResult {
@@ -2130,25 +2174,116 @@ export async function consolidate(params: ConsolidateParams): Promise<Consolidat
   };
 
   const run = async (): Promise<ConsolidateResult> => {
-    // #253 (#189 A): the head as of the instant this boundary starts reading
-    // what it will judge on. FIRST statement of `run()`, ahead of both basis
-    // reads below (the window and, further down, `listValidMemories`), because
-    // the safe ordering error is a spurious rejection, never a stale accept —
-    // see `AppendEventsOptions.expectedHead`. `withProjectLock` around this
-    // call does NOT make it redundant: #132's lock runs its critical section
-    // to completion even after losing it (it reports, it does not brake), and
-    // `memory-import-service` writes to the same log without taking it at all.
-    const expectedHead = (await readHeadEventId(params.projectId)) ?? null;
+    // #298 (#296 §Q1.3/§Q4): the watermark stays a `meta` cursor and is NOT
+    // bound to the log. The log cannot express it — the noop path below skips
+    // the cursor past foreign-lane and already-consumed observations, which
+    // leaves no trace in the log at all, and gc's repair has to move it
+    // BACKWARDS (see `setConsolidateWatermark`). It does not need to be bound
+    // either: `commitBoundaryCursors` runs at the very END of a boundary, after
+    // that boundary's append has landed, so a cursor can never be AHEAD of the
+    // log. That demotes it to a performance hint — "where do I start scanning"
+    // — which can only be wrong in the safe direction (too wide a window, which
+    // the `consumed` filter below then narrows).
     const watermark = getConsolidateWatermark(params.projectId);
-    const eventsSince = await readEventsSince(params.projectId, watermark);
+
+    // #99 cat-2: show the extractor the conversational turns since the last
+    // boundary, not just a raw tail of mostly tool I/O. cat-1: this no longer
+    // depends on an observation carrying a transcript path, so a
+    // conversation-only session (zero observations) still consolidates. The
+    // byte watermark advances only on success (below).
+    //
+    // #298: read AHEAD of the log now, because the cost gate below needs to
+    // know whether there is conversational content before deciding to replay.
+    // This touches the conversation source only — never the log — so it moves
+    // no evidence out of the single read below.
+    const source = params.conversation;
+    const sliceStartOffset = source ? readConversationOffset(params.projectId, source.id) : 0;
+    const slice = source ? await source.read(sliceStartOffset) : undefined;
+    const transcriptTail = slice && slice.text.length > 0 ? slice.text : undefined;
+    // #144: where this slice may be consumed PARTLY, keyed by prefix length —
+    // validated here (see `resumePointsOf`) so both the budget search below and
+    // the cursor-advance tail work from the same trusted set.
+    const resumePoints = slice ? resumePointsOf(slice, sliceStartOffset) : undefined;
+
+    // #298 cost gate. Binding the evidence to the log costs a full replay
+    // (§Q3: +179 ms at n=20000), and a boundary that would do nothing anyway
+    // must not pay it. `probeObservationWindow` answers "is there any self-lane
+    // observation in the window" inside SQLite; with no such observation AND no
+    // conversation content there is nothing to distill, so take the same noop
+    // exit the post-replay check below takes — cursor advance included.
+    //
+    // Strictly a SUBSET of that check: it fires on
+    // `selfObservations === 0 && !transcriptTail`, while the one below fires on
+    // `observations.length === 0 && !transcriptTail` where `observations` is
+    // the self-lane window MINUS the consumed ids. No self-lane observation in
+    // the window implies an empty post-dedup window, so every gate hit was
+    // already a noop and no evidence is ever skipped on the way to a
+    // distillation. An observation landing between the probe and this exit is
+    // safe too: the cursor only advances to the last observation the PROBE saw,
+    // so anything newer stays in the next boundary's window.
+    const windowProbe = probeObservationWindow(params.projectId, watermark);
+    if (windowProbe.selfObservations === 0 && !transcriptTail) {
+      // The count telemetry reports is the same one the window filter would
+      // have produced — the probe applies the identical lane test, and it is
+      // zero on this branch by construction — so a gated boundary records a
+      // real 0, never the "never counted" sentinel.
+      pendingObservations = windowProbe.selfObservations;
+      if (windowProbe.lastObservationId !== undefined) {
+        // #158 check point ①. On disk from this boundary so far: nothing — the
+        // whole run to here is reads. The commit below is small but it is still
+        // a commit (a watermark this holder no longer has the right to move),
+        // so it gets the same guard as the big ones.
+        throwIfDispossessed(params.lockSignal);
+        commitBoundaryCursors(params.projectId, {
+          watermarkEventId: windowProbe.lastObservationId,
+        });
+      }
+      return {
+        consolidated: 0,
+        superseded: 0,
+        observationsProcessed: 0,
+        extractor: extractorKind,
+        backend: backendLabel,
+        outcome: "noop",
+        segmentsWritten: 0,
+        conversationSliceHeld: false,
+        extractionTruncated: false,
+      };
+    }
+
+    // #298 (#296 §Q6, #189 ㉱): ONE read, four values. `expectedHead`, the
+    // observation window, `consumed` and `existing` are all derived from this
+    // single array, so "the CAS passes while the evidence is stale" — the gap
+    // #253's compare-and-append could not close, because the evidence came from
+    // a meta cursor and the `memories` projection table, which catch up at
+    // different times than the log — becomes impossible BY CONSTRUCTION rather
+    // than by ordering discipline. Third application of the pattern, after
+    // #253 (`memory-import-service`'s `readValidMemoriesFromLog`) and #270
+    // (`projection-store`'s rebuild snapshot).
+    //
+    // `withProjectLock` around this call does NOT make the head redundant:
+    // #132's lock runs its critical section to completion even after losing it
+    // (it reports, it does not brake), and `memory-import-service` writes to
+    // the same log without taking it at all.
+    const events = await readEvents(params.projectId);
+    const expectedHead = events.at(-1)?.id ?? null;
+    const state = reduceProjectState(events, params.projectId);
+
+    // The window: everything after the event the cursor names. An id the log
+    // does not carry (gc reclaimed it before repairing the cursor) degrades to
+    // "everything", which is what `readEventsSince` did and what the dedup
+    // filter below exists to absorb.
+    const watermarkIndex = watermark ? events.findIndex((event) => event.id === watermark) : -1;
+    const eventsSince = watermarkIndex === -1 ? events : events.slice(watermarkIndex + 1);
     const rawObservationEvents = eventsSince.filter(
       (event) => event.type === "observation.captured",
     ) as DomainEvent<Observation>[];
 
     // #113 item②: consolidation must see only THIS store's own observations.
-    // `readEventsSince` has no lane concept — it scans the whole per-project
-    // db, which in a workspace union also holds synced siblings' events — so
-    // without this filter a foreign member's `observation.captured` gets
+    // The window slice has no lane concept — it comes from the whole
+    // per-project log, which in a workspace union also holds synced siblings'
+    // events — so without this filter a foreign member's
+    // `observation.captured` gets
     // distilled into a memory THIS store then asserts as self-lane truth
     // (and inflates the threshold-trigger math below). Apply the exact same
     // provenance test `listRecentObservations` uses on the projection side
@@ -2162,31 +2297,42 @@ export async function consolidate(params: ConsolidateParams): Promise<Consolidat
     );
     pendingObservations = selfObservationEvents.length;
 
-    // Dedup guard for watermark loss (see consumedObservationIds): drop
-    // observations a previous consolidation already distilled.
-    const consumed = consumedObservationIds(params.projectId);
+    // Dedup guard for watermark loss: drop observations a previous
+    // consolidation already distilled. Events survive export/migrate, but the
+    // per-project meta table (and thus the watermark) does not — without this
+    // guard a fresh meta table would make the next boundary re-consolidate the
+    // project's entire observation history into duplicate memories.
+    //
+    // #298: derived from the same array as `expectedHead`, replacing the
+    // `SELECT data FROM memories` projection query. Equivalent by construction
+    // (§Q1.2): `sourceObservationIds` rides in the `memory.consolidated`
+    // payload, the projector stores that payload unmodified, and a rebuild
+    // rewrites every row of `memories` from exactly these events.
+    //
+    // NO FILTER, deliberately — not `invalidAt`, not lane, matching the
+    // `SELECT data FROM memories` this replaces (which saw invalidated,
+    // superseded, dedup-loser and foreign-lane rows alike). Adding the
+    // `existing` filters here "for consistency" would let an INVALIDATED
+    // memory's observations count as unconsumed again and be redistilled —
+    // the very duplicate this issue closes, reopened from the other side.
+    const consumed = new Set<string>();
+    for (const event of events) {
+      if (event.type !== "memory.consolidated") continue;
+      for (const id of (event.payload as ConsolidatedMemory).sourceObservationIds ?? []) {
+        consumed.add(id);
+      }
+    }
     const observationEvents = selfObservationEvents.filter(
       (event) => !consumed.has(event.payload.id),
     );
     const observations = observationEvents.map((event) => event.payload);
 
-    // #99 cat-2: show the extractor the conversational turns since the last
-    // boundary, not just a raw tail of mostly tool I/O. cat-1: this no longer
-    // depends on an observation carrying a transcript path, so a
-    // conversation-only session (zero observations) still consolidates. The
-    // byte watermark advances only on success (below).
-    const source = params.conversation;
-    const sliceStartOffset = source ? readConversationOffset(params.projectId, source.id) : 0;
-    const slice = source ? await source.read(sliceStartOffset) : undefined;
-    const transcriptTail = slice && slice.text.length > 0 ? slice.text : undefined;
-    // #144: where this slice may be consumed PARTLY, keyed by prefix length —
-    // validated here (see `resumePointsOf`) so both the budget search below and
-    // the cursor-advance tail work from the same trusted set.
-    const resumePoints = slice ? resumePointsOf(slice, sliceStartOffset) : undefined;
-
     // Nothing to do when there are neither fresh observations NOR new
     // conversation content. Still advance the event watermark past a fully
     // consumed observation window so it is not rescanned every boundary.
+    // Reached when the cost gate above let the boundary through — a window
+    // whose self-lane observations were ALL already consumed, or a
+    // conversation-only window whose slice turned out to hold nothing new.
     if (observations.length === 0 && !transcriptTail) {
       if (rawObservationEvents.length > 0) {
         // #158 check point ①. On disk from this boundary so far: nothing — the
@@ -2211,7 +2357,15 @@ export async function consolidate(params: ConsolidateParams): Promise<Consolidat
       };
     }
 
-    const existing = listValidMemories(params.projectId).map((row) => row.memory);
+    // #298: the same predicate `listValidMemories(projectId)` applied in SQL
+    // (`invalid_at IS NULL AND source_project_id IS NULL`), applied instead to
+    // the state folded from the array above — the shape
+    // `readValidMemoriesFromLog` (`memory-import-service.ts:210-230`) already
+    // uses. The `lastAccessedAt` the projection query also returned is not
+    // missed: this call site dropped it (`.map((row) => row.memory)`).
+    const existing = Object.values(state.memories).filter(
+      (memory) => !memory.invalidAt && (memory.sourceProjectId ?? SELF_LANE) === SELF_LANE,
+    );
 
     // #113 item③: bound what gets rendered into the extraction prompt so a
     // single call can never fail purely from input size — see
@@ -2438,25 +2592,27 @@ export async function consolidate(params: ConsolidateParams): Promise<Consolidat
       // ④ (above) cannot catch, since ④ only fires once THIS holder's own
       // dispossession signal has arrived (up to one heartbeat behind the
       // takeover) and never fires at all for a writer that took no lock. It
-      // is NOT ④ made unconditional, though: CAS compares the log against
-      // the head this boundary observed, not the freshness of the EVIDENCE
-      // (`watermark`/`consumedObservationIds`, read further up) that
-      // determined `inputs` in the first place, and the two catch up at
-      // DIFFERENT times. `watermark` is a separate on-disk cursor a
-      // concurrent boundary only advances in its own `commitBoundaryCursors`,
-      // at the very end of its run. `consumedObservationIds` instead queries
-      // the `memories` projection table directly, so it catches up as soon
-      // as that boundary's `rebuildProjectProjection` call completes —
-      // earlier in that boundary's own run, but still a separate step from
-      // its `memory.consolidated` append landing. So a takeover whose append
-      // already landed BEFORE this boundary read `expectedHead` above, but
-      // whose rebuild/cursor-commit is still pending, leaves `expectedHead`
-      // correctly reflecting "no further log movement" while one or both of
-      // this boundary's evidence sources are still the pre-takeover ones —
-      // CAS passes and this boundary redistills observations the other
-      // holder just consolidated. #296 tracks closing that gap (binding the
-      // evidence itself to the log, not just gating on log movement after
-      // the fact). A refusal from what CAS DOES catch propagates: nothing
+      // is NOT ④ made unconditional, though: CAS only asks whether the log
+      // moved AFTER `expectedHead` was read, never whether the evidence that
+      // determined `inputs` was fresh at that instant.
+      //
+      // #298 closed the other half rather than widening this one. The evidence
+      // (`consumed`, `existing`) and the window used to come from the `memories`
+      // projection table and a separate `readEventsSince`, which catch up at
+      // DIFFERENT times than the log: a takeover whose append had ALREADY
+      // landed before `expectedHead` was read, but whose rebuild was still
+      // pending, left CAS correctly reporting "no further log movement" while
+      // this boundary judged on pre-takeover evidence — and redistilled what
+      // the other holder had just consolidated. All four now come from the one
+      // `readEvents` array at the top of `run()`, so evidence and head cannot
+      // disagree about which appends they saw and this branch is back to
+      // covering exactly one thing: movement after the read. (The `watermark`
+      // is the deliberate exception and needs no cover — it can only lag, never
+      // lead, since `commitBoundaryCursors` runs after the append it follows,
+      // and the log-derived `consumed` filter absorbs the wider window that
+      // lagging produces. #296 §Q4.)
+      //
+      // A refusal from what CAS DOES catch propagates: nothing
       // but the derived, self-healing segment buffer is on disk at this
       // instant and NEITHER cursor has moved, so the window stays unconsumed
       // for whoever won and `recordAttempt` (the catch around `run()`)
@@ -2666,8 +2822,8 @@ export async function consolidate(params: ConsolidateParams): Promise<Consolidat
     // point: anything after it (the truncated suffix, any self-lane
     // observation this window's dedup guard skipped, and any foreign-lane
     // event interleaved by seq — item②) stays unconsumed and is naturally
-    // re-read (and re-filtered) by the NEXT boundary, since
-    // `readEventsSince` resumes strictly after the watermark's `seq`. Computed
+    // re-read (and re-filtered) by the NEXT boundary, whose window slice
+    // resumes strictly after the event this id names. Computed
     // here but not yet written: committed together with the conversation
     // offset (computed earlier, right after `pruneSegments`), in one
     // transaction (#139).

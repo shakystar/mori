@@ -172,8 +172,10 @@
  *   than a rebuild that did not happen. Still UNSAFE for the READER, and
  *   that half is untouched here: committing only current snapshots bounds how
  *   stale a rebuild's OWN write can be, not how stale the projection a
- *   consumer (`listValidMemories`, `consumedObservationIds`) reads at the
- *   moment it reads it — #263 axis 1, open on #189.
+ *   consumer (`listValidMemories` in `memory-retrieval-service`,
+ *   `search-service`, `embeddings-service`) reads at the moment it reads it —
+ *   #263 axis 1, open on #189. `consolidateBoundary` is no longer one of those
+ *   consumers: #298 derives its whole basis from the log instead.
  * - `ensureEmbeddings` — SAFE ENOUGH: a keyed UPSERT into `embeddings`, a
  *   table this rebuild never touches, so a stale write is not "healed by the
  *   next rebuild" (an earlier draft's error) but by that entity's own next
@@ -353,9 +355,11 @@
  * recovery: A's own stale replace-all (T5 as it stood before #270 refused it)
  * already wrote A's memory for the
  * shared part of the window into the projection, so the next boundary's
- * `consumedObservationIds` dedup guard (`consolidate-service.ts`'s
- * `consolidate()`) suppresses those
- * same observations again regardless of where the watermark points — what a
+ * `consumed` dedup guard (`consolidate-service.ts`'s `consolidate()`)
+ * suppresses those
+ * same observations again regardless of where the watermark points — since
+ * #298 that guard reads the `memory.consolidated` payloads out of the log
+ * itself, so it no longer even depends on A's replace-all having landed — what a
  * pre-#225 rollback recovered was B's memory, not A's, and only for the part
  * of B's window A's target did not already reach. ①'s guard rejecting the
  * rollback is correct either way — the duplicate was the actual defect — but
