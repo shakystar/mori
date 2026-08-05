@@ -161,8 +161,19 @@
  *   `commitBoundaryCursors` re-verifies LIVE, inside its own commit
  *   transaction, that those ids are still rows before advancing the
  *   conversation offset they justify (see below, and ① below).
- * - `rebuildProjectProjection` — UNSAFE: a stale replace-all can overwrite a
- *   newer projection (see below).
+ * - `rebuildProjectProjection` — the lock-free replace-all races exactly as
+ *   before (see below); what #270 closes is the write it used to land on a
+ *   snapshot the log had already moved past. The rebuild no longer trusts the
+ *   `readEvents` array it computed from — it carries THAT read's own head as a
+ *   token and re-compares it LIVE, inside its own IMMEDIATE write transaction,
+ *   before the first DELETE. A successor's rows are therefore no longer
+ *   overwritten by an older state: the stale rebuild writes nothing, re-reads,
+ *   and (past `REBUILD_STALE_HEAD_RETRIES`) reports `committed: false` rather
+ *   than a rebuild that did not happen. Still UNSAFE for the READER, and
+ *   that half is untouched here: committing only current snapshots bounds how
+ *   stale a rebuild's OWN write can be, not how stale the projection a
+ *   consumer (`listValidMemories`, `consumedObservationIds`) reads at the
+ *   moment it reads it — #263 axis 1, open on #189.
  * - `ensureEmbeddings` — SAFE ENOUGH: a keyed UPSERT into `embeddings`, a
  *   table this rebuild never touches, so a stale write is not "healed by the
  *   next rebuild" (an earlier draft's error) but by that entity's own next
@@ -267,13 +278,14 @@
  * downstream retargeted, the new one leaves no row to orphan. Cleaning up
  * orphans that predate #255 is idea #189's, not this doc's.
  *
- * ### The lock-free replace-all that is not safe: `rebuildProjectProjection` (Codex P2, PR #225)
+ * ### The lock-free replace-all, and what it refuses to commit since #270: `rebuildProjectProjection` (Codex P2, PR #225)
  *
  * The entity tables (`memories`, `tasks`, `decisions`, ...) do not get the
  * same pass. `rebuildProjectProjection` snapshots the event log with
  * `readEvents` before its `await`s, and its write transaction later replaces
  * those tables wholesale from that snapshot — so a successor who commits a
- * newer one in between is not merged with, but OVERWRITTEN BY, the stale one:
+ * newer one in between used to be not merged with, but OVERWRITTEN BY, the
+ * stale one:
  *
  * ```
  * T1  A passes ④, the memory.consolidated append lands on disk
@@ -293,16 +305,37 @@
  * T4  B runs a boundary of its own: append, rebuild, cursor commit — the full
  *     sequence, though T5 below only needs B's first two to land before it;
  *     see the requirement note past this diagram
- * T5  A wakes, replaces the projection tables from its T2 snapshot — B's
- *     memories vanish from the projection (the event log still has them)
+ * T5  A wakes and opens its write transaction. PRE-#270 it replaced the
+ *     projection tables from its T2 snapshot and B's memories vanished from
+ *     the projection (the event log still had them). SINCE #270 the first
+ *     thing inside that transaction is the head re-check, which sees B's
+ *     T4 append and not A's T2 token, so A writes nothing at all — not one
+ *     DELETE, and not the topic `.md` files either — and goes back to T2 for
+ *     a fresh snapshot, one that now contains B's events
  * T6  A's commitBoundaryCursors compares against stored state and loses — ①'s
  *     monotonic guard correctly drops A's target, so the watermark stays at
  *     B's, not A's
  * ```
  *
- * The result is a store that says the window is consumed (the watermark is
- * past it) while the projection cannot show what it was consumed INTO (B's
- * memories are missing from it) — until something rebuilds again.
+ * The pre-#270 result was a store that said the window was consumed (the
+ * watermark is past it) while the projection could not show what it was
+ * consumed INTO (B's memories missing from it) — until something rebuilt
+ * again. Since #270 that specific divergence does not open: the only writes
+ * that land are ones whose snapshot was still the log's head when the write
+ * transaction took its lock, so the projection never regresses behind an
+ * append it has already shown. What replaces it is a WEAKER outcome, not
+ * nothing — A can exhaust its retries on a store that keeps moving and return
+ * `committed: false`, leaving the projection exactly as B left it (B's rows
+ * intact, A's own appended events not yet projected) until the next rebuild
+ * that completes. That is the same "recovery is bounded by the next capture
+ * or boundary that RUNS TO COMPLETION" the paragraphs below describe, reached
+ * without overwriting anyone.
+ *
+ * What #270 does NOT give — and the reason this section's classification above
+ * stays qualified — is freshness for a READER. A consumer that reads the
+ * projection between B's append and B's rebuild still sees a state older than
+ * the log, exactly as before; #270 constrains who may write, not when the
+ * write has happened by. That half is #263's axis 1, still open on #189.
  *
  * PR #225 changed what that "until" costs — though not as unconditionally as
  * an earlier draft of this doc claimed (Codex P2 on PR #245, corrected here).
@@ -317,7 +350,8 @@
  * ordinary duplicate distillation #132 exists to remove, not an additional
  * loss. And even where a gap does open, "reprocessed B's window
  * deterministically, and ITS rebuild restored the projection" overstates the
- * recovery: A's own stale replace-all (T5) already wrote A's memory for the
+ * recovery: A's own stale replace-all (T5 as it stood before #270 refused it)
+ * already wrote A's memory for the
  * shared part of the window into the projection, so the next boundary's
  * `consumedObservationIds` dedup guard (`consolidate-service.ts`'s
  * `consolidate()`) suppresses those
@@ -344,7 +378,10 @@
  * boundary rebuilds whenever it wrote anything (`inputs.length > 0 ||
  * segmentsWritten > 0`), and every capture attempts one — so recovery is
  * bounded by the next capture or boundary that RUNS TO COMPLETION, not
- * strictly the next one attempted. On an active project that is still
+ * strictly the next one attempted. #270 adds one more way an attempted
+ * rebuild declines to write (losing its head CAS past the retry cap, above),
+ * which lengthens that bound in exactly the contended case where the OLD
+ * behavior would have written the wrong thing instead. On an active project that is still
  * minutes, not indefinite; a project whose captures keep landing mid-takeover
  * (a pathological run of bad luck, not the typical case) could see it
  * stretch further. The damage stays observation staleness, never permanent
@@ -384,7 +421,14 @@
  * cannot: a projection write that fails against a newer snapshot instead of
  * silently winning against it (a compare-and-swap on the replace-all, or
  * removing the lock-free write entirely). That is a storage-layer change, not
- * a lock one, and is out of this issue's scope — see idea #189.
+ * a lock one, and was out of the scope of the issue this paragraph was written
+ * for. #270 has since taken the first of those two options for the replace-all
+ * — the head CAS described above — so the projection write is no longer the
+ * part that silently wins. What the same three-party race can still cost is
+ * the appends made around it: `detectContradictions`'s non-idempotent
+ * `memory.superseded` + `conflict.detected` pair (above), and the staleness a
+ * consumer reads between an append and the rebuild that projects it (#263 axis
+ * 1). Both remain open on idea #189.
  *
  * What did NOT change is ⑤: the signal is a way out from INSIDE `fn`, never a
  * way to settle the wait around it. `withProjectLock` still returns only once
