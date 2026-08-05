@@ -118,13 +118,43 @@ export interface RebuildProjectProjectionOptions {
   /**
    * Whether to reindex the `search_fts` table as part of the rebuild.
    * Defaults to `true` (every existing call site is unchanged). Pass
-   * `false` ONLY when the triggering event(s) cannot create or modify any
-   * searchable entity (task / handoff / decision / checkpoint /
-   * imported-topic rule) — e.g. pure session-state events like heartbeats.
+   * `false` ONLY when BOTH hold: (1) the triggering event(s) cannot create
+   * or modify any searchable entity (task / handoff / decision / checkpoint
+   * / imported-topic rule / memory / segment) — e.g. pure session-state
+   * events like heartbeats — AND (2) no OTHER writer can have appended a
+   * searchable entity to this project's log since the last
+   * `reindexSearch: true` rebuild.
+   *
+   * (2) is NOT a property of the triggering event alone: every rebuild
+   * replays the FULL log (`attemptProjectionRebuild`), so a searchable
+   * entity ANY writer appended is already reflected in the projection
+   * TABLES below (unconditional) the moment any rebuild runs, but only
+   * reaches `search_fts` on a `reindexSearch: true` rebuild — skip the
+   * wipe/reindex while such an entity is unindexed and it stays
+   * unindexed until the next full reindex. (#277, #189 residue ㉮.)
+   *
+   * Today (2) holds for capture-service.ts's `captureObservation` — the
+   * only `reindexSearch: false` caller — because every call path that CAN
+   * create a searchable entity (`consolidateBoundary` in
+   * consolidate-service.ts, and `detectContradictions` nested inside it)
+   * always requests `reindexSearch: true` AND runs under the same
+   * per-project `withProjectLock` (project-lock.ts) as capture, so it
+   * cannot interleave with it. The two service functions that also default
+   * to `reindexSearch: true` but are NOT lock-protected — `importMemories`
+   * (memory-import-service.ts) and `resolveConflict` (conflict-service.ts)
+   * — have no reachable caller in this package's current wiring (neither is
+   * exported from `index.ts`, nor called from `SqliteMemoryKernel`), so
+   * they cannot race capture in production as it stands. This is an
+   * invariant spread across four files, not something the type system
+   * enforces: a future writer that can create a searchable entity while
+   * skipping the reindex, or a new caller that reaches `importMemories` /
+   * `resolveConflict` outside the project lock, would silently reopen this
+   * gap — grep this file's `SearchKind` producers before adding one.
+   *
    * Skipping the reindex leaves the existing `search_fts` rows untouched
-   * (still valid, since no searchable entity changed) while the projection
-   * TABLES are still fully rebuilt. Over-reindexing is correct (just
-   * slower); skipping when a searchable entity changed is a BUG.
+   * while the projection TABLES are still fully rebuilt. Over-reindexing is
+   * correct (just slower); skipping while a searchable entity may be
+   * unindexed is a BUG.
    */
   reindexSearch?: boolean;
 }
@@ -313,8 +343,13 @@ async function attemptProjectionRebuild(
     // search_fts is a replace-all sink too — wipe then repopulate within the
     // same tx (per-project db, so the unqualified DELETE is correct). When
     // reindexSearch is false we skip the wipe AND every indexEntity call, so
-    // the existing FTS rows survive (still valid — no searchable entity
-    // changed) while the projection tables above are still fully rebuilt.
+    // the existing FTS rows survive untouched while the projection tables
+    // above (unconditional, from the same full-log replay) are still fully
+    // rebuilt. That divergence is only safe under the invariant spelled out
+    // on `RebuildProjectProjectionOptions.reindexSearch` above (#277): today
+    // nothing that can create a searchable entity runs with
+    // reindexSearch:false or outside this project's lock while a
+    // reindexSearch:false rebuild is in flight.
     if (reindexSearch) {
       db.prepare("DELETE FROM search_fts").run();
     }
