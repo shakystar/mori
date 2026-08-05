@@ -2454,7 +2454,7 @@ export async function consolidate(params: ConsolidateParams): Promise<Consolidat
       // correctly reflecting "no further log movement" while one or both of
       // this boundary's evidence sources are still the pre-takeover ones —
       // CAS passes and this boundary redistills observations the other
-      // holder just consolidated. #263 tracks closing that gap (binding the
+      // holder just consolidated. #296 tracks closing that gap (binding the
       // evidence itself to the log, not just gating on log movement after
       // the fact). A refusal from what CAS DOES catch propagates: nothing
       // but the derived, self-healing segment buffer is on disk at this
