@@ -121,69 +121,84 @@ export interface RebuildProjectProjectionOptions {
    * `false` ONLY when BOTH hold: (1) the triggering event(s) cannot create
    * or modify any searchable entity (task / handoff / decision / checkpoint
    * / imported-topic rule / memory / segment) — e.g. pure session-state
-   * events like heartbeats — AND (2) no OTHER writer can have created or
-   * modified a searchable entity since the last `reindexSearch: true`
-   * rebuild, through EITHER channel: an event-log append, or a direct write
-   * to a table this rebuild reads without going through the log at all
-   * (segments: `insertSegments` in consolidate-service.ts writes the
-   * `segments` table directly — no event is appended — and this rebuild's
-   * `listSegments(projectId, "union")` reads it back on every full reindex).
+   * events like heartbeats — AND (2) every searchable entity currently
+   * reachable from the log or from a direct table write (segments) is
+   * ALREADY in `search_fts`, not merely covered by a `reindexSearch: true`
+   * rebuild that was requested.
    *
-   * (2) is NOT a property of the triggering event alone: every rebuild
-   * replays the FULL log (`attemptProjectionRebuild`), so a searchable
-   * entity ANY writer appended — or, for segments, wrote directly — is
-   * already reflected in the projection TABLES below (unconditional) the
-   * moment any rebuild runs, but only reaches `search_fts` on a
-   * `reindexSearch: true` rebuild — skip the wipe/reindex while such an
-   * entity is unindexed and it stays unindexed until the next full reindex.
-   * (#277, #189 residue ㉮.) Reasoning about (2) purely as "did anything
-   * append to the log" misses the segment path (PR #279 review, Codex P2):
-   * a conversation-only consolidation boundary (no memories extracted, so no
-   * `memory.consolidated` append) can still write segments directly.
+   * (#277, #189 residue ㉮; corrected after owner review — the first cut of
+   * this doc conflated "requested" with "indexed" and is why (2) below
+   * matters.) Every rebuild replays the FULL log
+   * (`attemptProjectionRebuild`), so a searchable entity ANY writer
+   * appended — or, for segments, wrote directly via `insertSegments`
+   * (consolidate-service.ts) — lands in the projection TABLES below
+   * (unconditional) the moment ANY rebuild runs, `false` or `true` alike.
+   * It only reaches `search_fts` on a `reindexSearch: true` rebuild that
+   * ACTUALLY COMMITS — skip the wipe/reindex while such an entity is
+   * unindexed and it stays unindexed until a later reindex both requests
+   * `true` and commits.
    *
-   * Today (2) holds for capture-service.ts's `captureObservation` — the
-   * only `reindexSearch: false` caller — because every call path that CAN
-   * create or modify a searchable entity, through either channel, always
-   * requests `reindexSearch: true`:
-   * - `consolidateBoundary` (consolidate-service.ts) requests it
-   *   unconditionally, including on the segments-only branch above — its own
-   *   `rebuildProjectProjection` call is gated on `inputs.length > 0 ||
-   *   segmentsWritten > 0`, not on whether an event was appended, so the
-   *   direct-write segment path above still gets a `reindexSearch: true`
-   *   rebuild from the SAME call that did the writing.
-   * - `detectContradictions`, nested inside it, requests it too.
+   * "Requested `reindexSearch: true`" is not the same as "committed one".
+   * `rebuildProjectProjection` can lose its compare-and-swap and, after
+   * `REBUILD_STALE_HEAD_RETRIES` retries, return `{ committed: false }`
+   * instead of writing anything (see that type's doc) — and its two
+   * `reindexSearch: true` callers do not check the return value:
+   * `consolidateBoundary` (consolidate-service.ts:2591-2592) calls it and
+   * falls straight through to `commitBoundaryCursors` (:2654) regardless of
+   * the result, advancing the boundary's cursor past events whose
+   * true-reindex never landed; `detectContradictions`, nested inside it
+   * (contradiction-service.ts:304), does the same. When that happens, the
+   * entities those events created sit in the projection TABLES (any
+   * subsequent rebuild, including a `false` one, puts them there
+   * unconditionally) but not in `search_fts`, until some LATER rebuild both
+   * requests `true` and commits.
    *
-   * Under NORMAL operation this cannot interleave with capture: all three
-   * run under the same per-project `withProjectLock` (project-lock.ts). That
-   * lock is not absolute mutual exclusion, though, and this invariant leans
-   * on it — project-lock.ts's "The overlap that remains" documents a narrow,
-   * pre-existing race (lock dispossession + a third acquirer racing a
-   * restore) where a dispossessed holder's tail — which is exactly
-   * `rebuildProjectProjection`/`detectContradictions` above, both already
-   * marked UNSAFE-to-the-replace-all there for unrelated reasons — can still
-   * be in flight when a new holder starts a `reindexSearch: false` capture.
-   * That race is not introduced or widened by this invariant (it predates
-   * #277 and affects other lock-protected sections the same way), is not
-   * evaluated further here, and is the one condition under which (2) can
-   * fail today (PR #279 review, Codex P2).
+   * What actually makes a true-reindex lose its CAS, today: not ordinary
+   * concurrent activity — every `reindexSearch: true` caller
+   * (`consolidateBoundary`, `detectContradictions`) runs under the same
+   * per-project `withProjectLock` (project-lock.ts) as `captureObservation`,
+   * and the two functions that default to `reindexSearch: true` without
+   * that lock — `importMemories` (memory-import-service.ts) and
+   * `resolveConflict` (conflict-service.ts) — have no reachable caller in
+   * this package's current wiring (neither exported from `index.ts`, nor
+   * called from `SqliteMemoryKernel`), so they cannot move the head from
+   * outside the lock in production as it stands. Under an otherwise-normal
+   * lock, only ANOTHER writer moving the head during this rebuild's own
+   * read-to-write window can cost it the CAS, and the sole documented way
+   * that happens today is project-lock.ts's own "The overlap that remains":
+   * a dispossessed holder's tail — `rebuildProjectProjection`/
+   * `commitBoundaryCursors` included, per that file's "check points stop"
+   * section, which places both AFTER the last check point, i.e. unable to
+   * bail out even once dispossession is noticed — can still be racing a new
+   * holder's writes. That race was already tracked there as UNSAFE for the
+   * table replace-all; what's new here is that its FTS-side fallout does
+   * NOT get the same self-heal the tables get, because the caller ignores
+   * `committed` and advances anyway. This is not a second, independent
+   * concurrency condition — it is that pre-existing race's consequence on
+   * `search_fts` specifically, not merely on the tables.
    *
-   * The two service functions that also default to `reindexSearch: true`
-   * but are NOT lock-protected — `importMemories` (memory-import-service.ts)
-   * and `resolveConflict` (conflict-service.ts) — have no reachable caller
-   * in this package's current wiring (neither is exported from `index.ts`,
-   * nor called from `SqliteMemoryKernel`), so they cannot race capture in
-   * production as it stands. This is an invariant spread across four files,
-   * not something the type system enforces: a future writer that can create
-   * or modify a searchable entity (through a log append OR a direct table
-   * write) while skipping the reindex, or a new caller that reaches
-   * `importMemories` / `resolveConflict` outside the project lock, would
-   * silently reopen this gap — grep this file's `SearchKind` producers
-   * before adding one.
+   * Self-healing exists but is NOT bounded: the next `search_fts` catch-up
+   * needs a LATER boundary whose own `reindexSearch: true` rebuild both
+   * runs — `consolidateBoundary` gates it on `inputs.length > 0 ||
+   * segmentsWritten > 0`; `detectContradictions` gates its own on
+   * `results.length > 0` — and commits. A run of quiet boundaries (nothing
+   * extracted, nothing superseded, no segments written) leaves the gap open
+   * indefinitely, the same caveat `docs/compaction-consolidation-boundary.md`
+   * §2.1 already makes about boundary cadence, applied here to `search_fts`
+   * specifically.
+   *
+   * This is an invariant spread across four files, not something the type
+   * system enforces: a future writer that can create or modify a searchable
+   * entity (through a log append OR a direct table write) while skipping
+   * the reindex, or a new caller that reaches `importMemories` /
+   * `resolveConflict` outside the project lock, would widen this gap —
+   * grep this file's `SearchKind` producers before adding one.
    *
    * Skipping the reindex leaves the existing `search_fts` rows untouched
    * while the projection TABLES are still fully rebuilt. Over-reindexing is
    * correct (just slower); skipping while a searchable entity may be
-   * unindexed is a BUG.
+   * unindexed is a BUG — and per the above, "unindexed" can already be true
+   * before this `false` rebuild ever runs, not just introduced by it.
    */
   reindexSearch?: boolean;
 }
@@ -375,14 +390,14 @@ async function attemptProjectionRebuild(
     // the existing FTS rows survive untouched while the projection tables
     // above (unconditional, from the same full-log replay) are still fully
     // rebuilt. That divergence is only safe under the invariant spelled out
-    // on `RebuildProjectProjectionOptions.reindexSearch` above (#277): today
-    // nothing that can create or modify a searchable entity — via a log
-    // append OR a direct table write (e.g. segments) — runs with
-    // reindexSearch:false or outside this project's lock while a
-    // reindexSearch:false rebuild is in flight, EXCEPT the pre-existing,
-    // separately-tracked lock-dispossession race documented on
-    // project-lock.ts's "The overlap that remains" (not evaluated further
-    // here — see the option doc above).
+    // on `RebuildProjectProjectionOptions.reindexSearch` above (#277): every
+    // searchable entity already in these tables must have reached
+    // `search_fts` via a `reindexSearch: true` rebuild that COMMITTED, not
+    // merely one that was requested — `consolidateBoundary` requests one
+    // unconditionally on this path but does not check whether it committed
+    // before advancing its cursor (see the option doc for the code sites and
+    // for why, today, only project-lock.ts's pre-existing "overlap that
+    // remains" can cost that rebuild its compare-and-swap).
     if (reindexSearch) {
       db.prepare("DELETE FROM search_fts").run();
     }
