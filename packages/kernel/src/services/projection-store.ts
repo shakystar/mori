@@ -24,7 +24,7 @@ import {
 import type { MemoryRecord, ObservationRecord, ProjectState } from "../projections/projector.js";
 import { getDb } from "../storage/db.js";
 import { listSegments } from "./segment-store.js";
-import { readEvents, readEventsUpTo } from "../storage/event-store.js";
+import { headEventId, readEvents, readEventsUpTo } from "../storage/event-store.js";
 import { readJson, writeJson } from "../storage/fs-utils.js";
 import { getTopicFile } from "../storage/path-resolver.js";
 
@@ -151,22 +151,99 @@ function latestImportedRules(rules: Record<string, Rule>): Rule[] {
   return [...byTitle.values()];
 }
 
+/** What a {@link rebuildProjectProjection} call did. */
+export interface RebuildProjectProjectionResult {
+  /**
+   * True when the projection tables were actually replaced from a snapshot
+   * still current at commit time. False when every attempt lost the
+   * compare-and-swap below and NOTHING was written — the projection still
+   * shows whatever the winning writer left, and the events this call read are
+   * in the log, waiting for the next rebuild that completes.
+   *
+   * Widened from `void` (#270) rather than throwing: see
+   * {@link REBUILD_STALE_HEAD_RETRIES}. Callers that ignore the result keep
+   * the pre-#270 behavior, which is what all five of them do today.
+   */
+  committed: boolean;
+}
+
+/**
+ * Extra attempts {@link rebuildProjectProjection} spends re-reading the log
+ * after losing the snapshot compare-and-swap (#270). Two, matching
+ * `memory-import-service`'s `IMPORT_STALE_HEAD_RETRIES` and for the same
+ * reason: each retry costs one full log replay, and a store contended enough
+ * to lose three in a row has a problem a fourth replay will not solve.
+ *
+ * Why exhaustion RETURNS (`committed: false`) instead of throwing. This
+ * function is `await`ed on `captureObservation`'s hot path and in three
+ * post-append tails (`consolidate`, `importMemories`, `detectContradictions`);
+ * in all four the events are already durable when the rebuild runs. Throwing
+ * would convert a lost race — whose loser is by construction the writer whose
+ * snapshot is the OLDER one — into a caller-visible failure of work that
+ * actually succeeded, which is exactly the "quietly turning a real failure
+ * into a wrong-looking success" trap `importMemories` documents at its own
+ * retry loop (it deliberately retries only BEFORE its append for that reason).
+ * And the loss is self-healing rather than silent: the writer that won the CAS
+ * appended, and every append path in the kernel rebuilds after appending, so
+ * its rebuild reads a log that contains this call's events too.
+ */
+const REBUILD_STALE_HEAD_RETRIES = 2;
+
 /**
  * Recompute the full projection from the event log and replace every
  * projection table in a SINGLE transaction (replace-all semantics).
  * reduceProjectState is the single reduction authority; this function is only
  * the persistence sink. Topic `.md` files are written outside the transaction
  * (they are filesystem content, not table rows).
+ *
+ * #270 (#263 candidate ①, #189 residue): the replace-all is now conditional on
+ * the log not having moved under it. The snapshot the tables are computed from
+ * is certified by the head of THAT VERY READ, and the write transaction
+ * re-checks that head, inside itself, before deleting anything — so a rebuild
+ * that slept through a successor's whole boundary no longer overwrites the
+ * successor's projection with its own older state (`storage/project-lock.ts`,
+ * "The lock-free replace-all"). What it does NOT give is freshness for the
+ * READER: this bounds how stale a committed rebuild can be, not how stale the
+ * projection a consumer reads is (#263 axis 1, still open on #189).
  */
 export async function rebuildProjectProjection(
   projectId: string,
   opts: RebuildProjectProjectionOptions = {},
-): Promise<void> {
+): Promise<RebuildProjectProjectionResult> {
   const reindexSearch = opts.reindexSearch ?? true;
+  for (let attempt = 0; ; attempt += 1) {
+    // Nothing is written on a lost attempt (the CAS sits before the first
+    // DELETE, inside the transaction), so re-reading the log and recomputing
+    // is a clean retry, not a partial redo.
+    if (await attemptProjectionRebuild(projectId, reindexSearch)) return { committed: true };
+    if (attempt >= REBUILD_STALE_HEAD_RETRIES) {
+      process.stderr.write(`WARN: projection rebuild deferred (${projectId}, log kept moving)\n`);
+      return { committed: false };
+    }
+  }
+}
+
+/**
+ * One attempt of the replace-all: read the log, compute every table, and
+ * commit only if the head is still the one the read saw. Returns false when
+ * the head moved (nothing written at all), true when the projection was
+ * replaced.
+ */
+async function attemptProjectionRebuild(
+  projectId: string,
+  reindexSearch: boolean,
+): Promise<boolean> {
+  // #270: the snapshot AND the token certifying it come from one array — the
+  // head of this very read, never a second head query against the store, which
+  // would open a fresh ordering window between the two. Same shape as
+  // `memory-import-service`'s `readValidMemoriesFromLog` (#253) and the dedup
+  // snapshot in #262.
+  const events = await readEvents(projectId);
+  const snapshotHead = events.at(-1)?.id ?? null;
   // Pass the store's own id as the authoritative self identity so a workspace
   // union (multiple members' project.created) reduces without mis-anchoring self
   // by seq order or throwing on a foreign genesis (SoT-021/022).
-  const state = reduceProjectState(await readEvents(projectId), projectId);
+  const state = reduceProjectState(events, projectId);
   if (!state.project) {
     throw new Error(`Project ${projectId} has no project.created event`);
   }
@@ -206,7 +283,25 @@ export async function rebuildProjectProjection(
     : [];
 
   const db = getDb(projectId);
+  let committed = false;
   const writeAll = db.transaction(() => {
+    // #270 compare-and-swap. Every table below is replaced from `events`, a
+    // snapshot taken before this function's awaits; if the log has moved since,
+    // that snapshot is missing another writer's appends and writing it would
+    // ERASE their projection rows (the successor's memories vanish while the
+    // log still has them — `storage/project-lock.ts`'s T1–T6). Refusing here
+    // costs one recompute; committing costs the other writer's state.
+    //
+    // Inside the transaction, not before it, and the transaction is IMMEDIATE
+    // (below) — the same reasoning `consolidate-service.ts`'s
+    // `commitBoundaryCursors` and `embeddings-service.ts`'s
+    // `upsertSegmentEmbeddingIfLive` already spell out: the value read is one
+    // ANOTHER PROCESS writes, so the read and the write it gates must not be
+    // separable. A deferred BEGIN takes its write lock only at the first
+    // DELETE, which leaves this compare reading a snapshot a competing writer
+    // can append over before the wipe lands — the guard would then pass on
+    // exactly the stale basis it exists to reject.
+    if ((headEventId(db) ?? null) !== snapshotHead) return;
     // Retrieval reinforcement (`last_accessed_at`, `injection_count`) is NOT
     // wiped and re-derived here: it lives in `memory_access` (v17, #235),
     // which is absent from the two table lists below on purpose, so the
@@ -460,8 +555,13 @@ export async function rebuildProjectProjection(
     for (const seg of listSegments(projectId, "union")) {
       indexEntity(seg.id, "segment", seg.text, seg.sourceProjectId ?? null);
     }
+    committed = true;
   });
-  writeAll();
+  writeAll.immediate();
+  // Nothing was written — including the topic `.md` files below, which are
+  // derived from the same rejected snapshot and would push its (stale) rule
+  // bodies onto disk where no transaction can take them back.
+  if (!committed) return false;
 
   // Topic content files: imported rules become readable `.md` topics that the
   // memory index points at via mustReadTopics[].path. These are content
@@ -477,6 +577,7 @@ export async function rebuildProjectProjection(
         }),
       ),
   );
+  return true;
 }
 
 // --- read side -------------------------------------------------------------

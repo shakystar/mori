@@ -153,8 +153,15 @@ export function isStaleHeadError(error: unknown): error is StaleHeadError {
  *  answered on the connection whose transaction it is already inside — going
  *  back through `getDb` there would be the same connection anyway, but taking
  *  it as an argument is what makes "this read is inside the transaction"
- *  visible at the call site rather than incidental. */
-function headEventId(db: Database.Database): string | undefined {
+ *  visible at the call site rather than incidental.
+ *
+ *  Exported (#270) for the same reason from OUTSIDE this module:
+ *  `rebuildProjectProjection`'s replace-all re-checks the head inside its own
+ *  IMMEDIATE transaction, and `readHeadEventId` — async, and resolving the
+ *  connection itself — cannot be called from a better-sqlite3 transaction
+ *  callback at all. Taking the `db` keeps that call site honest about which
+ *  connection (and therefore which transaction) the read happens on. */
+export function headEventId(db: Database.Database): string | undefined {
   const row = db.prepare("SELECT id FROM events ORDER BY seq DESC LIMIT 1").get() as
     { id: string } | undefined;
   return row?.id;
