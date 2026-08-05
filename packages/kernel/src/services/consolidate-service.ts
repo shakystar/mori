@@ -2603,20 +2603,30 @@ export async function consolidate(params: ConsolidateParams): Promise<Consolidat
     // boundary appended do still reach the projection TABLES (any later
     // rebuild replays the full log unconditionally, `reindexSearch: false`
     // ones included), but they reach `search_fts` only via a LATER rebuild
-    // that both requests `reindexSearch: true` AND commits — and the gate
-    // right below makes requesting one conditional on a boundary having new
-    // memories or new segments, so a run of quiet boundaries leaves them
-    // unsearchable with no bound on how long. Partial in-boundary cover exists
-    // but is doubly conditional: `detectContradictions` further down defaults
-    // to `reindexSearch: true`, so on a boundary where it actually supersedes
-    // something its own rebuild replays this boundary's memories into
-    // `search_fts` too — provided THAT rebuild commits, which it reports and
-    // its caller likewise drops.
+    // that both requests an effective `reindexSearch: true` AND commits — and
+    // the gate right below makes THIS boundary's request conditional on new
+    // memories or new segments, so a run of quiet boundaries requests none.
+    // Partial in-boundary cover exists but is doubly conditional:
+    // `detectContradictions` further down defaults to `reindexSearch: true`,
+    // so on a boundary where it actually supersedes something its own rebuild
+    // replays this boundary's memories into `search_fts` too — provided THAT
+    // rebuild commits, which it reports and its caller likewise drops.
     //
-    // Deliberately NO policy here. What this call site should do with
-    // `committed: false` is not decided yet — #282 priced the candidates
-    // (hold the cursor / retry inline / durable recovery marker) and the
-    // implementation issue is owner's to cut.
+    // The policy IS settled now (#284, cutting #282's recommendation), and for
+    // this call site the policy is to do NOTHING with `committed: false` — so
+    // the drop above is deliberate, not a gap left to fill here. The recovery
+    // sits one layer down, inside `rebuildProjectProjection`: it writes a
+    // write-ahead marker to `meta` before every effective-`true` rebuild and
+    // clears it only in the transaction that repopulated `search_fts`, so a
+    // rebuild that loses its CAS leaves the marker standing and the NEXT
+    // rebuild of this project — including the `reindexSearch: false` one every
+    // capture runs, which needs no gate here at all — is promoted to `true`
+    // and closes the gap. That is why "a run of quiet boundaries" above is no
+    // longer unbounded, and why none of the five call sites had to change.
+    // Holding the cursor here instead was priced and rejected (#282): the
+    // dedup guards that would have to absorb the rescan skip empty
+    // `sourceObservationIds` outright, trading a rare race for certain
+    // duplicate memories.
     if (inputs.length > 0 || segmentsWritten > 0) {
       await rebuildProjectProjection(params.projectId, { reindexSearch: true });
     }
