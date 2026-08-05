@@ -31,6 +31,21 @@ import { forAll } from "../support/property.js";
  * does a full appendEvents+rebuildProjectProjection round trip comparable to
  * one existing `memory-import.test.ts` case, so 30 runs costs about as much
  * as 30 ordinary test cases. See the PR body for measured wall-clock.
+ *
+ * #261 — flagged as a possible timeout risk under full-suite concurrency at
+ * the repo root (`pnpm exec vitest run`, no file filter — the exact command
+ * `.github/workflows/recheck-open-prs.yml` runs against every open PR).
+ * Measured per-test duration on CI (`ubuntu-latest`) after #244 (root path
+ * honors this package's 20000ms testTimeout instead of vitest's silent
+ * 5000ms default), across both that root path and the `turbo run test` gate
+ * path (`ci.yml` build-and-test) — see the PR body for the full run list and
+ * reporter output. Observed max across all runs stayed under ~900ms, ~22x
+ * under the 20000ms testTimeout — comfortably above the #223 bar (4x the
+ * observed tail). Verdict: no fix, no code changed by #261.
+ *
+ * The 20000ms+ report that opened #261 came from a developer sandbox running
+ * the full suite concurrently on a 2-core local box, not CI (see #185 — that
+ * box measures ~10x slower than CI) — it doesn't indicate a CI-side risk.
  */
 
 let sandbox: string;
