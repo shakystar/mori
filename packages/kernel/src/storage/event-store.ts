@@ -256,9 +256,19 @@ export interface AppendEventsOptions {
    * while the caller's basis is behind the log. See #296
    * (`docs/consolidate-evidence-binding-adjudication.md`), which adjudicated
    * that gap for `consolidateBoundary` and closed it by binding the basis to
-   * the log: derive the basis and this head from ONE `readEvents` array and
-   * the two cannot disagree about which appends they saw, which is the shape
-   * every caller of this option now uses (#253, #270, #298).
+   * the log: derive the basis from a `readEvents` array instead of from a
+   * separately-advanced cursor or projection, and it can no longer be behind
+   * the log at all. That is the shape every caller of this option now uses
+   * (#253, #270, #298).
+   *
+   * Binding the basis does NOT relax the ordering rule above — it is what makes
+   * the rule sufficient. Keep stamping this head first and reading every basis
+   * after it: a caller whose basis is a log replay can then prove the two agree
+   * (nothing landed in between, or the check refuses), and a caller with a
+   * basis the log cannot express at all — `consolidateBoundary`'s conversation
+   * slice — gets the only cover available to it, since there is no array to
+   * derive that one from. #298 (PR #299 review) shipped the reverse order for
+   * exactly one basis and reopened the gap on that axis.
    */
   expectedHead?: string | null;
 }

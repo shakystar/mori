@@ -174,4 +174,90 @@ describe("consolidateBoundary evidence binding (#298, #189 ㉱)", () => {
     // does, so a foreign-only window is not rescanned on every boundary.
     expect(getConsolidateWatermark(projectId)).toBe(head);
   });
+
+  // PR #299 owner review: the same shape on the CONVERSATION axis. The slice is
+  // evidence too — it becomes segments and extraction input — but it cannot be
+  // derived from the log, so the only thing that can cover it is being read
+  // AFTER `expectedHead` is stamped. Read before the stamp, an opponent's
+  // `memory.consolidated` landing in between passes the CAS while this boundary
+  // re-distills a slice the opponent already consumed, and nothing downstream
+  // absorbs that: segment ids are minted rather than content-derived, and the
+  // offset cursor is monotone (it refuses a rewind, not a repeat).
+  it("does not redistill a conversation slice when the opponent's append lands after this boundary read that slice", async () => {
+    // The head as of before the opponent appends — what this boundary must
+    // stamp if it reads the log before it reads the conversation.
+    const headBeforeOpponent = (await readEvents(projectId)).at(-1)!.id;
+    const text = "USER: should we ship the cursor rewrite?\n\nAGENT: yes, behind the flag";
+    const opponentMemory = createConsolidatedMemory({
+      projectId,
+      kind: "decision",
+      text: "ship the cursor rewrite behind the flag",
+      salience: 6,
+      sourceObservationIds: [],
+    });
+
+    // The interleave, driven by the source itself: the opponent's append lands
+    // between this boundary's slice read and its log read. A `ConversationSource`
+    // is harness code the kernel calls into, which makes it the honest seam for
+    // "something else happened while we were reading the conversation" — no
+    // kernel module is stubbed here.
+    const offsets: number[] = [];
+    let opponentLanded = false;
+    const conversation = {
+      id: "conv-race",
+      async read(offset: number) {
+        offsets.push(offset);
+        if (!opponentLanded) {
+          opponentLanded = true;
+          await appendEvent({
+            type: "memory.consolidated",
+            projectId,
+            scopeType: "session",
+            scopeId: projectId,
+            actor: "opponent",
+            payload: opponentMemory,
+          });
+        }
+        return { text, newOffset: text.length, resumePoints: [] };
+      },
+    };
+
+    const boundary = consolidate({
+      projectId,
+      actor: "test",
+      conversation,
+      consolidator: {
+        async extract(input) {
+          return input.transcriptTail
+            ? [{ kind: "decision" as const, text: "ship it behind the flag", salience: 6 }]
+            : [];
+        },
+      },
+    });
+
+    // Refused by the CAS, and the two heads say exactly WHY: this boundary
+    // stamped the head it saw before reading the conversation, and the log had
+    // moved on to the opponent's append by the time it tried to write. Asserting
+    // both ends rules out the ways this could pass for the wrong reason — an
+    // unrelated throw, or a head that came back empty and refused everything.
+    await expect(boundary).rejects.toMatchObject({
+      name: "StaleHeadError",
+      expectedHead: headBeforeOpponent,
+      actualHead: (await readEvents(projectId)).at(-1)!.id,
+    });
+
+    // The premises, asserted rather than assumed: the opponent's append really
+    // did land, and this boundary really did read the slice from offset 0 — the
+    // opponent commits its own offset at the very end of its run, so the cursor
+    // still points at conversation the opponent has already consumed.
+    expect(opponentLanded).toBe(true);
+    expect(offsets).toEqual([0]);
+
+    // The distillation of that conversation exists exactly once.
+    const consolidated = (await readEvents(projectId)).filter(
+      (event) => event.type === "memory.consolidated",
+    );
+    expect(consolidated).toHaveLength(1);
+    expect(consolidated[0]!.payload).toMatchObject({ id: opponentMemory.id });
+  });
 });
