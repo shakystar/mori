@@ -2433,16 +2433,36 @@ export async function consolidate(params: ConsolidateParams): Promise<Consolidat
 
     if (inputs.length > 0) {
       // #253: compare-and-append against the head this boundary read its
-      // window and its supersede targets at. This is the check point ④ above
-      // made unconditional — ④ only fires when THIS holder's own signal has
-      // already fired, which lags the takeover by up to a heartbeat and never
-      // fires at all for a writer that took no lock. A refusal propagates:
-      // nothing but the derived, self-healing segment buffer is on disk at
-      // this instant and NEITHER cursor has moved, so the window stays
-      // unconsumed for whoever won and `recordAttempt` (the catch around
-      // `run()`) records the boundary as failed rather than as a silent
-      // no-memory success. That is exactly the shape ④'s own throw already
-      // has, so nothing downstream learns a new outcome.
+      // window and its supersede targets at. What this BLOCKS: an append
+      // landing on the log AFTER `expectedHead` was read above — the subset
+      // ④ (above) cannot catch, since ④ only fires once THIS holder's own
+      // dispossession signal has arrived (up to one heartbeat behind the
+      // takeover) and never fires at all for a writer that took no lock. It
+      // is NOT ④ made unconditional, though: CAS compares the log against
+      // the head this boundary observed, not the freshness of the EVIDENCE
+      // (`watermark`/`consumedObservationIds`, read further up) that
+      // determined `inputs` in the first place, and the two catch up at
+      // DIFFERENT times. `watermark` is a separate on-disk cursor a
+      // concurrent boundary only advances in its own `commitBoundaryCursors`,
+      // at the very end of its run. `consumedObservationIds` instead queries
+      // the `memories` projection table directly, so it catches up as soon
+      // as that boundary's `rebuildProjectProjection` call completes —
+      // earlier in that boundary's own run, but still a separate step from
+      // its `memory.consolidated` append landing. So a takeover whose append
+      // already landed BEFORE this boundary read `expectedHead` above, but
+      // whose rebuild/cursor-commit is still pending, leaves `expectedHead`
+      // correctly reflecting "no further log movement" while one or both of
+      // this boundary's evidence sources are still the pre-takeover ones —
+      // CAS passes and this boundary redistills observations the other
+      // holder just consolidated. #263 tracks closing that gap (binding the
+      // evidence itself to the log, not just gating on log movement after
+      // the fact). A refusal from what CAS DOES catch propagates: nothing
+      // but the derived, self-healing segment buffer is on disk at this
+      // instant and NEITHER cursor has moved, so the window stays unconsumed
+      // for whoever won and `recordAttempt` (the catch around `run()`)
+      // records the boundary as failed rather than as a silent no-memory
+      // success. That is exactly the shape ④'s own throw already has, so
+      // nothing downstream learns a new outcome.
       await appendEvents(params.projectId, inputs, { expectedHead });
     }
 
