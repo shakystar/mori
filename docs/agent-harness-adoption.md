@@ -105,9 +105,9 @@ export PR로 풀 문제가 아니다. ②는 upstream 쪽 표면과 발화의 �
 | `initialState.systemPrompt` (`agent/index.ts:79`)   | **대응 있음**                      | `AgentHarnessOptions.systemPrompt` (`pi/dist/harness/types.d.ts:662`). 문자열 그대로도 되고, 세션·모델·활성 툴·리소스를 받는 콜백도 된다 (`:641-647`)                                                                                                                                                                                                                                                                       |
 | `initialState.model` (`agent/index.ts:80`)          | **대응 있음**                      | `AgentHarnessOptions.model` (`pi/dist/harness/types.d.ts:667`), 런타임 교체는 `setModel` (`pi/dist/harness/agent-harness.d.ts:72`). 추가로 `models: Models`가 **필수**가 된다 (`types.d.ts:655`) — `createMoriModels`가 반환하는 `MutableModels`가 `Models`를 확장하므로(`pi-ai/dist/models.d.ts:124`) 그대로 들어간다                                                                                                      |
 | `initialState.tools` (`agent/index.ts:81`)          | **대응 있음 — 시그니처가 바뀐다**  | `AgentHarnessOptions.tools?: TTool[]` (`types.d.ts:656`). 다만 `AgentHarnessTool`은 `execute`에 **다섯 번째 인자 `context: TContext`** 를 붙인 형태다 (`types.d.ts:58-61`). mori가 컨텍스트를 안 쓰면 `TContext = undefined`로 두면 되고, 그때 `toolContext`는 선택 필드다 (`:673-679`). 툴 5개의 `execute` 시그니처를 넓히는 기계적 변경                                                                                   |
-| `transformContext` (`agent/index.ts:83`)            | **대응 있음 — 한계도 그대로**      | `context` 훅. 하네스가 루프의 `transformContext` 슬롯에 `emitHook({type:"context", …})`를 꽂고 `result?.messages ?? messages`를 돌려준다 (`pi/dist/harness/agent-harness.js:358-361`). 결과 타입은 `ContextResult { messages }` (`types.d.ts:514-516`). **반환값의 수명은 §5대로 바뀌지 않는다**                                                                                                                            |
+| `transformContext` (`agent/index.ts:83`)            | **대응 있음 — 한계도 그대로**      | `context` 훅. 하네스가 루프의 `transformContext` 슬롯에 `emitHook({type:"context", …})`를 꽂고 `result?.messages ?? messages`를 돌려준다 (`pi/dist/harness/agent-harness.js:362-365`). 결과 타입은 `ContextResult { messages }` (`types.d.ts:514-516`). **반환값의 수명은 §5대로 바뀌지 않는다**                                                                                                                            |
 | `streamFn` (`agent/index.ts:84`)                    | **대응 없음**                      | 하네스는 `this.models.streamSimple(...)`로 고정한다 (`agent-harness.js:319-341`). **잃는 것: 함수 하나를 꽂아 프로바이더를 통째로 대체하던 테스트 seam.** 오늘 `RunCliDeps.streamFn`(`packages/mori/src/cli/types.ts:9`)이 그 seam이고, `runtime.ts:89`를 거쳐 `repl.test.ts`·`agent/index.test.ts`의 거의 모든 케이스가 이것으로 돈다. 등가는 `Models`에 가짜 provider를 등록하는 것(`models.setProvider`)이다 — §7 조각 B |
-| `beforeToolCall` (`agent/index.ts:85`)              | **대응 있음**                      | `tool_call` 훅. 하네스가 루프의 `beforeToolCall`에 꽂는다 (`agent-harness.js:362-370`), 결과는 `ToolCallResult { block?, reason? }` (`types.d.ts:523-526`) — 오늘 `createBashBeforeToolCall`이 돌려주는 모양과 같다 (`packages/mori/src/tools/bash.ts:115-120`)                                                                                                                                                             |
+| `beforeToolCall` (`agent/index.ts:85`)              | **대응 있음**                      | `tool_call` 훅. 하네스가 루프의 `beforeToolCall`에 꽂는다 (`agent-harness.js:366-374`), 결과는 `ToolCallResult { block?, reason? }` (`types.d.ts:523-526`) — 오늘 `createBashBeforeToolCall`이 돌려주는 모양과 같다 (`packages/mori/src/tools/bash.ts:115-120`)                                                                                                                                                             |
 | `toolExecution: "sequential"` (`agent/index.ts:90`) | **대응 없음 — 대체 경로 있음**     | 아래 별도 항목                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `agent.subscribe(observe)` (`agent/index.ts:93`)    | **대응 있음 — 이벤트가 넓어진다**  | `AgentHarness.subscribe` (`pi/dist/harness/agent-harness.d.ts:89`). 받는 것은 `AgentHarnessEvent = AgentEvent \| AgentHarnessOwnEvent` (`types.d.ts:509`). 커널의 `observeEvent`는 `ToolCallObserver<AgentEvent>`(`packages/mori/src/kernel/index.ts:137`)이므로, 넓어진 유니온을 좁히거나 커널의 `E`를 넓히는 선택이 생긴다. 좁히는 쪽이 작다 — 관찰자는 이미 모르는 타입을 `undefined`로 흘린다 (`kernel/index.ts:152`)   |
 | `createMoriTools` (`agent/index.ts:75`)             | **대응 있음**                      | 위 `tools` 행과 같다. 툴 **선택**(`options.tools ?? createMoriTools(...)`)은 mori 쪽 코드이므로 그대로 남는다                                                                                                                                                                                                                                                                                                               |
@@ -282,20 +282,99 @@ export interface ConversationSource {
 그래서 이것은 배선 세부가 아니라 **커널 설계 결정**이고, 이 산정의 다섯 조각 안에서
 정할 수 있는 것이 아니다.
 
-**다만 대화가 사라지지는 않는다.** `compact()`는 세션 트리에 압축 엔트리를 **append**할
-뿐이고 (`agent-harness.js:671`의 `appendCompaction`), 잘려나간 엔트리는 `getBranch()`가
-돌려주는 경로에 그대로 남는다. 컨텍스트에서 빠지는 것은 `defaultContextEntryTransform`이
-**렌더 시점에** 거르기 때문이다 (`session.js:23-55`). 그래서 `ConversationSource`를 나중에
-세션 위에 얹어도 그 시점 이전의 대화를 읽을 수 있다 — 압축이 먼저 켜져도 원문이 먼저
-소실되지는 않는다. (단, 그 원문의 수명은 조각 C가 고르는 저장소의 수명이다. `InMemory`면
-프로세스와 함께 사라지며, 그것은 오늘과 같은 수명이다.)
+#### 잘려나간 원문은 어느 표면에서 읽히는가 — 쓰기와 읽기를 따로 확인한다
 
-이 결론이 조각 E의 범위를 바꾼다 — §Q7의 E를 보라.
+이 자리는 초안이 한 번 틀렸던 자리다. 초안은 _"잘려나간 엔트리는 `getBranch()`가 돌려주는
+경로에 그대로 남는다"_ 고 적었고, 그 근거로 `appendCompaction`(**쓰기**)을 들었다.
+결론은 **읽기 표면**에 대한 것이었으므로 근거가 결론을 받치지 못했다. 아래는 양끝을 따로
+읽은 결과이며, **읽기 쪽 결론이 초안과 반대다.**
+
+**쓰기 — append-only다 (초안 그대로 참).** `compact()`는 세션 트리에 압축 엔트리를
+**append**할 뿐이고 (`agent-harness.js:671`의 `appendCompaction`), 두 저장소 구현 모두
+엔트리 배열에 `push`만 한다 — `splice`·`shift`로 지우는 자리가 없다
+(`memory-storage.js:72, 80` · `jsonl-storage.js:196, 205`; JSONL 쪽은 파일에도
+`appendFile`이다, `:204`). **그러므로 원문은 지워지지 않는다.**
+
+**읽기 ① — `getBranch()`는 그것을 돌려주지 않는다.** `Session.getBranch()`는
+`storage.getPathToRootOrCompaction(leafId)`에 그대로 위임하고 (`session.js:114-117`,
+선언은 `session.d.ts:25`), 그 순회는 압축 엔트리를 만나면 **거기서 멈춘다**
+(`memory-storage.js:136-161`, 동일 구현이 `jsonl-storage.js:261-286`):
+
+```js
+while (current) {
+  path.unshift(current);
+  if (stopAtEntryId !== null && current.id === stopAtEntryId) break;
+  if (current.type === "compaction") {
+    if (current.retainedTail) break; // ← 압축 엔트리를 담은 직후 순회 종료
+    stopAtEntryId = current.firstKeptEntryId ?? null;
+  }
+  …
+}
+```
+
+엔트리 종류에 따라 세 갈래가 되고, **기본 경로에서는 잘려나간 엔트리가 안 온다.**
+
+| 압축 엔트리의 필드                            | 순회                                              | 잘려나간 엔트리가 결과에 오는가               |
+| --------------------------------------------- | ------------------------------------------------- | --------------------------------------------- |
+| `retainedTail` 있음 ← **하네스 기본 경로**    | 압축 엔트리를 `path`에 넣은 **직후** `break`      | **안 온다**                                   |
+| `retainedTail` 없음 + `firstKeptEntryId` 있음 | `firstKeptEntryId`까지 더 올라가 거기서 `break`   | **안 온다** (그 지점이 정의상 남긴 첫 엔트리) |
+| **둘 다 없음**                                | `stopAtEntryId`가 `null`로 남아 루트까지 올라간다 | **온다**                                      |
+
+**기본 경로는 첫 줄이다.** 하네스가 스스로 도는 압축에서 `retainedTail`은 항상 채워진다 —
+`prepareCompaction`이 배열을 만들어 (`compaction.js:473-478`) 결과에 싣고 (`:485-489`),
+`CompactionPreparation.retainedTail`은 선택 필드가 아니다 (`types.d.ts:604`). 빈 배열이어도
+`if (current.retainedTail)`는 truthy로 걸린다.
+
+셋째 줄은 **훅이 요약을 대체할 때만** 열린다. `session_before_compact`가 돌려주는
+`CompactResult`는 `firstKeptEntryId`와 `retainedTail`이 **둘 다 선택 필드**이고
+(`types.d.ts:581-589` — `CompactionPreparation`과 다르다), 그것이 그대로
+`appendCompaction`에 흘러간다 (`agent-harness.js:664-671`). 이 문서의 권고는 커널이 그
+훅에서 `undefined`를 돌려주고 관찰만 하는 것이므로(§Q3의 단서 3, §Q7 E) mori는 셋째 줄에
+가지 않는다 — **그러나 이 갈래를 "안 온다"로 뭉뚱그리지는 않는다.**
+
+`defaultContextEntryTransform`(`session.js:23-55`)은 이 질문에 대한 근거가 **아니다**.
+그것은 `getBranch()`가 이미 돌려준 경로를 렌더 시점에 한 번 더 거르는 뒷단계이고
+(`buildContextEntries`·`buildContext`가 `getBranch()`의 결과에 그것을 먹인다,
+`session.js:118-123`), 순회가 어디서 멈추는지에 대해 아무 말도 하지 않는다.
+
+**읽기 ② — 원문을 돌려주는 표면은 `getEntries()`다.** `SessionStorage.getEntries`는
+필터 없는 `entries.slice(start, end)`이고 (`memory-storage.js:162-166` ·
+`jsonl-storage.js:287-291`), 압축 엔트리를 특별 취급하지 않는다. `Session`이 그대로
+노출하며 (`session.js:111-113`, 선언은 `session.d.ts:24`), 인자는 오프셋 커서다:
+
+```ts
+// pi/dist/harness/types.d.ts:333-336 (인터페이스 선언은 :352)
+export interface SessionEntryCursorOptions {
+  afterEntrySeq?: number;
+  limit?: number;
+}
+```
+
+위 "쓰기"가 확인한 append-only 성질 덕에 `afterEntrySeq`는 **안정적인 워터마크**다 —
+이미 읽은 인덱스가 나중에 다른 엔트리를 가리키게 되지 않는다. 이것이 §Q7 "이 목록에 없는
+것"의 `ConversationSource` 조각이 서는 표면이고, 그 조각의 두 갈래 판단이 이 사실 위에서
+갈린다.
+
+**단, 그 표면에 닿으려면 세션 참조를 mori가 계속 들고 있어야 한다.** `AgentHarness`의
+`session`은 **private**이고 (`agent-harness.d.ts:5`) 그것을 돌려주는 getter가 public
+표면에 없다 (`:49-90`). 하네스에 넘긴 `Session`(필수 옵션 `session`, `types.d.ts:649`)을
+조각 C가 만들고 그 참조를 유지해야 한다는 뜻이다 — C의 완료 조건에 이 항목을 추가했다.
+
+**원문의 수명**은 조각 C가 고르는 저장소의 수명이다. `InMemory`면 엔트리 배열이 인스턴스
+상태이므로(`memory-storage.js:34-51`) 프로세스와 함께 사라지며, 그것은 오늘과 같은 수명이다.
+
+이 정정은 **조각 E의 범위를 바꾸지 않는다.** E를 관찰 경계로 축소한 근거는 _"커널에 받는
+파라미터가 없다"_ 이지 _"원문이 어디서 읽히는가"_ 가 아니기 때문이다 (바로 위 절).
+바뀌는 것은 **E 다음 조각이 어느 표면 위에 서는가**다 — §Q7의 E와 "이 목록에 없는 것".
 
 압축 **완료** 통보는 `subscribe()`로 받는다 (§Q1 ②). `SessionCompactEvent`가
-`compactionEntry: CompactionEntry`를 실어 오므로 (`types.d.ts:451-455`), 요약 문자열과
-`retainedTail`과 `tokensBefore`가 그 자리에서 다 보인다 (`:263-272`). 정본 문서 §6.3이
-말한 post-compact 증류 트리거를 거는 자리가 여기다.
+`compactionEntry: CompactionEntry`를 실어 오므로 (타입 `types.d.ts:451-455`, 엔트리
+`:263-272`), 요약 문자열과 `retainedTail`과 `tokensBefore`가 그 자리에서 다 보인다.
+이 한 줄도 읽기 쪽을 따로 확인했다 — `compact()`가 append한 엔트리를 **다시 읽어서**
+이벤트에 싣는다 (`agent-harness.js:671-674`: `appendCompaction` → `session.getEntry(entryId)`
+→ `emitOwn({… compactionEntry: entry})`), 그리고 `getEntry`는 `byId` 조회라 압축 필터를
+타지 않는다 (`session.js:108-110` → `memory-storage.js:85-87`). 즉 구독자가 손에 쥐는 것은
+저장된 엔트리 그 자체다. 정본 문서 §6.3이 말한 post-compact 증류 트리거를 거는 자리가 여기다.
 
 ---
 
@@ -322,9 +401,15 @@ export interface CompactionEntry<T = unknown> extends SessionTreeEntryBase {
 
 즉 **압축 요약과 `retainedTail`은 세션 트리 엔트리 하나에 같이 실린다.** 그 엔트리가
 있으면 컨텍스트 조립이 "압축 엔트리 + 그 이후"만 남기고 앞을 버린다
-(`pi/dist/harness/session/session.js:23-52`의 `defaultContextEntryTransform`) — 이것이
-"압축이 세션을 줄인다"의 실제 메커니즘이며, 오늘 `transformContext`가 못 하는 일이다
-(§5).
+(`pi/dist/harness/session/session.js:23-55`의 `defaultContextEntryTransform`, 그중 `:35-40`이
+`retainedTail` 분기) — 이것이 "압축이 세션을 줄인다"의 실제 메커니즘이며, 오늘
+`transformContext`가 못 하는 일이다 (§5).
+
+**앞을 버리는 단계가 둘이라는 점을 §Q3에서 확인했다.** 컨텍스트 경로는
+`getBranch()` → `defaultContextEntryTransform` → 메시지 조립이고
+(`session.js:114-123`), 순회가 **이미** 압축 엔트리에서 멈춘 뒤 렌더 필터가 한 번 더
+거른다. 그래서 컨텍스트에 안 실리는 것과 **어느 표면으로도 안 읽히는 것**은 다르다 —
+후자는 참이 아니며, `getEntries()`가 그 표면이다 (§Q3의 "어느 표면에서 읽히는가").
 
 ### 어디에
 
@@ -333,11 +418,13 @@ export interface CompactionEntry<T = unknown> extends SessionTreeEntryBase {
 (`pi/dist/harness/session/session.d.ts:16-19`, 인터페이스는 `types.d.ts:337-353`).
 0.82.1이 함께 주는 구현은 둘이다:
 
-| 구현                        | 장소                                               | 근거                                                                                             |
-| --------------------------- | -------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
-| `InMemorySessionStorage`    | 프로세스 메모리. 종료하면 사라진다                 | `pi/dist/harness/session/memory-storage.d.ts:2`                                                  |
-| `JsonlSessionStorage`       | JSONL 파일 1개 = 세션 1개                          | `pi/dist/harness/session/jsonl-storage.d.ts:4`                                                   |
-| (`JsonlSessionRepo`가 관리) | `sessionsRoot`는 **생성자 인자**이고 기본값이 없다 | `pi/dist/harness/session/jsonl-repo.d.ts:7-10`, `jsonl-repo.js:13-26`. 경로를 정하는 것은 호출자 |
+각 행에 **쓰기**와 **읽기**를 따로 단다 (§Q3에서 이 구분을 한 번 틀렸으므로).
+
+| 구현                        | 장소                                               | 쓰기 근거                                                                                     | 읽기 근거 (되읽는 표면)                                                                                                                  |
+| --------------------------- | -------------------------------------------------- | --------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `InMemorySessionStorage`    | 프로세스 메모리. 종료하면 사라진다                 | `appendEntry`가 인스턴스 배열에 `push` (`memory-storage.js:79-84`)                            | 같은 배열을 `getEntries`가 `slice`로 돌려준다 (`:162-166`). 배열이 인스턴스 상태이므로(`:34-51`) 프로세스 밖으로 나가는 읽기 표면은 없다 |
+| `JsonlSessionStorage`       | JSONL 파일 1개 = 세션 1개                          | `appendEntry`가 `appendFile`로 한 줄 추가 + 메모리 배열에 `push` (`jsonl-storage.js:203-209`) | `open()`이 파일을 다시 파싱해 배열을 채운다 (`:158-161`) — 프로세스가 죽어도 되읽힌다. 커서 읽기는 `:287-291`                            |
+| (`JsonlSessionRepo`가 관리) | `sessionsRoot`는 **생성자 인자**이고 기본값이 없다 | `jsonl-repo.d.ts:7-10` (생성자), 경로 조립 `jsonl-repo.js:15-26`                              | 경로를 정하는 것은 호출자 — 이 조각의 결정이 사용자에게 보이는 계약이 되는 이유                                                          |
 
 세 번째 선택지로 **mori가 `SessionStorage`를 직접 구현**할 수도 있다 (인터페이스가
 public이므로). 운용 원칙 2가 정확히 여기에 걸린다.
@@ -348,7 +435,11 @@ public이므로). 운용 원칙 2가 정확히 여기에 걸린다.
 
 - 커널의 이벤트 로그는 **관찰과 메모리**를 담는다 — `observation.captured`(툴 콜의
   경로·명령어), 증류된 `memory.*`, `memory.injected`. 대화 메시지 원문은 담지 않는다.
-- 세션 트리는 **대화 메시지**를 담는다.
+  **쓰기 쪽으로 확인**: 관찰을 만드는 함수가 `write`에서는 `path` 인자 하나,
+  `shell`에서는 마스킹된 `command` 하나만 내보내고 그 외 분기는 `undefined`다
+  (`packages/mori/src/kernel/index.ts:137-181`) — 대화 메시지를 보는 자리가 없다.
+- 세션 트리는 **대화 메시지**를 담는다 (`MessageEntry`, `types.d.ts:246-249`; 쓰기는
+  `handleAgentEvent`가 `message_end`마다 `session.appendMessage`, `agent-harness.js:454-459`).
 
 교집합이 생기는 지점은 하나다: **`ConversationSource`가 배선되는 순간.** 그 seam이
 배선되면 경계가 대화 원문을 읽어 세그먼트로 쓰기 시작하고
@@ -392,8 +483,8 @@ if (config.transformContext) {
 ```
 
 `messages`는 지역 변수이고 `context.messages`는 재대입되지 않는다. **하네스는 이 슬롯을
-그대로 쓴다** — `createLoopConfig`가 같은 `transformContext` 키에 `context` 훅을 꽂는다
-(`pi/dist/harness/agent-harness.js:356-361`):
+그대로 쓴다** — `createLoopConfig`(`pi/dist/harness/agent-harness.js:356`)가 같은
+`transformContext` 키에 `context` 훅을 꽂는다 (`:362-365`):
 
 ```js
 transformContext: async (messages) => {
@@ -592,6 +683,11 @@ A(툴 순차성 등가)  →  B(스트림 seam 이전)  →  C(세션 소유권�
     `Session`(pi 타입)을 돌려준다
   - 선택한 저장소와 **선택하지 않은 둘을 왜 미뤘는지**가 그 함수의 doc 주석에 있다
     (`docs/storage-boundary-secrets.md`와 같은 규율 — 결정을 코드 옆에 둔다)
+  - **그 `Session` 참조를 mori가 계속 들고 있는 모양으로 만든다.** `AgentHarness`의
+    `session`은 private이고 돌려주는 getter가 public 표면에 없으므로
+    (`pi/dist/harness/agent-harness.d.ts:5`, 메서드 목록 `:49-90`), 하네스에 넘긴 뒤
+    참조를 버리면 `getEntries()`로 대화 원문을 읽을 길이 닫힌다 (§Q3의 "어느 표면에서
+    읽히는가"). 뒤따르는 `ConversationSource` 조각이 이 참조 위에 선다
   - 이 조각만으로는 아무도 그 함수를 부르지 않는다 (D가 부른다). `pnpm build`가 미사용
     export를 문제 삼지 않음을 확인한다
   - `pnpm build` · `pnpm lint` · `pnpm test` 그린
@@ -608,6 +704,23 @@ A(툴 순차성 등가)  →  B(스트림 seam 이전)  →  C(세션 소유권�
     `agent.state.messages.at(-1)`(`repl.ts:124`, `runtime.ts:165`) → `prompt()`의 반환값,
     `agent.reset()`(`repl.ts:86`) → 새 세션, `agent.abort()`(`repl.ts:62`) → 하네스의
     `abort()` (반환 타입이 `Promise<AbortResult>`로 바뀐다)
+  - **`/clear`는 두 줄이다 — 세션 교체와 커널 리셋이 함께 남는다.** 위의 `agent.reset()`
+    바로 다음 줄이 `consolidation.kernel.resetConversation()`이고 (`repl.ts:92`),
+    그 사이의 주석이 **반드시 함께 리셋하라**고 코드 옆에 적어 두었다 (`repl.ts:87-91`):
+
+    > The kernel's own conversation-scoped state (#234) — the untargeted session-start read
+    > it has already spent, the last turn it retrieved for — **must reset alongside**
+    > `agent.state.messages`, or the next conversation inherits the previous one's "already
+    > asked" bookkeeping and silently loses its session-start injection.
+
+    `resetConversation`은 커널 인터페이스의 메서드이므로 (`packages/kernel/src/index.ts:237`)
+    하네스 이주와 무관하게 그대로 있다. **D가 `agent.reset()`만 새 세션으로 갈아끼우고 이
+    줄을 따라 옮기지 않으면**, `/clear` 이후 첫 대화가 session-start 주입을 조용히 잃는다 —
+    주석이 이름 붙인 바로 그 실패다. **이것을 보는 테스트는 이미 있다** —
+    `repl.test.ts:242` _"resets the kernel's conversation-scoped state on /clear, not just
+    the agent's (#234)"_ 가 `resetConversation` 호출을 스파이로 확인한다 (`:251`). D는 이
+    케이스를 그린으로 유지하는 것으로 이 항목을 만족한다 (지우고 대체하지 않는다)
+
   - 커널의 `observeEvent`가 넓어진 `AgentHarnessEvent`를 안전하게 좁힌다
   - `toolExecution: "sequential"` 줄이 사라지고, A가 단 `executionMode`가 그 자리를 잇는다
   - **압축을 부르는 코드는 없다.** `compact()` 호출부 0건임을 grep으로 PR 본문에 첨부
@@ -659,8 +772,11 @@ A(툴 순차성 등가)  →  B(스트림 seam 이전)  →  C(세션 소유권�
   **잃는 것을 명시한다**: E 이후 압축이 드랍한 대화 원문은 커널에 **닿지 않는다.** 그
   축의 안전망은 pi가 만드는 압축 요약과 `retainedTail`뿐이고, 그것은 세션에 남지 기억에
   남지 않는다 (§4·§5). 이것은 E가 만드는 후퇴가 아니라 **오늘 이미 0인 것이 0으로
-  남는 것**이다 (정본 문서 §5.2 R5). 그리고 §Q3이 확인한 대로 원문 자체는 세션 트리에
-  남으므로, 뒤따르는 `ConversationSource` 조각이 그것을 읽어 0을 바꾼다.
+  남는 것**이다 (정본 문서 §5.2 R5). 그리고 §Q3이 확인한 대로 원문 자체는 세션 엔트리
+  로그에서 지워지지 않으므로(append-only), 뒤따르는 `ConversationSource` 조각이 그것을 읽어
+  0을 바꿀 수 있다 — **단 읽는 표면은 `getBranch()`가 아니라 `getEntries()`다** (§Q3의
+  "어느 표면에서 읽히는가"). 이 정정이 E의 결론을 바꾸지 않는 이유: E를 관찰 경계로 축소한
+  근거는 커널에 받는 파라미터가 없다는 것이고, 그것은 읽기 표면이 무엇이든 그대로다.
 
 - **완료 조건 초안**
   - 턴 사이에서 `estimateContextTokens` + `shouldCompact`로 판정하고
@@ -669,7 +785,51 @@ A(툴 순차성 등가)  →  B(스트림 seam 이전)  →  C(세션 소유권�
     (정본 문서 §6.1)
   - `subscribe`에서 `session_compact`를 받아 `boundary: "post-compact"` 경계를 건다.
     `on("session_compact", …)`를 쓰지 않는다 (§Q1 ②).
-    그 경계는 `consolidate(llm, { boundary })` — **대화 원문 인자는 없다** (§Q3)
+    그 경계는 대화 원문 인자를 갖지 않는다 (§Q3)
+  - **그 경계는 `kernel.consolidate`를 직접 부르지 않는다 — `consolidateGuarded`를
+    `post-compact`까지 넓혀 재사용한다.** 오늘 그 가드는 자기 boundary 집합을 타입으로
+    좁혀 두었고 (`packages/mori/src/cli/consolidation.ts:40-45`), 그 좁힘이 곧
+    "post-compact는 아직 범위 밖"이라는 표시다 (`:35-38`의 doc — _"`threshold`/`session-start`/
+    `post-compact` are out of scope"_):
+
+    ```ts
+    // packages/mori/src/cli/consolidation.ts:40-45
+    function consolidateGuarded(
+      kernel: MoriKernel,
+      llm: ConsolidatorLlm,
+      boundary: Extract<ConsolidateBoundary, "session-end" | "manual">,
+      signal?: AbortSignal,
+    ): Promise<void> {
+    ```
+
+    가드가 존재하는 이유가 정확히 E가 여는 창이다 (`:27`의 커널당 체인,
+    모듈 doc `:8-12`, 함수 doc `:30-31`):
+
+    > `consolidate-service`'s watermark is an idempotency device for SEQUENTIAL
+    > boundaries, not a concurrency guard … two overlapping calls would each read the
+    > same watermark and both append … a per-kernel promise chain that makes the second
+    > caller's real `consolidate()` wait for the first one to finish
+
+    **무엇이 겹치는가**: 오늘의 두 트리거는 사람의 리듬에 묶여 있다 — 세션 종료
+    (`packages/mori/src/index.ts:112`, `cli/runtime.ts:161`)와 `/clear` 옆의
+    `/consolidate`(`cli/repl.ts:106-109`). 압축 트리거는 그렇지 않다:
+    **턴이 끝나는 자리에서 컨텍스트 크기만 보고 발화한다.** 사용자가 `/consolidate`를
+    쳐 놓고(경계 A가 워터마크를 읽은 뒤 추출 LLM 호출에서 수 분을 보내는 동안) 다음
+    턴을 이어 가면 그 턴이 압축을 켜고, 경계 B가 **A가 아직 밀지 않은 같은 워터마크를
+    읽는다.** 둘 다 append하면 같은 관찰 구간이 두 번 증류된다.
+
+  - **이 창은 아래 "기다리지 않는다" 항목과 곱해진다.** 경계가 압축을 기다리지 않게
+    하면(정본 문서 §1 D1) 발화가 압축 완료와 분리되므로 겹칠 구간이 좁아지는 것이 아니라
+    **넓어진다.** 그래서 E에서 가드 확장은 선택이 아니라 함께 오는 항목이다
+  - 가드를 넓히는 최소 변경은 `boundary` 파라미터의 `Extract<…>`에 `"post-compact"`를
+    더하는 것이다. `consolidateGuarded` 자체는 non-export이므로(`consolidation.ts:40`)
+    호출 모양은 둘 중 하나다 — **이 파일이 이미 쓰는 모양**은 `consolidateOnSessionEnd`
+    (`:64`)·`consolidateExplicit`(`:107`)처럼 **얇은 export 래퍼를 같은 파일에 하나 더
+    두는 것**이고, 그러면 가드를 밖으로 노출하지 않아도 된다. 커널 어휘 쪽은 넓힐 필요가
+    없다 — `CONSOLIDATE_BOUNDARIES`에 `post-compact`가 이미 있다
+    (`packages/kernel/src/services/consolidate-service.ts:1510-1516`). **가드를 우회하는
+    선택을 한다면** 무엇이 워터마크 이중 소비를 막는지를 그 자리 doc에 적어야 한다 —
+    `consolidate-service`의 워터마크는 그 일을 하지 않는다고 위 doc이 스스로 밝혔다
   - `on("session_before_compact", …)`를 **이 조각에서 걸지 않는다.** 걸 이유가 없다:
     커널이 `messagesToSummarize`로 할 수 있는 일이 아직 없고, 이 훅은 구경이 아니라
     압축의 결정권을 갖기 때문에 (§Q3의 단서 3) "일단 걸어 두기"가 공짜가 아니다
@@ -697,8 +857,26 @@ A(툴 순차성 등가)  →  B(스트림 seam 이전)  →  C(세션 소유권�
   그 조각은 이 다섯과 독립적으로 잘려야 한다. **다섯 조각이 끝나도 잘려나간 대화
   원문이 커널에 닿지 않는다는 것이 이 산정의 결론이고** (§Q3의 "받는 쪽"), 그것을 닫는
   것이 이 조각이다. 착수하려면 먼저 정해야 하는 것: 커널이 push 인자를 받도록 넓힐
-  것인가, 아니면 세션 트리 위에 pull 어댑터를 얹을 것인가 — 후자가 오늘의 seam 모양과
-  워터마크 규율을 지키는 쪽이다 (§Q3)
+  것인가, 아니면 세션 엔트리 로그 위에 pull 어댑터를 얹을 것인가 — **후자가 오늘의 seam
+  모양과 워터마크 규율을 지키는 쪽이고, 그 어댑터가 설 표면이 실물에서 확인된다** (§Q3의
+  "어느 표면에서 읽히는가"). 근거 둘:
+
+  - 읽을 자리가 있다 — `Session.getEntries({ afterEntrySeq })`가 압축 여부와 무관하게
+    엔트리 배열을 그대로 돌려준다 (`session.js:111-113` → `memory-storage.js:162-166`).
+    `getBranch()`는 **안 된다** — 압축 엔트리에서 순회가 멈춘다.
+  - 커서 모양이 맞는다 — `afterEntrySeq`는 append-only 배열의 인덱스이므로 단조
+    비감소이고, `ConversationSlice.newOffset`의 doc이 허용하는 값의 예로 _"a char/byte
+    count, **a turn index**, a sequence number"_ 를 직접 든다
+    (`packages/kernel/src/index.ts:156-167`). 오프셋을 커널이 해석하지 않는다는
+    #144 규율(`:133-146`의 `ConversationResumePoint`)과도 맞는다.
+
+  남는 어려움은 두 가지이고 그 조각이 정한다: (a) 엔트리 인덱스 커서와 `resumePoints`가
+  요구하는 **`text` 안의 문자 위치** 사이의 변환 — 엔트리 경계보다 잘게 자를 수 없으면
+  `resumePoints`를 비워 all-or-nothing 계약으로 가야 하고, 그때 오버사이즈 슬라이스의
+  영구 홀드 실패 모드가 돌아온다 (`:168-188`의 doc). (b) `ConversationSource.id`가
+  _"세션이 갈려도 살아남아야 한다"_ 고 요구하는데 (`:211-215`) 세션 인덱스는 세션마다
+  0부터 다시 시작한다 — 조각 C가 고른 저장소가 세션을 하나로 유지하는지에 답이 걸린다
+
 - **세션 지속성(디스크 JSONL).** C가 `InMemorySessionStorage`를 권고하므로, 디스크
   저장은 별도 결정이다 — 운용 원칙 2가 걸리는 두 번째 자리
 - **`threshold` 트리거와의 관계 결정** (정본 문서 §6.1의 ①/②/③). 근거가 될 값은
@@ -716,13 +894,23 @@ A(툴 순차성 등가)  →  B(스트림 seam 이전)  →  C(세션 소유권�
 - `dist/agent-loop.js:178-183` — `transformContext`의 지역 수명
 - `dist/agent-loop.js:287-294` — 툴 실행 모드 분기
 - `dist/types.d.ts:216-226, 343-350` — `toolExecution` 기본값, `executionMode`
-- `dist/harness/agent-harness.d.ts:4, 64, 87-92` — 클래스 표면
-- `dist/harness/agent-harness.js:98, 161-198, 277-278, 319-341, 356-409, 454-483, 515-523, 640-684, 946-963`
-- `dist/harness/types.d.ts:58-61, 246-249, 263-272, 306, 337-353, 408-411, 444-455, 508-509, 514-516, 523-526, 534-537, 550-573, 581-589, 600-610, 641-679`
+- `dist/harness/agent-harness.d.ts:4, 5`(private `session`)`, 49-90`(public 표면)`, 64, 72, 87-92`
+- `dist/harness/agent-harness.js:98, 161-198, 277-278, 319-341, 356-409`(그중 `:362-365`가
+  `context` 훅, `:366-374`가 `tool_call` 훅)`, 454-459, 515-523, 640-684`(그중 `:671-674`가
+  append→재읽기→`emitOwn`)`, 946-963`
+- `dist/harness/types.d.ts:58-61, 246-249, 263-272, 306, 333-336`(`SessionEntryCursorOptions`)`,
+337-353`(그중 `:352`가 `getEntries`)`, 408-411, 444-455, 508-509, 514-516, 523-526, 534-537,
+550-573, 581-589, 600-610`(그중 `:604`가 필수 `retainedTail`)`, 641-679`
 - `dist/harness/compaction/compaction.d.ts:38, 55, 57, 72, 103, 106`
-- `dist/harness/compaction/compaction.js:88-92, 157-161`
-- `dist/harness/session/session.d.ts:16-19` · `session.js:23-55` (그중 `:35-40`이 `retainedTail` 분기)
-- `dist/harness/session/jsonl-storage.d.ts:4` · `memory-storage.d.ts:2` · `jsonl-repo.d.ts:7-10` · `jsonl-repo.js:13-26`
+- `dist/harness/compaction/compaction.js:88-92, 157-161, 451, 473-478, 485-489`
+- `dist/harness/session/session.d.ts:16-19, 24`(`getEntries`)`, 25`(`getBranch`)
+- `dist/harness/session/session.js:23-55`(그중 `:35-40`이 `retainedTail` 분기)`,
+108-113`(`getEntry`·`getEntries` 위임)`, 114-117`(`getBranch` 위임)`, 118-123`(컨텍스트 조립)
+- `dist/harness/session/memory-storage.js:34-51`(인스턴스 상태)`, 72, 79-84`(append-only)`,
+85-87`(`getEntry`)`, 136-161`(압축에서 멈추는 순회)`, 162-166`(`getEntries`)
+- `dist/harness/session/jsonl-storage.js:153, 158-161`(파일 되읽기)`, 196, 203-209`(append-only)`,
+261-286`(같은 순회)`, 287-291`(`getEntries`)
+- `dist/harness/session/jsonl-storage.d.ts:4` · `memory-storage.d.ts:2` · `jsonl-repo.d.ts:7-10` · `jsonl-repo.js:15-26`
 
 **pi-ai 0.82.1** — `dist/models.d.ts:124-135` (`MutableModels extends Models`)
 
@@ -733,11 +921,19 @@ A(툴 순차성 등가)  →  B(스트림 seam 이전)  →  C(세션 소유권�
 - `packages/mori/src/agent/model-wiring.ts:86-103`
 - `packages/mori/src/tools/index.ts:23-35` · `tools/bash.ts:72-131`
 - `packages/mori/src/kernel/index.ts:54-60, 137-181, 620-635`
-- `packages/mori/src/cli/types.ts:9, 23-31`(`loginModels` doc) · `cli/runtime.ts:58, 89, 99, 151, 165` · `cli/repl.ts:62, 86, 121, 124`
-- `packages/mori/src/index.ts:107`
+- `packages/mori/src/cli/types.ts:9, 23-31`(`loginModels` doc) · `cli/runtime.ts:58, 89, 99, 151, 161, 165` ·
+  `cli/repl.ts:62, 85-93`(`/clear`의 두 줄과 그 주석)`, 106-109, 121, 124`
+- `packages/mori/src/cli/consolidation.ts:8-12`(모듈 doc — 워터마크는 동시성 가드가 아니다)`,
+27`(커널당 체인)`, 29-39`(함수 doc)`, 40-45`(`post-compact`를 배제한 시그니처)
+- `packages/mori/src/cli/repl.test.ts:242, 251` — `/clear`가 커널까지 닿는지 보는 케이스
+- `packages/mori/src/index.ts:107, 112`
 - 테스트 중 `streamFn` seam을 쓰는 다섯 (§Q7 B):
   `src/index.test.ts:238` · `src/kernel/index.test.ts:581` · `src/agent/index.test.ts:175, 220` ·
   `src/cli/repl.test.ts:27` · `src/tools/bash.test.ts:370`
-- `packages/kernel/src/index.ts:91-96, 97-113, 156-188, 206-207, 209-222, 230` — 증류 진입점과 대화 seam
+- `packages/kernel/src/index.ts:91-96, 97-113, 133-146`(`ConversationResumePoint`)`, 156-167`(`newOffset`
+  — 허용되는 커서 값)`, 168-188`(`resumePoints`)`, 206-207, 209-222`(그중 `:211-215`가 `id`의 수명 요구)`,
+230, 237`(`resetConversation`) — 증류 진입점과 대화 seam
+- `packages/kernel/src/services/consolidate-service.ts:1510-1519` — `CONSOLIDATE_BOUNDARIES`에
+  `post-compact`가 이미 있다 (넓혀야 하는 것은 커널 어휘가 아니라 mori 쪽 가드다)
 - `packages/kernel/src/kernel/sqlite-memory-kernel.ts:200, 256-278, 429-434, 441-474`
 - `docs/compaction-consolidation-boundary.md` — §0, §2.2, §5.2, §6.1–§6.4 (읽기만)
