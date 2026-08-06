@@ -250,7 +250,10 @@ describe("runCli", () => {
     it("calls kernel.consolidate exactly once when MORI_CONSOLIDATE_MODEL is set", async () => {
       const io = captureOutput();
       const kernel = spyKernel();
-      const env = { ANTHROPIC_API_KEY: "sk-ant-test", MORI_CONSOLIDATE_MODEL: "anthropic/claude-x" };
+      const env = {
+        ANTHROPIC_API_KEY: "sk-ant-test",
+        MORI_CONSOLIDATE_MODEL: "anthropic/claude-x",
+      };
       const credentialStore = new InMemoryCredentialStore();
 
       const exitCode = await runCli(["hi"], env, {
@@ -289,7 +292,10 @@ describe("runCli", () => {
       const kernel = spyKernel(async () => {
         throw new Error("consolidator misconfigured");
       });
-      const env = { ANTHROPIC_API_KEY: "sk-ant-test", MORI_CONSOLIDATE_MODEL: "anthropic/claude-x" };
+      const env = {
+        ANTHROPIC_API_KEY: "sk-ant-test",
+        MORI_CONSOLIDATE_MODEL: "anthropic/claude-x",
+      };
       const credentialStore = new InMemoryCredentialStore();
 
       const exitCode = await runCli(["hi"], env, {
@@ -531,7 +537,10 @@ describe("runCli", () => {
       const io = captureOutput();
       const kernel = spyKernel();
       const input = scriptedInput(["question one"]);
-      const env = { ANTHROPIC_API_KEY: "sk-ant-test", MORI_CONSOLIDATE_MODEL: "anthropic/claude-x" };
+      const env = {
+        ANTHROPIC_API_KEY: "sk-ant-test",
+        MORI_CONSOLIDATE_MODEL: "anthropic/claude-x",
+      };
       const credentialStore = new InMemoryCredentialStore();
 
       const exitCode = await runCli([], env, {

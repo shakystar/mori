@@ -1,9 +1,10 @@
 import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AgentTool, BeforeToolCallContext } from "@earendil-works/pi-agent-core";
+import type { AgentTool, BeforeToolCallContext, StreamFn } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { Type } from "@earendil-works/pi-ai";
+import { fakeProviderModels } from "../agent/fake-provider-models.js";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   BASH_BLOCKED_PATTERNS,
@@ -335,7 +336,8 @@ describe("beforeToolCall wiring in the agent loop", () => {
    */
   it("delivers a block to the model as an error tool result instead of throwing", async () => {
     const { Agent } = await import("@earendil-works/pi-agent-core");
-    const { createAssistantMessageEventStream } = await import("@earendil-works/pi-ai");
+    const { createAssistantMessageEventStream, InMemoryCredentialStore } =
+      await import("@earendil-works/pi-ai");
 
     let executed = 0;
     const stubParameters = Type.Object({ command: Type.String() });
@@ -360,47 +362,56 @@ describe("beforeToolCall wiring in the agent loop", () => {
     };
 
     let turn = 0;
+    const streamFn: StreamFn = (model) => {
+      const stream = createAssistantMessageEventStream();
+      const base: AssistantMessage = {
+        role: "assistant",
+        content: [],
+        api: model.api,
+        provider: model.provider,
+        model: model.id,
+        usage,
+        stopReason: "stop",
+        timestamp: 0,
+      };
+
+      stream.push({ type: "start", partial: base });
+
+      if (turn++ === 0) {
+        const toolCall = {
+          type: "toolCall" as const,
+          id: "call-1",
+          name: BASH_TOOL_NAME,
+          arguments: { command: "rm -rf /" },
+        };
+        const final: AssistantMessage = { ...base, content: [toolCall], stopReason: "toolUse" };
+        stream.push({ type: "toolcall_start", contentIndex: 0, partial: final });
+        stream.push({ type: "toolcall_end", contentIndex: 0, toolCall, partial: final });
+        stream.push({ type: "done", reason: "toolUse", message: final });
+      } else {
+        const final: AssistantMessage = { ...base, content: [{ type: "text", text: "ok" }] };
+        stream.push({ type: "text_end", contentIndex: 0, content: "ok", partial: final });
+        stream.push({ type: "done", reason: "stop", message: final });
+      }
+
+      return stream;
+    };
+
+    // The provider stream is faked by registering it on a real `Models` (#336) rather than
+    // by handing `Agent` a bare `streamFn`, so the model below is the real registered one
+    // instead of a hand-rolled stub.
+    const env = { ANTHROPIC_API_KEY: "sk-ant-test" };
+    const models = fakeProviderModels(env, new InMemoryCredentialStore(), streamFn);
+    const model = models.getModel("anthropic", "claude-sonnet-4-6");
+    if (!model) throw new Error("expected the default anthropic model to be registered");
+
     const agent = new Agent({
       initialState: {
         systemPrompt: "test",
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- stub model bypasses upstream Model's full shape
-        model: { id: "test-model", api: "anthropic-messages", provider: "anthropic" } as any,
+        model,
         tools: [stubBash],
       },
-      streamFn: (model) => {
-        const stream = createAssistantMessageEventStream();
-        const base: AssistantMessage = {
-          role: "assistant",
-          content: [],
-          api: model.api,
-          provider: model.provider,
-          model: model.id,
-          usage,
-          stopReason: "stop",
-          timestamp: 0,
-        };
-
-        stream.push({ type: "start", partial: base });
-
-        if (turn++ === 0) {
-          const toolCall = {
-            type: "toolCall" as const,
-            id: "call-1",
-            name: BASH_TOOL_NAME,
-            arguments: { command: "rm -rf /" },
-          };
-          const final: AssistantMessage = { ...base, content: [toolCall], stopReason: "toolUse" };
-          stream.push({ type: "toolcall_start", contentIndex: 0, partial: final });
-          stream.push({ type: "toolcall_end", contentIndex: 0, toolCall, partial: final });
-          stream.push({ type: "done", reason: "toolUse", message: final });
-        } else {
-          const final: AssistantMessage = { ...base, content: [{ type: "text", text: "ok" }] };
-          stream.push({ type: "text_end", contentIndex: 0, content: "ok", partial: final });
-          stream.push({ type: "done", reason: "stop", message: final });
-        }
-
-        return stream;
-      },
+      streamFn: models.streamSimple.bind(models),
       beforeToolCall: createBashBeforeToolCall(),
     });
 

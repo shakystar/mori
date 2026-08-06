@@ -23,6 +23,7 @@ import type {
 import { createAssistantMessageEventStream, InMemoryCredentialStore } from "@earendil-works/pi-ai";
 import type { ConsolidatorLlm } from "@mori/kernel";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { fakeProviderModels } from "../agent/fake-provider-models.js";
 import { consolidateOnSessionEnd } from "../cli/consolidation.js";
 import { runCli } from "../index.js";
 import { createMoriTools } from "../tools/index.js";
@@ -571,17 +572,17 @@ describe("mori turn -> sqlite store", () => {
     env: NodeJS.ProcessEnv = {},
     seen?: Context[],
   ): Promise<number> {
-    return runCli(
-      ["한 턴만"],
-      { ANTHROPIC_API_KEY: "sk-ant-test", ...env },
-      {
-        stdout: () => {},
-        stderr: () => {},
-        credentialStore: new InMemoryCredentialStore(),
-        streamFn: seen ? recordingStreamFn(turns, seen) : scriptedStreamFn(turns),
-        root,
-      },
-    );
+    const fullEnv = { ANTHROPIC_API_KEY: "sk-ant-test", ...env };
+    const credentialStore = new InMemoryCredentialStore();
+    const streamFn = seen ? recordingStreamFn(turns, seen) : scriptedStreamFn(turns);
+
+    return runCli(["한 턴만"], fullEnv, {
+      stdout: () => {},
+      stderr: () => {},
+      credentialStore,
+      models: fakeProviderModels(fullEnv, credentialStore, streamFn),
+      root,
+    });
   }
 
   it("lands one turn's file edit in the store as a consolidatable observation", async () => {
