@@ -144,7 +144,7 @@ export interface RebuildProjectProjectionOptions {
    * instead of writing anything (see that type's doc) — and its two
    * `reindexSearch: true` callers do not check the return value:
    * `consolidateBoundary` (consolidate-service.ts:2858) calls it and
-   * falls straight through to `commitBoundaryCursors` (:2920) regardless of
+   * falls straight through to `commitBoundaryCursors` (packages/kernel/src/services/consolidate-service.ts:2920) regardless of
    * the result, advancing the boundary's cursor past events whose
    * true-reindex never landed; `detectContradictions`, nested inside it
    * (contradiction-service.ts:346), does the same. When that happens, the

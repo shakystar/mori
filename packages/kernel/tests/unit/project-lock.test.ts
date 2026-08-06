@@ -117,7 +117,7 @@ describe("withProjectLock — acquire / release", () => {
 
   it("does not create the project root until a lock is actually taken", async () => {
     // The lock lives under the project root, so acquiring it creates that dir —
-    // but merely importing/resolving the path must not (README:139-141: a
+    // but merely importing/resolving the path must not (README.md:139-141: a
     // read-only session leaves no trace).
     expect(existsSync(getProjectLockDir(projectId))).toBe(false);
     expect(existsSync(join(sandbox, "projects"))).toBe(false);

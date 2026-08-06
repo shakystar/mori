@@ -62,10 +62,10 @@ export async function resolveConflict(params: ResolveConflictParams): Promise<Co
   //     down): the lock belongs to the kernel, not here. Take a `signal` param
   //     and check it, as capture-service.ts:291 does.
   //   - Outside that seam (like `importMemories`): the shape is
-  //     memory-import-service.ts's — a per-project mutex (:85), a LOG-derived
-  //     basis (:210-230) replacing the `getConflict` read below, and
+  //     memory-import-service.ts's — a per-project mutex (packages/kernel/src/services/memory-import-service.ts:85), a LOG-derived
+  //     basis (packages/kernel/src/services/memory-import-service.ts:210-230) replacing the `getConflict` read below, and
   //     `appendEvents(projectId, inputs, { expectedHead })` with a pre-append
-  //     retry (:239-273).
+  //     retry (packages/kernel/src/services/memory-import-service.ts:239-273).
   // Adding `expectedHead` ALONE does not close it: the basis below is the
   // `conflicts` projection, and a CAS pass says only that the log did not move
   // — not that the projection was fresh (#301 §Q1.8, PR #299 review). Whichever
