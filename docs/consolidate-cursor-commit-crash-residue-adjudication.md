@@ -556,8 +556,9 @@ better-sqlite3의 트랜잭션 함수는 프라미스를 반환하는 함수를 
      (`projection-store.ts:692-693`)은 그렇지 않다. 그 행의 원본은 `state.rules`가 아니라
      **디스크의 `.md`**다: `projection-store.ts:408`이 `writeAll`을 열기 **전에**
      `readJson(getTopicFile(...))`으로 파일을 읽고(`projection-store.ts:412-414`),
-     `projection-store.ts:416`의 `content?.body ?? rule.body`가 파일이 있으면 **파일 쪽**을
-     쓴다. 코드 자신이 그 성격을 `projection-store.ts:401-407`에 적었다 — _"Read the
+     `projection-store.ts:415`의 `content?.body ?? rule.body`가 파일이 있으면 **파일 쪽**을
+     쓴다 (5라운드는 이 자리를 `:416`으로 적었다 — 6라운드 정정, 부록 A-4 말미).
+     코드 자신이 그 성격을 `projection-store.ts:401-407`에 적었다 — _"Read the
      previously-persisted topic content here, BEFORE opening the synchronous rebuild
      transaction"_ · _"the rule body is still indexed via the file write at the end of the prior
      rebuild"_. 즉 `:744`가 던진 b6에서는 파일이 옛 내용이고, **그 파일을 읽은 토픽 FTS 행도 옛
@@ -717,7 +718,7 @@ better-sqlite3의 트랜잭션 함수는 프라미스를 반환하는 함수를 
    **(마) 토픽 축 — b6에서만 낡고, (나)와 같은 이유로 한 축이 아니라 두 축이다. 5라운드
    정정이다.** 4라운드는 이 축 **전체**에 「상한: 커밋하는 리빌드 1회, 종류 무관」을 줬는데,
    그 값은 **디스크의 `.md` 파일에만** 맞다. 그 파일은 `search_fts`의 `kind='topic'` 행으로 한 단
-   더 흐르고(`projection-store.ts:408`·`:412-416`·`:692-693` — 위 b6 축 적용 판정), **그 둘째
+   더 흐르고(`projection-store.ts:408`·`:412-415`·`:692-693` — 위 b6 축 적용 판정), **그 둘째
    단의 상한이 다르다.** 그래서 (나)를 (나-1)·(나-2)로 가른 것과 같은 형태로 가른다. 위 넷과
    달리 이 축이 **디스크 산출물**에서 출발한다는 것은 그대로이고, 절 머리 규정 ①의 어휘를 넓힌
    것이 그 때문이다.
@@ -1528,7 +1529,12 @@ conversationOffsetHeld`(`:2931`)를 읽는 자리가 재배치 뒤에도 결과�
 (마)를 **(마-1) 파일 축**과 **(마-2) FTS 토픽 행 축**으로 가르고, b6의 축 적용 판정에서
 (나-2)를 「메모리 행 미적용 / 토픽 행 적용」으로 가르고, §Q3 후보3 「닫는 것」에 **shown 접두
 한정**을 붙이면서 새로 연 자리다. 기준은 **5라운드 착수 시점 `main` = `74f2933`**이고, 맞은
-것도 "맞음"으로 적는다. 부록 A·A-1·A-2·A-3은 이번 라운드에서 손대지 않았다.
+것도 "맞음"으로 적는다. 부록 A·A-1·A-2·A-3은 손대지 않았다.
+
+**6라운드가 이 부록만 손봤다** — 새 부록을 열지 않은 것은 6라운드가 **새 인용을 열지 않고**
+5라운드가 연 자리를 정정·보완하기만 했기 때문이다. 고친 것은 셋이다: `:416` → `:415`
+정정(아래 「6라운드 정정」), 산문에만 있던 5행 추가(아래 「표의 전수성」), 6라운드 착수 시점
+`main`에서의 재대조(아래).
 
 | 인용                               | 그 줄에 실제로 있는 것                                                                                                                                                                                                                                                                                   | 대조 |
 | ---------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---- |
@@ -1538,7 +1544,7 @@ conversationOffsetHeld`(`:2931`)를 읽는 자리가 재배치 뒤에도 결과�
 | `projection-store.ts:408`          | `const topicSearchRows = reindexSearch`                                                                                                                                                                                                                                                                  | 맞음 |
 | `projection-store.ts:408-420`      | `topicSearchRows` 삼항 전체 (`: []`로 닫힌다)                                                                                                                                                                                                                                                            | 맞음 |
 | `projection-store.ts:412-414`      | `const content = await readJson<{ title?: string; body?: string }>(` … `getTopicFile(projectId, rule.id),` … `);`                                                                                                                                                                                        | 맞음 |
-| `projection-store.ts:416`          | `const text = searchText([rule.title, content?.title, content?.body ?? rule.body]);`                                                                                                                                                                                                                     | 맞음 |
+| `projection-store.ts:415`          | `const text = searchText([rule.title, content?.title, content?.body ?? rule.body]);` (5라운드는 `:416`으로 적었다 — 6라운드 정정, 아래 「6라운드 정정」 참조. `:416`은 `return text ? { entityId: rule.id, text } : undefined;`다)                                                                       | 맞음 |
 | `projection-store.ts:467`          | `if (reindexSearch) {` (바로 아래 `:468`이 `DELETE FROM search_fts`)                                                                                                                                                                                                                                     | 맞음 |
 | `projection-store.ts:470-473`      | `const insertSearch = db.prepare("INSERT INTO search_fts …")`                                                                                                                                                                                                                                            | 맞음 |
 | `projection-store.ts:480`          | `if (reindexSearch && text) insertSearch.run({ entityId, kind, sourceProjectId, text });`                                                                                                                                                                                                                | 맞음 |
@@ -1554,9 +1560,50 @@ conversationOffsetHeld`(`:2931`)를 읽는 자리가 재배치 뒤에도 결과�
 | `consolidate-service.ts:2823-2845` | `if (source && slice) {` 부터 오프셋 목표 분기 넷이 닫히는 `}`까지                                                                                                                                                                                                                                       | 맞음 |
 | `consolidate-service.ts:2824-2830` | `const shownWhole = …` / `const shownPrefixOffset = …`                                                                                                                                                                                                                                                   | 맞음 |
 | `consolidate-service.ts:2833-2835` | `} else if (sliceFullyStored) {` / `conversationOffsetTarget = { … }` / `conversationOffsetGuardIds = storedSegmentIds;`                                                                                                                                                                                 | 맞음 |
+| `storage/fs-utils.ts:94-95`        | `if (isEnoent(error)) {` / `return undefined;` (`readJson`의 catch 안 — ENOENT를 삼켜 `undefined`를 준다)                                                                                                                                                                                                | 맞음 |
+| `consolidate-service.ts:2906`      | `await rebuildProjectProjection(params.projectId, { reindexSearch: true });` (A-3의 `:2878`)                                                                                                                                                                                                             | 맞음 |
+| `consolidate-service.ts:2913`      | `await ensureEmbeddings(params.projectId, params.embedder);` (A-3의 `:2885`)                                                                                                                                                                                                                             | 맞음 |
+| `consolidate-service.ts:2922`      | `await detectContradictions({` (A-3의 `:2894`)                                                                                                                                                                                                                                                           | 맞음 |
+| `consolidate-service.ts:2933`      | `await ensureSegmentEmbeddings(params.projectId, params.embedder);` (A-3의 `:2905`)                                                                                                                                                                                                                      | 맞음 |
+
+**표의 전수성 — 6라운드에 다시 셌다 (5행 추가, 22 → 27).** 5라운드 커밋(`75e5cd4`)이 이 문서에
+**더한** 줄에서 `파일.ts:줄` 형태와 bare `:NNN` 형태를 모두 뽑아, 5라운드 **직전** 문서
+(`70fb505`)에 이미 있던 표기를 뺀 나머지가 「5라운드에서 새로 연 자리」다. 그 차집합에서 위 표에
+없던 것이 다섯이었다:
+
+- `storage/fs-utils.ts:94-95` — 아래 「직접 센 것 하나」 산문에만 있었다(owner가 지적한 1건).
+- `consolidate-service.ts:2906`·`:2913`·`:2922`·`:2933` — 아래 「기준 커밋이 갈리는 것에 대해」
+  산문에만 있었다. A-3이 연 꼬리 넷을 5라운드 기준으로 옮긴 값이므로 **그 자체가 이 기준에서 새로
+  연 인용**이고, 따라서 대조 대상이다.
+
+차집합의 나머지는 표에 이미 있거나(같은 자리의 bare 표기 `:344`·`:408`·`:408-420`·`:467`·
+`:470-473`·`:480`·`:688`·`:692-693`, `:401-407`의 부분범위 `:406-407`, `:467` 행이 담은 `:468`,
+`:2593` 행이 담은 `:2592`), 5라운드 이전부터 문서에 있던 자리이거나(`capture-service.ts:314`,
+`contradiction-service.ts:287`, `embeddings-service.ts:116`·`:203`,
+`projection-store.ts:424`·`:744`), A-3 기준의 **이력값을 그대로 인용한 것**(`:2755-2769`·
+`:2777-2783`·`:2788-2793`, 그리고 +28 이동의 삽입점으로만 쓰인 옛 `:2714`)이다. 이력값은 A-3의
+기준 커밋에서 맞고 이 표의 기준에서 대조할 대상이 아니다.
+
+**6라운드 정정 — `:416` → `:415`, 그리고 그 게이트가 왜 안 발화했나.**
+5라운드는 이 자리를 [owner의 15:30 수정요청](https://github.com/shakystar/mori/pull/347#issuecomment-5206967199)이
+적은 `:416` 그대로 옮겨 적은 뒤 이 표에 「맞음」을 줬다. 실물은 `:415`가 `const text = …`이고
+`:416`은 `return text ? … : undefined;`다. 이 표의 존재 이유가 바로 그 대조이므로, 여기서
+옮겨 적기가 통과한 것은 다른 26행의 신뢰까지 같이 깎는다. 6라운드는 네 자리를 고쳤다 —
+이 표 행, b6 축 적용 판정 본문, 아래 「직접 센 것 하나」, 그리고 (마) 머리의 범위 `:412-416`
+(의도가 「`readJson`부터 `?? rule.body`까지」이므로 `:412-415`로 좁혔다 — `:416`은 `return`
+줄이라 그 범위에 들 이유가 없다). **문서 머리의 「옮겨 적은 것은 하나도 없다」가 이 1행에서
+거짓이었고, 정정으로 다시 참이 된다.**
+
+**6라운드 착수 시점 `main`에서 재대조했다 — 기준 커밋 표기는 `74f2933` 그대로 둔다.**
+6라운드 착수 시점 `main`은 `9561dab`이고,
+`git diff --stat 74f2933 9561dab -- packages/`가 **빈 출력**이다(그 사이 두 커밋 `1ff14fe`·
+`9561dab`가 `docs/`만 만졌다). 즉 `projection-store.ts`도 `consolidate-service.ts`도
+`fs-utils.ts`도 안 밀렸고, 위 27행은 두 커밋 어느 쪽에서 열어도 같은 값이다. 그래서 A-4의
+기준 커밋 표기를 옮기지 않는다 — 옮겨도 값이 하나도 안 바뀌므로, 문서 머리의 「부록별 기준
+커밋」 선언을 라운드마다 흔드는 비용만 남는다.
 
 **직접 센 것 하나 — `search_fts`의 토픽 행이 `state.rules`가 아니라 디스크의 `.md`에서 온다.**
-`:416`의 `content?.body ?? rule.body`는 파일이 있으면 **파일** 쪽을 쓰고, 파일이 없을 때만
+`:415`의 `content?.body ?? rule.body`는 파일이 있으면 **파일** 쪽을 쓰고, 파일이 없을 때만
 (`readJson`이 ENOENT를 삼켜 `undefined`를 준다 — `storage/fs-utils.ts:94-95`) `rule.body`로
 떨어진다. 그리고 그 읽기(`:408`)는 `writeAll`(`:424`)보다 **앞**, 파일 쓰기(`:744`)는 **뒤**다.
 즉 한 리빌드가 「파일을 쓰고 그 내용을 색인하는」 것을 겸할 수 없다 — (마-2) ③의 「리빌드 둘」이
