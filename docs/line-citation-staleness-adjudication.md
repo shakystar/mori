@@ -131,12 +131,12 @@ grep -rnoE '\bL[0-9]{2,}\b' packages/ docs/ | wc -l                 # L1234 표�
 
 | 인용 위치                                                   | 인용                               | 대상 실물                                                          |
 | ----------------------------------------------------------- | ---------------------------------- | ------------------------------------------------------------------ |
-| `packages/kernel/src/services/projection-store.ts:146`      | `consolidate-service.ts:2878`      | `await rebuildProjectProjection(params.projectId, …)`              |
-| `packages/kernel/src/services/projection-store.ts:147`      | `(:2920)` (㉡a)                    | `const cursorCommit = commitBoundaryCursors(params.projectId`      |
+| `packages/kernel/src/services/projection-store.ts:146`      | `consolidate-service.ts:2906`      | `await rebuildProjectProjection(params.projectId, …)`              |
+| `packages/kernel/src/services/projection-store.ts:147`      | `consolidate-service.ts:2968`      | `const cursorCommit = commitBoundaryCursors(params.projectId`      |
 | `packages/kernel/src/services/projection-store.ts:150`      | `contradiction-service.ts:346`     | `await rebuildProjectProjection(projectId);`                       |
-| `packages/kernel/src/storage/project-lock.ts:115`           | `consolidate-service.ts:2877`      | `if (inputs.length > 0 \|\| segmentsWritten > 0) {`                |
-| `packages/kernel/src/storage/project-lock.ts:146`           | `consolidate-service.ts:2659-2663` | `pruneSegments` 앞 이른-반환 구간                                  |
-| `packages/kernel/src/services/consolidate-service.ts:2425`  | `memory-import-service.ts:234-254` | `readValidMemoriesFromLog` 본문                                    |
+| `packages/kernel/src/storage/project-lock.ts:115`           | `consolidate-service.ts:2905`      | `if (inputs.length > 0 \|\| segmentsWritten > 0) {`                |
+| `packages/kernel/src/storage/project-lock.ts:146`           | `consolidate-service.ts:2676-2680` | `pruneSegments` 앞 이른-반환 구간                                  |
+| `packages/kernel/src/services/consolidate-service.ts:2442`  | `memory-import-service.ts:234-254` | `readValidMemoriesFromLog` 본문                                    |
 | `packages/kernel/src/services/embeddings-store.ts:135`      | `projection-store.ts:1024`         | `` `WHERE memories.invalid_at IS NULL AND ${laneWhere(lane)}` ``   |
 | `pi-consolidator.test.ts:78`, `pi-consolidator.test.ts:107` | `pi-consolidator.ts:103` (2건)     | `maxTokens: Math.min(reservedOutputTokensFor(…), …)`               |
 | `consolidate-service.test.ts:1113` 외 3건                   | `` `:377` `` 등 (㉡a 4건)          | **파일이 아니다** — §Q1.3                                          |
@@ -179,7 +179,7 @@ grep -rnoE '\bL[0-9]{2,}\b' packages/ docs/ | wc -l                 # L1234 표�
 정오가 인용 자체가 아니라 그 줄이 표 안이냐 산문이냐에 달려 있다는 뜻이다.
 
 44건이 규칙을 반증한다. 예: `docs/consolidate-evidence-binding-adjudication.md:302`의
-`` `:2142`, `:2143`, `:2167`, `:2214` `` 는 문맥상 전부 `consolidate-service.ts`(2986줄)를 가리키는데,
+`` `:2142`, `:2143`, `:2167`, `:2214` `` 는 문맥상 전부 `consolidate-service.ts`(3038줄)를 가리키는데,
 같은 줄 기준 가장 가까운 앞선 ㉠ 인용은 `event-store.ts`(481줄)다. 사람은 절 제목과 문단 주어로
 파일을 잇지만, 기계가 볼 수 있는 신호는 그 안에 없다.
 
@@ -309,7 +309,7 @@ console.log({총_인용:tot, 흘러감:drift, 유지:same, 판정불가:skip});'
 | #299 안   | `project-lock.ts:115` | `consolidate-service.ts:2775`      | **자기 자신** — §Q2.3                                                                                  |                                                                              |
 | #302 이전 | `packages/` 8건       | —                                  | #299의 재배선(+301/-74) + #299가 새로 넣은 주석                                                        | `git diff db80dfc 7bc2490`                                                   |
 
-세 줄 다 같은 파일이 원인이다. `consolidate-service.ts`는 오늘 2986줄로 리포에서 가장 크고,
+세 줄 다 같은 파일이 원인이다. `consolidate-service.ts`는 오늘 3038줄로 리포에서 가장 크고,
 **㉠ 계열 291건 중 53건(18%)이 이 파일을 이름으로 가리킨다** — `grep -rhoE '…\.(ts|…):[0-9]+(-[0-9]+)?(,[[:space:]]*[0-9]+(-[0-9]+)?)*' packages/ docs/ | grep -c 'consolidate-service\.ts'`
 가 51 토큰이고, 그중 쉼표 이어쓰기 2건을 펼치면 53 스팬이다. ㉡ 계열 154건은 대상 파일이 확정되지
 않아 이 수에 넣지 않았으나 §Q1.2가 보인 대로 그 다수의 문맥이 이 파일이므로 **실제 집중도는 더

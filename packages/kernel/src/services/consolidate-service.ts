@@ -2439,7 +2439,7 @@ export async function consolidate(params: ConsolidateParams): Promise<Consolidat
     // #298: the same predicate `listValidMemories(projectId)` applied in SQL
     // (`invalid_at IS NULL AND source_project_id IS NULL`), applied instead to
     // the state folded from the array above — the shape
-    // `readValidMemoriesFromLog` (`memory-import-service.ts:210-230`) already
+    // `readValidMemoriesFromLog` (`packages/kernel/src/services/memory-import-service.ts:234-254`) already
     // uses. The `lastAccessedAt` the projection query also returned is not
     // missed: this call site dropped it (`.map((row) => row.memory)`).
     const existing = Object.values(state.memories).filter(
@@ -2557,7 +2557,7 @@ export async function consolidate(params: ConsolidateParams): Promise<Consolidat
     //     `memory.consolidated` per item (`for (const item of extracted)`
     //     below) and all of them carry this SAME array, so a normal
     //     multi-memory boundary collides with its own second row here.
-    //   - Import always writes it empty (memory-import-service.ts:654-656) and
+    //   - Import always writes it empty (packages/kernel/src/services/memory-import-service.ts:654-656) and
     //     a conversation-only boundary also yields `[]` here, so every second
     //     import and every second conversation-only boundary would collide too.
     //   - The window's real identity lives in `meta`, not the log:
