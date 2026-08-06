@@ -62,8 +62,8 @@ owner가 인터리브를 실물로 재확인했다. 이 문서는 그 잔여의 
 | `consolidate-service.ts:2238` | `probeBoundaryStart` → `expectedHead` 스탬프. 로그의 첫 접촉                        |
 | `consolidate-service.ts:2254` | `await source.read(sliceStartOffset)` — 대화 슬라이스. 오프셋도 **`meta`에서** 왔다 |
 | `consolidate-service.ts:2331` | `readEvents` — 창·`consumed`·`existing`이 전부 여기서 나온다 (#298)                 |
-| `consolidate-service.ts:2693` | `appendEvents(..., { expectedHead })` — **CAS**                                     |
-| `consolidate-service.ts:2920` | `commitBoundaryCursors` — 워터마크·대화 오프셋 커밋. **append 뒤**                  |
+| `consolidate-service.ts:2713` | `appendEvents(..., { expectedHead })` — **CAS**                                     |
+| `consolidate-service.ts:2940` | `commitBoundaryCursors` — 워터마크·대화 오프셋 커밋. **append 뒤**                  |
 
 대화 오프셋의 키는 `cls_conversation_offset:<sourceId>`이고
 (`consolidate-service.ts:1286`), 쓰기는 `writeConversationOffset`
@@ -73,7 +73,7 @@ owner가 인터리브를 실물로 재확인했다. 이 문서는 그 잔여의 
 `:2693`이 성공하고 `:2920`이 실행되지 않으면 디스크에는 이렇게 남는다.
 
 - `memory.consolidated`(+ `memory.superseded`) 이벤트 — **durable**
-- 이 슬라이스의 세그먼트 행 — **durable** (`insertSegments`, `consolidate-service.ts:2624`)
+- 이 슬라이스의 세그먼트 행 — **durable** (`insertSegments`, `consolidate-service.ts:2644`)
 - 이벤트 워터마크 — **안 움직임**
 - 대화 오프셋 — **안 움직임**
 
@@ -104,15 +104,15 @@ CAS의 결함이 아니라 CAS가 말하지 않는 것이다.
 
 | 순서 | 줄                            | 무엇                                                          | 성질                                                   |
 | ---- | ----------------------------- | ------------------------------------------------------------- | ------------------------------------------------------ |
-| 1    | `consolidate-service.ts:2716` | `pruneSegments` (동기)                                        | SQLite 삭제 + FTS·임베딩 행 정리. `try`로 감쌈         |
-| 2    | `consolidate-service.ts:2733` | `sliceFullyStored` 계산 (동기)                                | 순수 계산                                              |
-| 3    | `consolidate-service.ts:2783` | `conversationOffsetTarget` 분기 (동기)                        | 순수 계산                                              |
-| 4    | `consolidate-service.ts:2811` | `capturedConversationSliceHeld` 미러 (동기)                   | 대입 하나                                              |
-| 5    | `consolidate-service.ts:2858` | **`await rebuildProjectProjection(..., reindexSearch:true)`** | **로그 전체 replay + 전체 테이블 재작성 + FTS 재색인** |
-| 6    | `consolidate-service.ts:2865` | **`await ensureEmbeddings(...)`**                             | **임베더 네트워크 왕복**                               |
-| 7    | `consolidate-service.ts:2874` | **`await detectContradictions({...})`**                       | **로그 전체 replay + 비교쌍마다 judge LLM 왕복**       |
-| 8    | `consolidate-service.ts:2885` | **`await ensureSegmentEmbeddings(...)`**                      | **임베더 네트워크 왕복**                               |
-| 9    | `consolidate-service.ts:2903` | `eventWatermarkId` 계산 (동기)                                | 배열 인덱싱                                            |
+| 1    | `consolidate-service.ts:2736` | `pruneSegments` (동기)                                        | SQLite 삭제 + FTS·임베딩 행 정리. `try`로 감쌈         |
+| 2    | `consolidate-service.ts:2753` | `sliceFullyStored` 계산 (동기)                                | 순수 계산                                              |
+| 3    | `consolidate-service.ts:2803` | `conversationOffsetTarget` 분기 (동기)                        | 순수 계산                                              |
+| 4    | `consolidate-service.ts:2831` | `capturedConversationSliceHeld` 미러 (동기)                   | 대입 하나                                              |
+| 5    | `consolidate-service.ts:2878` | **`await rebuildProjectProjection(..., reindexSearch:true)`** | **로그 전체 replay + 전체 테이블 재작성 + FTS 재색인** |
+| 6    | `consolidate-service.ts:2885` | **`await ensureEmbeddings(...)`**                             | **임베더 네트워크 왕복**                               |
+| 7    | `consolidate-service.ts:2894` | **`await detectContradictions({...})`**                       | **로그 전체 replay + 비교쌍마다 judge LLM 왕복**       |
+| 8    | `consolidate-service.ts:2905` | **`await ensureSegmentEmbeddings(...)`**                      | **임베더 네트워크 왕복**                               |
+| 9    | `consolidate-service.ts:2923` | `eventWatermarkId` 계산 (동기)                                | 배열 인덱싱                                            |
 
 5번의 비용은 이 리포가 스스로 재 뒀다 — `projection-store.ts:339`의 주석이
 _"#277 measured the cost: n=1000 → ~319ms, n=5000 → ~1.9s per reindex"_ 라고 적는다. 6·8번은
@@ -230,11 +230,11 @@ R1의 두 번째 경계가 같은 슬라이스를 다시 처리하면 두 가지
 
 | 무엇              | 어디서 생기는가                                                                            | 식별자                                    |
 | ----------------- | ------------------------------------------------------------------------------------------ | ----------------------------------------- |
-| **중복 세그먼트** | `consolidate-service.ts:2624` `insertSegments` — 같은 청크를 다시 삽입                     | `createId("seg")`로 **주조** (`:2617`)    |
-| **중복 메모리**   | `consolidate-service.ts:2693` append — 같은 슬라이스에서 다시 추출된 `memory.consolidated` | `createConsolidatedMemory`가 새 id를 준다 |
+| **중복 세그먼트** | `consolidate-service.ts:2644` `insertSegments` — 같은 청크를 다시 삽입                     | `createId("seg")`로 **주조** (`:2617`)    |
+| **중복 메모리**   | `consolidate-service.ts:2713` append — 같은 슬라이스에서 다시 추출된 `memory.consolidated` | `createConsolidatedMemory`가 새 id를 준다 |
 
 둘의 성질이 다르다. 세그먼트는 **상한이 있는 파생 버퍼**다 —
-`pruneSegments`(`consolidate-service.ts:2716`)가 나이·개수 상한을 걸고, 리빌드가 살아남은 행에서
+`pruneSegments`(`consolidate-service.ts:2736`)가 나이·개수 상한을 걸고, 리빌드가 살아남은 행에서
 FTS를 다시 채운다. 메모리는 **로그의 사실**이다 — append-only이고, 접히려면 누군가가 접어야 한다.
 
 ### Q2.1 #103이 받아들인 범위 — 원문으로 확정
@@ -249,7 +249,7 @@ FTS를 다시 채운다. 메모리는 **로그의 사실**이다 — append-only
 > 것으로 충분한지, 아니면 순서를 바꿔야 하는지 판단하는 것이 이 이슈의 몫이다.
 
 **"중복 세그먼트"라고 명시돼 있고, 메모리는 나오지 않는다.** 그리고 #103이 낸 답은 코드에
-남아 있다 — `consolidate-service.ts:2589-2598` 주석이 순서를 바꾸지 않기로 한 이유를 적고,
+남아 있다 — `consolidate-service.ts:2609-2618` 주석이 순서를 바꾸지 않기로 한 이유를 적고,
 `:2594-2596`이 _"segments are a derived, prunable buffer (pruneSegments caps the total below), so
 that duplication is bounded and self-healing"_ 이라고 쓴다. `:2633-2643`의 체크 포인트 ④ 주석도
 같은 범위를 되풀이한다 — _"On disk from this boundary at this instant: the raw conversation
@@ -302,7 +302,7 @@ const ids = memory.sourceObservationIds ?? [];
 if (ids.length === 0) continue;
 ```
 
-R1의 두 메모리에 그 값이 어떻게 실리는지 따라간다. `consolidate-service.ts:2536`이
+R1의 두 메모리에 그 값이 어떻게 실리는지 따라간다. `consolidate-service.ts:2556`이
 `sourceObservationIds = bounded.observations.map((o) => o.id)`이다.
 
 - **혼합 경계(관찰 + 대화)**: A는 관찰 `{o1, o2}`를 소비했으므로 A의 키 조각은 `["o1","o2"]`.
@@ -502,8 +502,8 @@ better-sqlite3의 트랜잭션 함수는 프라미스를 반환하는 함수를 
      쓴다) → `contradiction-service.ts:346`(`results.length > 0`일 때만 도는 리빌드, `:345`).
 
    ```
-   consolidate-service.ts:2861      if (inputs.length > 0) {
-   consolidate-service.ts:2874        await detectContradictions({
+   consolidate-service.ts:2881      if (inputs.length > 0) {
+   consolidate-service.ts:2894        await detectContradictions({
    ```
 
    `:2874`는 `:2861`의 `inputs.length > 0` 안에 있다. 후보1 뒤에는 커서가 전진했으므로 다음
@@ -517,7 +517,7 @@ better-sqlite3의 트랜잭션 함수는 프라미스를 반환하는 함수를 
      투영 테이블이 아니라 **로그**에서 접힌다(`contradiction-service.ts:212`의
      `reduceProjectState(events, projectId)`) — 즉 이 축은 아래 (나-1)에 **종속되지 않는다.**
    - **③ 발화하지 않는 조건**: 추출 결과가 0건인 경계 — 후보1 뒤의 조용한 프로젝트가 정확히 그
-     상태다. `memory-import-service.ts:815` 뒤의 import도 같은 스윕을 부르지만 그 역시 새 활동을
+     상태다. `memory-import-service.ts:839` 뒤의 import도 같은 스윕을 부르지만 그 역시 새 활동을
      전제한다.
    - **③ 상한: 없다.** 다음으로 추출 결과가 나올 때까지의 간격을 코드가 묶어 두는 자리가 없다.
 
@@ -545,11 +545,11 @@ better-sqlite3의 트랜잭션 함수는 프라미스를 반환하는 함수를 
      `memories` 테이블로 투영하는 `INSERT`는 리포 전체에서 이 트랜잭션 하나다** — 전수 확인과
      함께 잡힌 두 번째 `INTO memories`(v17 마이그레이션의 스키마 재작성)를 왜 회수 자리로 세지
      않는지는 부록 A-2 「직접 센 것」 (1)에 적었다.
-   - **③ 발화하는 조건**: 리빌드 다섯 자리(`consolidate-service.ts:2858`,
-     `memory-import-service.ts:815`, `conflict-service.ts:105`, `contradiction-service.ts:346`,
+   - **③ 발화하는 조건**: 리빌드 다섯 자리(`consolidate-service.ts:2878`,
+     `memory-import-service.ts:839`, `conflict-service.ts:105`, `contradiction-service.ts:346`,
      `capture-service.ts:314`) **어느 하나라도** 커밋하면 채워진다. `reindexSearch`가 `false`인
      것(`capture-service.ts:314`, capture마다 돈다)도 포함이다 — 위 게이트가 이 축에는 안 걸리기
-     때문이다. 코드 자신이 그렇게 적었다(`consolidate-service.ts:2829-2833`: _"The memories this
+     때문이다. 코드 자신이 그렇게 적었다(`consolidate-service.ts:2849-2853`: _"The memories this
      boundary appended do still reach the projection TABLES (any later rebuild replays the full
      log unconditionally, `reindexSearch: false` ones included), but they reach `search_fts` only
      via a LATER rebuild that both requests an effective `reindexSearch: true` AND commits"_).
@@ -561,7 +561,7 @@ better-sqlite3의 트랜잭션 함수는 프라미스를 반환하는 함수를 
      (새 활동에 종속). 두 문장을 붙여 읽어야 이 축의 값이 정확하다.
    - **후보1이 이 축을 약하게 만드는가 — 거의 만들지 않는다.** 오늘의 재처리도 표를 직접 채우지는
      않는다(채우는 것은 재처리한 경계의 `:2858`이다). 후보1이 없애는 것은 다섯 자리 중
-     `consolidate-service.ts:2858` **하나**가 조용한 경계에서 안 도는 것이고, 나머지 넷은 그대로다.
+     `consolidate-service.ts:2878` **하나**가 조용한 경계에서 안 도는 것이고, 나머지 넷은 그대로다.
 
    **(나-2) FTS 축 — 회수는 마커가 섰는지에 따라 「리빌드 1회」이거나 「상한 없음」이다.**
 
@@ -574,8 +574,8 @@ better-sqlite3의 트랜잭션 함수는 프라미스를 반환하는 함수를 
      **종류 무관으로** `true`로 만든다. `capture-service.ts:314`의 `false` 리빌드가 그대로 회수
      자리가 된다. **상한: 리빌드 1회** (#284가 세운 그대로).
    - **③ 발화하는 조건 (마커가 안 선 갈래 b1)**: 승격이 없으므로 **`reindexSearch`가 `true`로
-     해소되는 리빌드**가 와야 한다 — 자리는 넷이다(`consolidate-service.ts:2858`,
-     `memory-import-service.ts:815`, `conflict-service.ts:105`, `contradiction-service.ts:346`;
+     해소되는 리빌드**가 와야 한다 — 자리는 넷이다(`consolidate-service.ts:2878`,
+     `memory-import-service.ts:839`, `conflict-service.ts:105`, `contradiction-service.ts:346`;
      뒤 둘은 인자 없이 불러 `:344`의 `opts.reindexSearch ?? true`로 `true`가 된다).
      `capture-service.ts:314`의 `false` 리빌드는 **몇 번을 돌아도 이 축을 안 채운다.**
      **상한: 없다.**
@@ -590,9 +590,9 @@ better-sqlite3의 트랜잭션 함수는 프라미스를 반환하는 함수를 
    - **① 낡는 것**: `embeddings` 테이블의 `kind = "memory"` 행 — 이 경계가 append한 메모리에 대한
      벡터가 없다. (`embeddings`는 `ENTITY_TABLES` 밖이라 리빌드가 채워 주지 않는다.)
    - **② 다시 채우는 쓰기 자리**: `embeddings-service.ts:116`(`upsertEmbedding`), `ensureEmbeddings`
-     (`:88`) 안. 호출 자리는 둘 — `consolidate-service.ts:2865`, `memory-import-service.ts:816`.
+     (`:88`) 안. 호출 자리는 둘 — `consolidate-service.ts:2885`, `memory-import-service.ts:840`.
    - **③ 발화하는 조건**: `:2865`는 `:2861`의 `inputs.length > 0` 안이다 — **(가)와 같은 게이트**다.
-     `memory-import-service.ts:816`도 import라는 새 활동을 전제한다.
+     `memory-import-service.ts:840`도 import라는 새 활동을 전제한다.
    - **③ 발화하지 않는 조건**: 추출 결과가 0건인 경계, 그리고 embedder가 없는 구성(`:93`이 그때
      no-op). **그리고 (나-1)이 아직 안 채워진 동안** — `ensureEmbeddings`의 입력이
      `listValidMemories`(`embeddings-service.ts:95`), 즉 `memories` 투영 테이블이므로, 표가 비어
@@ -606,7 +606,7 @@ better-sqlite3의 트랜잭션 함수는 프라미스를 반환하는 함수를 
    - **① 낡는 것**: `embeddings`의 `kind = "segment"` 행 — 이 경계가 쓴 세그먼트의 벡터.
    - **② 다시 채우는 쓰기 자리**: `embeddings-service.ts:203`(`upsertSegmentEmbeddingIfLive`,
      정의 `:151`), `ensureSegmentEmbeddings`(`:170`) 안. 호출 자리는 하나 —
-     `consolidate-service.ts:2885`.
+     `consolidate-service.ts:2905`.
    - **③ 발화하는 조건**: `:2884`의 `segmentsWritten > 0`. 입력은 `listSegments`(`:182`) —
      세그먼트 테이블을 직접 읽으므로 이 축은 **(나-1)에 종속되지 않는다.**
    - **③ 발화하지 않는 조건**: 세그먼트를 안 쓴 경계, embedder 없음(`:175`).
@@ -923,7 +923,7 @@ conversationOffsetHeld`(`:2931`)를 읽는 자리가 재배치 뒤에도 결과�
 
 이 산정 중에 발견했으나 이 이슈에서 고치지 않는 것들이다 (비범위 규칙에 따라 기록만 한다).
 
-- **(발견, 범위 밖) `packages/kernel/src/services/consolidate-service.ts:2961` — 꼬리가 던진
+- **(발견, 범위 밖) `packages/kernel/src/services/consolidate-service.ts:2981` — 꼬리가 던진
   경계의 텔레메트리가 "메모리 0건 실패"로 보인다.** `run()`이 `:2858`·`:2874`에서 던지면
   `recordAttempt`가 `conversationSliceHeld`와 `extractionTruncated`만 미러하고(`:2967-2968`)
   **`consolidated`는 미러하지 않는다.** 그런데 그 시점에 메모리는 이미 durable하다. #232가
@@ -934,10 +934,10 @@ conversationOffsetHeld`(`:2931`)를 읽는 자리가 재배치 뒤에도 결과�
 - **(발견, 범위 밖) `packages/kernel/src/projections/projector.ts:239` — `ids.length === 0`
   게이트의 실질 범위가 주석보다 넓다.** `:229`의 주석은 _"Empty/absent source sets never group
   (each stands alone)"_ 라고 적지만, import 메모리는 **항상** 빈 배열을 찍고 대화 전용 경계도
-  항상 빈 배열이다(`consolidate-service.ts:2536`). import 쪽은 그 사실을 자기 코드 옆에 적어 뒀다 —
-  `memory-import-service.ts:630-632`가 _"imported memories have EMPTY sourceObservationIds, which
+  항상 빈 배열이다(`consolidate-service.ts:2556`). import 쪽은 그 사실을 자기 코드 옆에 적어 뒀다 —
+  `memory-import-service.ts:654-656`가 _"imported memories have EMPTY sourceObservationIds, which
   the projection dedup never groups — a re-run would silently duplicate"_ 라고 쓰고, 그래서 그쪽에는
-  `textKey` dedup이 따로 있다(`memory-import-service.ts:641`). **대화 전용 증류 축에는 그
+  `textKey` dedup이 따로 있다(`memory-import-service.ts:665`). **대화 전용 증류 축에는 그
   대체물이 없다** — 같은 게이트에 걸리는데 대신 서 주는 것이 없다는 뜻이다. 오늘 결함이라고
   판정하지 않지만, §Q2.3의 판정이 이 게이트 하나에 걸려 있으므로 여기 적는다.
 
@@ -947,7 +947,7 @@ conversationOffsetHeld`(`:2931`)를 읽는 자리가 재배치 뒤에도 결과�
   그 산정이 "오늘 결함이 아니다"로 판정한 것을 뒤집지 않는다. 다만 §Q2.2가 보인 대로 **읽기 쪽에
   마지막 방어선이 없다**는 사실은 R1 밖에서도 성립한다.
 
-- **(발견, 범위 밖) `packages/kernel/src/services/consolidate-service.ts:2858`·`:2874` — 꼬리
+- **(발견, 범위 밖) `packages/kernel/src/services/consolidate-service.ts:2878`·`:2874` — 꼬리
   예외에 대한 방어가 비대칭이다.** 같은 꼬리에서 `ensureEmbeddings`·`ensureSegmentEmbeddings`는
   전체 `try`로 감싸 never-throw인데(`embeddings-service.ts:92`·`:174`), 리빌드와 모순 판정은
   감싸지 않는다. 어느 쪽이 옳은지는 이 이슈의 범위가 아니다 — `#282`/`#284`가 리빌드의
@@ -983,31 +983,31 @@ conversationOffsetHeld`(`:2931`)를 읽는 자리가 재배치 뒤에도 결과�
 | `consolidate-service.ts:2498`     | `extracted = await consolidator.extract(`                                                 | 맞음 |
 | `consolidate-service.ts:2526`     | `capturedExtractionTruncated = extractionTruncated;`                                      | 맞음 |
 | `consolidate-service.ts:2535`     | `const validIds = new Set(bounded.existingMemories.map((m) => m.id));`                    | 맞음 |
-| `consolidate-service.ts:2536`     | `const sourceObservationIds = bounded.observations.map((o) => o.id);`                     | 맞음 |
-| `consolidate-service.ts:2566`     | `if (item.supersedesMemoryId && validIds.has(item.supersedesMemoryId)) {`                 | 맞음 |
-| `consolidate-service.ts:2617`     | `id: createId("seg"),`                                                                    | 맞음 |
-| `consolidate-service.ts:2624`     | `insertSegments(params.projectId, rows);`                                                 | 맞음 |
-| `consolidate-service.ts:2626`     | `storedSegmentIds = rows.map((r) => r.id);`                                               | 맞음 |
-| `consolidate-service.ts:2648`     | `throwIfDispossessed(params.lockSignal);` (체크 포인트 ④ — 마지막)                        | 맞음 |
-| `consolidate-service.ts:2650`     | `if (inputs.length > 0) {`                                                                | 맞음 |
-| `consolidate-service.ts:2693`     | `await appendEvents(params.projectId, inputs, { expectedHead });`                         | 맞음 |
-| `consolidate-service.ts:2716`     | `prunedSegmentIds = pruneSegments(params.projectId, params.segmentRetention);`            | 맞음 |
-| `consolidate-service.ts:2733`     | `storedSegmentIds.length > 0 && storedSegmentIds.every((id) => !prunedIds.has(id));`      | 맞음 |
-| `consolidate-service.ts:2783`     | `if (shownWhole \|\| slice.text.length === 0) {`                                          | 맞음 |
-| `consolidate-service.ts:2785`     | `} else if (sliceFullyStored) {`                                                          | 맞음 |
-| `consolidate-service.ts:2787`     | `conversationOffsetGuardIds = storedSegmentIds;`                                          | 맞음 |
-| `consolidate-service.ts:2788`     | `} else if (shownPrefixOffset !== undefined) {`                                           | 맞음 |
-| `consolidate-service.ts:2811`     | `capturedConversationSliceHeld = conversationSliceHeld;`                                  | 맞음 |
-| `consolidate-service.ts:2858`     | `await rebuildProjectProjection(params.projectId, { reindexSearch: true });`              | 맞음 |
-| `consolidate-service.ts:2865`     | `await ensureEmbeddings(params.projectId, params.embedder);`                              | 맞음 |
-| `consolidate-service.ts:2874`     | `await detectContradictions({`                                                            | 맞음 |
-| `consolidate-service.ts:2885`     | `await ensureSegmentEmbeddings(params.projectId, params.embedder);`                       | 맞음 |
-| `consolidate-service.ts:2903`     | `eventWatermarkId = observationEvents[bounded.observations.length - 1]!.id;`              | 맞음 |
-| `consolidate-service.ts:2920`     | `const cursorCommit = commitBoundaryCursors(params.projectId, {`                          | 맞음 |
-| `consolidate-service.ts:2931`     | `if (cursorCommit.conversationOffsetHeld) {`                                              | 맞음 |
-| `consolidate-service.ts:2957`     | `try {` (`run()` 호출을 감싸는 것)                                                        | 맞음 |
-| `consolidate-service.ts:2961`     | `recordAttempt(classifyConsolidateError(error, params.signal), {`                         | 맞음 |
-| `consolidate-service.ts:2970`     | `throw error;`                                                                            | 맞음 |
+| `consolidate-service.ts:2556`     | `const sourceObservationIds = bounded.observations.map((o) => o.id);`                     | 맞음 |
+| `consolidate-service.ts:2586`     | `if (item.supersedesMemoryId && validIds.has(item.supersedesMemoryId)) {`                 | 맞음 |
+| `consolidate-service.ts:2637`     | `id: createId("seg"),`                                                                    | 맞음 |
+| `consolidate-service.ts:2644`     | `insertSegments(params.projectId, rows);`                                                 | 맞음 |
+| `consolidate-service.ts:2646`     | `storedSegmentIds = rows.map((r) => r.id);`                                               | 맞음 |
+| `consolidate-service.ts:2668`     | `throwIfDispossessed(params.lockSignal);` (체크 포인트 ④ — 마지막)                        | 맞음 |
+| `consolidate-service.ts:2670`     | `if (inputs.length > 0) {`                                                                | 맞음 |
+| `consolidate-service.ts:2713`     | `await appendEvents(params.projectId, inputs, { expectedHead });`                         | 맞음 |
+| `consolidate-service.ts:2736`     | `prunedSegmentIds = pruneSegments(params.projectId, params.segmentRetention);`            | 맞음 |
+| `consolidate-service.ts:2753`     | `storedSegmentIds.length > 0 && storedSegmentIds.every((id) => !prunedIds.has(id));`      | 맞음 |
+| `consolidate-service.ts:2803`     | `if (shownWhole \|\| slice.text.length === 0) {`                                          | 맞음 |
+| `consolidate-service.ts:2805`     | `} else if (sliceFullyStored) {`                                                          | 맞음 |
+| `consolidate-service.ts:2807`     | `conversationOffsetGuardIds = storedSegmentIds;`                                          | 맞음 |
+| `consolidate-service.ts:2808`     | `} else if (shownPrefixOffset !== undefined) {`                                           | 맞음 |
+| `consolidate-service.ts:2831`     | `capturedConversationSliceHeld = conversationSliceHeld;`                                  | 맞음 |
+| `consolidate-service.ts:2878`     | `await rebuildProjectProjection(params.projectId, { reindexSearch: true });`              | 맞음 |
+| `consolidate-service.ts:2885`     | `await ensureEmbeddings(params.projectId, params.embedder);`                              | 맞음 |
+| `consolidate-service.ts:2894`     | `await detectContradictions({`                                                            | 맞음 |
+| `consolidate-service.ts:2905`     | `await ensureSegmentEmbeddings(params.projectId, params.embedder);`                       | 맞음 |
+| `consolidate-service.ts:2923`     | `eventWatermarkId = observationEvents[bounded.observations.length - 1]!.id;`              | 맞음 |
+| `consolidate-service.ts:2940`     | `const cursorCommit = commitBoundaryCursors(params.projectId, {`                          | 맞음 |
+| `consolidate-service.ts:2951`     | `if (cursorCommit.conversationOffsetHeld) {`                                              | 맞음 |
+| `consolidate-service.ts:2977`     | `try {` (`run()` 호출을 감싸는 것)                                                        | 맞음 |
+| `consolidate-service.ts:2981`     | `recordAttempt(classifyConsolidateError(error, params.signal), {`                         | 맞음 |
+| `consolidate-service.ts:2990`     | `throw error;`                                                                            | 맞음 |
 | `event-store.ts:293`              | `export async function appendEvents<TPayload extends DomainEventPayload>(`                | 맞음 |
 | `event-store.ts:316`              | `const db = getDb(projectId);`                                                            | 맞음 |
 | `event-store.ts:318`              | `const batch = db.transaction(() => {`                                                    | 맞음 |
@@ -1037,8 +1037,8 @@ conversationOffsetHeld`(`:2931`)를 읽는 자리가 재배치 뒤에도 결과�
 | `contradiction-service.ts:257`    | `if (!verdict.contradicts) continue;`                                                     | 맞음 |
 | `contradiction-service.ts:314`    | `if (!isStaleHeadError(error)) throw error;`                                              | 맞음 |
 | `contradiction-service.ts:345`    | `if (results.length > 0) {` (그 아래가 `await rebuildProjectProjection(projectId);`)      | 맞음 |
-| `memory-import-service.ts:641`    | `const key = textKey(memory.kind, memory.text);`                                          | 맞음 |
-| `memory-import-service.ts:651`    | `const seenTextKeys = new Set(memoryIdByTextKey.keys());`                                 | 맞음 |
+| `memory-import-service.ts:665`    | `const key = textKey(memory.kind, memory.text);`                                          | 맞음 |
+| `memory-import-service.ts:675`    | `const seenTextKeys = new Set(memoryIdByTextKey.keys());`                                 | 맞음 |
 | `project-lock.ts:483`             | `const LOCK_STALE_MS = 30_000;`                                                           | 맞음 |
 | `project-lock.ts:818`             | `const result = await fn(dispossession.signal);`                                          | 맞음 |
 | `project-lock.ts:826`             | `if (dispossessed) throw new ProjectLockCompromisedError(projectId);`                     | 맞음 |
@@ -1047,7 +1047,7 @@ conversationOffsetHeld`(`:2931`)를 읽는 자리가 재배치 뒤에도 결과�
 범위 인용(`:2201-2210`, `:2589-2598`, `:2633-2643`, `:2653-2680`, `:2696-2707`, `:2757-2773`,
 `:2764-2768`, `:2798-2805`, `:2901-2910`, `:2916-2919`, `:1407-1408`, `:319-324`, `:334-344`,
 `projector.ts:229`, `contradiction-service.ts:58-60`, `contradiction-service.ts:322-325`,
-`memory-import-service.ts:630-632`, `projection-store.ts:339`)도 같은 커밋에서 열어 대조했다.
+`memory-import-service.ts:654-656`, `projection-store.ts:339`)도 같은 커밋에서 열어 대조했다.
 모두 본문이 서술한 내용과 일치한다.
 
 **직접 센 것 두 가지**(줄 인용이 아니라 전수 확인이므로 여기 적는다):
@@ -1067,14 +1067,14 @@ conversationOffsetHeld`(`:2931`)를 읽는 자리가 재배치 뒤에도 결과�
 | `consolidate-service.ts:1475`  | `const guardIds = cursors.conversationOffsetGuardIds;`                                    | 맞음 |
 | `consolidate-service.ts:1481`  | `conversationOffset = undefined;`                                                         | 맞음 |
 | `consolidate-service.ts:1482`  | `conversationOffsetHeld = true;`                                                          | 맞음 |
-| `consolidate-service.ts:2626`  | `storedSegmentIds = rows.map((r) => r.id);`                                               | 맞음 |
-| `consolidate-service.ts:2857`  | `if (inputs.length > 0 \|\| segmentsWritten > 0) {`                                       | 맞음 |
-| `consolidate-service.ts:2861`  | `if (inputs.length > 0) {`                                                                | 맞음 |
+| `consolidate-service.ts:2646`  | `storedSegmentIds = rows.map((r) => r.id);`                                               | 맞음 |
+| `consolidate-service.ts:2877`  | `if (inputs.length > 0 \|\| segmentsWritten > 0) {`                                       | 맞음 |
+| `consolidate-service.ts:2881`  | `if (inputs.length > 0) {`                                                                | 맞음 |
 | `capture-service.ts:314`       | `await rebuildProjectProjection(params.projectId, { reindexSearch: false });`             | 맞음 |
 | `conflict-service.ts:105`      | `await rebuildProjectProjection(params.projectId);` (인자 없음 → `?? true`)               | 맞음 |
 | `contradiction-service.ts:212` | `const decisions = Object.values(reduceProjectState(events, projectId).memories).filter(` | 맞음 |
 | `contradiction-service.ts:346` | `await rebuildProjectProjection(projectId);` (인자 없음 → `?? true`)                      | 맞음 |
-| `memory-import-service.ts:815` | `await rebuildProjectProjection(params.projectId, { reindexSearch: true });`              | 맞음 |
+| `memory-import-service.ts:839` | `await rebuildProjectProjection(params.projectId, { reindexSearch: true });`              | 맞음 |
 | `projection-store.ts:297`      | `function markSearchReindexPending(projectId: string): void {`                            | 맞음 |
 | `projection-store.ts:350`      | `if (reindexSearch) markSearchReindexPending(projectId);`                                 | 맞음 |
 | `projection-store.ts:406`      | `// When reindexSearch is false the FTS rows are left untouched, so the`                  | 맞음 |
@@ -1137,11 +1137,11 @@ conversationOffsetHeld`(`:2931`)를 읽는 자리가 재배치 뒤에도 결과�
 | `embeddings-service.ts:203`        | `const wrote = upsertSegmentEmbeddingIfLive(projectId, {`                                   | 맞음 |
 | `consolidate-service.ts:2422-2427` | #298이 `existing`을 SQL에서 로그 fold로 옮긴 사실을 적은 주석                               | 맞음 |
 | `consolidate-service.ts:2428`      | `const existing = Object.values(state.memories).filter(`                                    | 맞음 |
-| `consolidate-service.ts:2819-2824` | `:2858`의 반환값을 버리는 것이 판단임을 적은 #282 주석                                      | 맞음 |
-| `consolidate-service.ts:2829-2833` | 투영 테이블은 아무 리빌드나 채우고 `search_fts`는 `true` 리빌드만 채운다는 주석             | 맞음 |
-| `consolidate-service.ts:2865`      | `await ensureEmbeddings(params.projectId, params.embedder);`                                | 맞음 |
-| `consolidate-service.ts:2884`      | `if (segmentsWritten > 0) {`                                                                | 맞음 |
-| `consolidate-service.ts:2885`      | `await ensureSegmentEmbeddings(params.projectId, params.embedder);`                         | 맞음 |
+| `consolidate-service.ts:2839-2844` | `:2858`의 반환값을 버리는 것이 판단임을 적은 #282 주석                                      | 맞음 |
+| `consolidate-service.ts:2849-2853` | 투영 테이블은 아무 리빌드나 채우고 `search_fts`는 `true` 리빌드만 채운다는 주석             | 맞음 |
+| `consolidate-service.ts:2885`      | `await ensureEmbeddings(params.projectId, params.embedder);`                                | 맞음 |
+| `consolidate-service.ts:2904`      | `if (segmentsWritten > 0) {`                                                                | 맞음 |
+| `consolidate-service.ts:2905`      | `await ensureSegmentEmbeddings(params.projectId, params.embedder);`                         | 맞음 |
 | `contradiction-service.ts:287`     | `appended = await appendEvents<MemorySupersededPayload \| Conflict>(`                       | 맞음 |
 | `contradiction-service.ts:345`     | `if (results.length > 0) {`                                                                 | 맞음 |
 | `search-service.ts:169`            | `const scores = await semanticMemoryScores(projectId, query, embedder);`                    | 맞음 |

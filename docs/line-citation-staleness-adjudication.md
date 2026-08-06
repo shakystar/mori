@@ -85,8 +85,8 @@ grep -rnoE '\bL[0-9]{2,}\b' packages/ docs/ | wc -l                 # L1234 표�
 
 | 형태                              | 예                                                          | `packages/` | `docs/` |      총 | 낡는가                    |
 | --------------------------------- | ----------------------------------------------------------- | ----------: | ------: | ------: | ------------------------- |
-| ㉠a 파일명 + 단일 줄              | `consolidate-service.ts:2857`                               |           6 |      80 |  **86** | 낡는다                    |
-| ㉠b 파일명 + 범위                 | `consolidate-service.ts:2639-2643`                          |           2 |     194 | **196** | 낡는다                    |
+| ㉠a 파일명 + 단일 줄              | `consolidate-service.ts:2877`                               |           6 |      80 |  **86** | 낡는다                    |
+| ㉠b 파일명 + 범위                 | `consolidate-service.ts:2659-2663`                          |           2 |     194 | **196** | 낡는다                    |
 | **㉠c 확장자 없는 파일명 + 범위** | `README:139-141`                                            |       **2** |       0 |   **2** | 낡는다 (+해석 문제)       |
 | ㉡a 파일명 없는 단일 줄 (감쌈)    | `(:2920)` · `` `:2167` ``                                   |           5 |      84 |  **89** | 낡는다 (+해석 문제)       |
 | ㉡b 파일명 없는 범위 (감쌈)       | `` `:2160-2162` ``                                          |           0 |      53 |  **53** | 낡는다 (+해석 문제)       |
@@ -131,12 +131,12 @@ grep -rnoE '\bL[0-9]{2,}\b' packages/ docs/ | wc -l                 # L1234 표�
 
 | 인용 위치                                                   | 인용                               | 대상 실물                                                          |
 | ----------------------------------------------------------- | ---------------------------------- | ------------------------------------------------------------------ |
-| `packages/kernel/src/services/projection-store.ts:146`      | `consolidate-service.ts:2858`      | `await rebuildProjectProjection(params.projectId, …)`              |
+| `packages/kernel/src/services/projection-store.ts:146`      | `consolidate-service.ts:2878`      | `await rebuildProjectProjection(params.projectId, …)`              |
 | `packages/kernel/src/services/projection-store.ts:147`      | `(:2920)` (㉡a)                    | `const cursorCommit = commitBoundaryCursors(params.projectId`      |
 | `packages/kernel/src/services/projection-store.ts:150`      | `contradiction-service.ts:346`     | `await rebuildProjectProjection(projectId);`                       |
-| `packages/kernel/src/storage/project-lock.ts:115`           | `consolidate-service.ts:2857`      | `if (inputs.length > 0 \|\| segmentsWritten > 0) {`                |
-| `packages/kernel/src/storage/project-lock.ts:146`           | `consolidate-service.ts:2639-2643` | `pruneSegments` 앞 이른-반환 구간                                  |
-| `packages/kernel/src/services/consolidate-service.ts:2425`  | `memory-import-service.ts:210-230` | `readValidMemoriesFromLog` 본문                                    |
+| `packages/kernel/src/storage/project-lock.ts:115`           | `consolidate-service.ts:2877`      | `if (inputs.length > 0 \|\| segmentsWritten > 0) {`                |
+| `packages/kernel/src/storage/project-lock.ts:146`           | `consolidate-service.ts:2659-2663` | `pruneSegments` 앞 이른-반환 구간                                  |
+| `packages/kernel/src/services/consolidate-service.ts:2425`  | `memory-import-service.ts:234-254` | `readValidMemoriesFromLog` 본문                                    |
 | `packages/kernel/src/services/embeddings-store.ts:135`      | `projection-store.ts:1024`         | `` `WHERE memories.invalid_at IS NULL AND ${laneWhere(lane)}` ``   |
 | `pi-consolidator.test.ts:78`, `pi-consolidator.test.ts:107` | `pi-consolidator.ts:103` (2건)     | `maxTokens: Math.min(reservedOutputTokensFor(…), …)`               |
 | `consolidate-service.test.ts:1113` 외 3건                   | `` `:377` `` 등 (㉡a 4건)          | **파일이 아니다** — §Q1.3                                          |
@@ -392,7 +392,7 @@ git show db80dfc:packages/mori/src/external/consolidator/pi-consolidator.ts | wc
 
 ### Q3.2 후보② 앵커 관례 — **탐지 11/11, 재작성 445건, 오탐 ≈33**
 
-인용에 짧은 코드 스니펫을 함께 적고(`consolidate-service.ts:2857 "if (inputs.length > 0 ||"`),
+인용에 짧은 코드 스니펫을 함께 적고(`consolidate-service.ts:2877 "if (inputs.length > 0 ||"`),
 검사기가 그 스니펫이 그 줄에 있는지 본다.
 
 - **탐지 11/11 (100%).** 11건 모두 "대상 줄의 내용이 인용 당시와 달라진" 사례이므로 앵커 불일치로
@@ -625,7 +625,7 @@ git fetch origin refs/pull/276/head refs/pull/299/head refs/pull/302/head   # he
 **관례 변경 수반분: `packages/` 7건.** 권고는 ㉠ 계열만 대상으로 하므로 둘을 고쳐야 한다.
 
 - **㉡a 5건** — 대상 파일을 명시한 ㉠로 바꾸거나(`projection-store.ts:147`의 `(:2920)` →
-  `(consolidate-service.ts:2920)`) 검증 비대상임을 관례로 못 박는다.
+  `(consolidate-service.ts:2940)`) 검증 비대상임을 관례로 못 박는다.
 - **㉠c 2건** — `README:139-141` → `README.md:139-141`. 확장자를 붙이는 쪽이 추출기에
   확장자 없는 이름 규칙을 넣는 쪽보다 싸다. 후자는 ISO 타임스탬프 166건을 걸러 낼 허용 목록을
   들고 다녀야 하고, `README.md`가 리포에 둘이라 basename 해석도 따로 정해야 한다 (§Q1.1a).

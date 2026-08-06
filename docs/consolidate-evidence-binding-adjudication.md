@@ -54,7 +54,7 @@ CAS는 `:2466`의 `appendEvents(..., { expectedHead })` 하나뿐이고, 그것�
 ### Q1.1 `existing` (`listValidMemories`, `:2214`) — **가능**
 
 **같은 질의의 로그 파생판이 이미 리포에 있다.** `memory-import-service`의
-`readValidMemoriesFromLog`(`memory-import-service.ts:210-230`)는 `readEvents` +
+`readValidMemoriesFromLog`(`memory-import-service.ts:234-254`)는 `readEvents` +
 `reduceProjectState` 뒤에 정확히 같은 필터를 건다:
 
 ```ts
@@ -63,12 +63,12 @@ memories: Object.values(state.memories).filter(
 ),
 ```
 
-(`memory-import-service.ts:221-223`)
+(`memory-import-service.ts:245-247`)
 
 그리고 `listValidMemories`의 SQL은
 `WHERE memories.invalid_at IS NULL AND ${laneWhere(lane)}`, 기본 lane은 `"self"`
 (`projection-store.ts:1014-1026`) — **술어가 같다.** 그 자신의 doc이 _"The filter mirrors
-`listValidMemories(projectId)` exactly"_ 라고 적는다(`memory-import-service.ts:206-208`).
+`listValidMemories(projectId)` exactly"_ 라고 적는다(`memory-import-service.ts:230-232`).
 
 **프로젝션에만 있고 로그에 없는 것이 하나 있지만 이 호출부는 쓰지 않는다.**
 `listValidMemories`는 `memory_access` 조인으로 `lastAccessedAt`을 같이 돌려주는데
@@ -117,7 +117,7 @@ for (const row of rows) {
 `reduceProjectState`조차 필요 없는 **선형 스캔 한 번**으로 얻는다.
 
 > 세부 둘. (a) import가 만드는 메모리는 `sourceObservationIds: []`이므로
-> (`memory-import-service.ts:735`, `:744`가 같은 `memory.consolidated` 타입을 쓴다) 양쪽
+> (`memory-import-service.ts:759`, `:744`가 같은 `memory.consolidated` 타입을 쓴다) 양쪽
 > 모두에 아무것도 더하지 않는다. (b) 같은 id의 `memory.consolidated`가 두 번 들어와도
 > id-키 덮어쓰기라 결과 집합은 같다.
 
@@ -151,7 +151,7 @@ log or sync to siblings"_ (`:88-97`)와 같은 부류다.
 
 | 근거        | 판정       | 결정적 인용                                                                                                                                                               |
 | ----------- | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `existing`  | **가능**   | `memory-import-service.ts:210-230` (같은 술어의 로그 파생판이 이미 있다), `consolidate-service.ts:2214` (`lastAccessedAt`을 버린다)                                       |
+| `existing`  | **가능**   | `memory-import-service.ts:234-254` (같은 술어의 로그 파생판이 이미 있다), `consolidate-service.ts:2214` (`lastAccessedAt`을 버린다)                                       |
 | `consumed`  | **가능**   | `domain/entities/memory.ts:100-101` + `consolidate-service.ts:2345` (payload에 실린다), `projector.ts:551-560` (무가공 보존), `projection-store.ts:656-670` (전량 재기록) |
 | `watermark` | **불가능** | `consolidate-service.ts:1239-1263` (meta), `:2190-2199`·`:2674-2683` (로그에 없는 진행), `:1265-1275` (gc의 후진 리페어)                                                  |
 
@@ -262,7 +262,7 @@ const eventsSince = …watermark 위치 뒤 슬라이스…;      // 오늘 :214
 ```
 
 `expectedHead`와 근거가 **같은 배열**에서 나오므로 "CAS는 통과하는데 근거는 낡았다"는
-상태가 **정의상 불가능**해진다. 이것은 `#253`(`memory-import-service.ts:224-228`)과
+상태가 **정의상 불가능**해진다. 이것은 `#253`(`memory-import-service.ts:248-252`)과
 `#270`(`projection-store.ts:373-379`)이 이미 두 번 쓴 패턴이고, 세 번째 적용이다.
 
 `readEventsSince`도 같은 배열의 슬라이스로 대체된다 — 오늘 별도 질의인 창 스캔이

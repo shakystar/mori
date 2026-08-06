@@ -177,6 +177,30 @@ export interface ImportMemoriesParams {
   embedder?: Embedder;
 }
 
+// #314 (#310 §Q6, docs/log-unique-constraint-b-residue-adjudication.md):
+// this key's uniqueness is a DYNAMIC property, not a static one fixed at
+// append time — it only holds above the `!invalidAt` + self-lane snapshot
+// (readValidMemoriesFromLog's filter, :246). Three paths legally re-append
+// the same (kind, normalized text) below that snapshot, so a log-level
+// unique constraint on it would reject all three:
+//   - Re-import after supersede/invalidate: once a memory is invalidated its
+//     `memory.consolidated` event stays in the append-only log, so a later
+//     legitimate re-import of the same text is a new row colliding with that
+//     stale one.
+//   - Foreign lane: a synced sibling project's memory with the same text is
+//     expected to coexist with a self-lane one (SoT-040) — the filter above
+//     excludes it from the snapshot on purpose.
+//   - Distillation x import: `memory.consolidated` events written by
+//     consolidation never go through `textKey` at all, so the same text
+//     arriving via distillation and via import is common and legal.
+// It's also not SQL-reproducible: SQLite's `lower` is ASCII-only and `trim`
+// strips spaces only, so an expression index on this normalization would
+// enforce a second, WEAKER rule than this guard. A constraint is the wrong
+// tool here — this stays a guard.
+//
+// TRIGGER: re-measure candidate 3 if normalized text becomes an actual stored
+// column and the `invalidAt`/lane condition drops out of the dedup snapshot.
+
 /** Same normalization the projection dedup uses for its text key. */
 function textKey(kind: string, text: string): string {
   return `${kind}\n${text.trim().toLowerCase()}`;
