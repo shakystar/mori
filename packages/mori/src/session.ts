@@ -132,6 +132,12 @@ export async function createMoriSession(
         // `async` (not a bare passthrough) so `assertOpen`'s throw rejects the returned
         // promise instead of escaping synchronously — the same failure shape `prompt()` gives.
         assertOpen("consolidate");
+        // `observe` is fire-and-forget (agent/index.ts), so the turn that just finished may
+        // still have an unpersisted observation queued when this boundary starts. Drain first,
+        // same ordering as runPrompt's finally (cli/runtime.ts), so the boundary's window
+        // includes everything up to this call rather than missing it until the next one
+        // (Codex review, PR #350).
+        await kernel.drain();
         return consolidateExplicit(kernel, llm, signal);
       },
 

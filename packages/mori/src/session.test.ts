@@ -151,7 +151,9 @@ describe("createMoriSession (#341)", () => {
     // close()'s own session-end trigger fires a second, independent boundary.
     await result.session.close();
     expect(kernel.consolidateCalls).toBe(2);
-    expect(kernel.drainCalls).toBe(1);
+    // Once from consolidate() itself (settles the just-finished turn's queued observation
+    // before the manual boundary runs, #341 PR #350 Codex review) and once from close().
+    expect(kernel.drainCalls).toBe(2);
   });
 
   it("skips consolidate() as a no-op when MORI_CONSOLIDATE_MODEL is unset", async () => {
