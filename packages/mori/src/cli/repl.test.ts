@@ -9,6 +9,7 @@ import { createAssistantMessageEventStream, InMemoryCredentialStore } from "@ear
 import { BufferKernel, type ConsolidatorLlm } from "@mori/kernel";
 import { describe, expect, it, vi } from "vitest";
 import { createMoriAgent, type MoriKernel } from "../agent/index.js";
+import { fakeProviderModels } from "../agent/fake-provider-models.js";
 import type { ReplInputSource, ReplLine } from "./repl-input.js";
 import { runRepl, type ReplConsolidation } from "./repl.js";
 
@@ -16,8 +17,10 @@ const ENV = { ANTHROPIC_API_KEY: "sk-ant-test" } as const;
 
 /**
  * A real agent on the production wiring (kernel, model resolution, event plumbing), with
- * only the provider stream faked. Tools are dropped — this file is about the input/output
- * loop, and `createMoriTools` would otherwise pin a working root onto every test.
+ * only the provider stream faked — via a registered fake provider (`fakeProviderModels`,
+ * #336), not the `createMoriAgent(..., streamFn)` positional seam. Tools are dropped — this
+ * file is about the input/output loop, and `createMoriTools` would otherwise pin a working
+ * root onto every test.
  *
  * The kernel is handed back alongside the agent — `runRepl` now also takes it directly, for
  * `/consolidate` (#107) — but stays a plain `BufferKernel`: tests below that don't care about
@@ -26,8 +29,10 @@ const ENV = { ANTHROPIC_API_KEY: "sk-ant-test" } as const;
  */
 function testAgent(streamFn: StreamFn): { agent: Agent; kernel: MoriKernel } {
   const kernel = new BufferKernel<AgentMessage, AgentEvent>();
+  const credentialStore = new InMemoryCredentialStore();
+  const models = fakeProviderModels(ENV, credentialStore, streamFn);
   return {
-    agent: createMoriAgent(kernel, new InMemoryCredentialStore(), ENV, streamFn, { tools: [] }),
+    agent: createMoriAgent(kernel, credentialStore, ENV, undefined, { tools: [], models }),
     kernel,
   };
 }

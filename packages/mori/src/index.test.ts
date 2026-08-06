@@ -17,6 +17,8 @@ import type { MoriKernel } from "./agent/index.js";
 import { EXPERIMENTAL_OPENAI_OAUTH_ENV, OPENAI_OAUTH_PROVIDER_ID } from "./auth/experimental.js";
 import type { ReplInputSource, ReplLine } from "./cli/repl-input.js";
 import { runCli, unauthenticatedMessage } from "./index.js";
+import { defaultCredentialsPath, FileCredentialStore } from "./auth/credential-store.js";
+import { fakeProviderModels } from "./agent/fake-provider-models.js";
 import { createMoriModels } from "./agent/model-wiring.js";
 
 const ONE_HOUR_MS = 60 * 60 * 1000;
@@ -228,18 +230,16 @@ describe("runCli", () => {
 
   it("streams assistant text deltas to stdout when ANTHROPIC_API_KEY is set", async () => {
     const io = captureOutput();
+    const env = { ANTHROPIC_API_KEY: "sk-ant-test" };
+    const credentialStore = new InMemoryCredentialStore();
 
-    const exitCode = await runCli(
-      ["hi"],
-      { ANTHROPIC_API_KEY: "sk-ant-test" },
-      {
-        stdout: io.stdout,
-        stderr: io.stderr,
-        streamFn: fakeStreamFn("hello from mori"),
-        credentialStore: new InMemoryCredentialStore(),
-        root: cliRoot,
-      },
-    );
+    const exitCode = await runCli(["hi"], env, {
+      stdout: io.stdout,
+      stderr: io.stderr,
+      models: fakeProviderModels(env, credentialStore, fakeStreamFn("hello from mori")),
+      credentialStore,
+      root: cliRoot,
+    });
 
     expect(exitCode).toBe(0);
     expect(io.out()).toBe("hello from mori\n");
@@ -250,18 +250,16 @@ describe("runCli", () => {
     it("calls kernel.consolidate exactly once when MORI_CONSOLIDATE_MODEL is set", async () => {
       const io = captureOutput();
       const kernel = spyKernel();
+      const env = { ANTHROPIC_API_KEY: "sk-ant-test", MORI_CONSOLIDATE_MODEL: "anthropic/claude-x" };
+      const credentialStore = new InMemoryCredentialStore();
 
-      const exitCode = await runCli(
-        ["hi"],
-        { ANTHROPIC_API_KEY: "sk-ant-test", MORI_CONSOLIDATE_MODEL: "anthropic/claude-x" },
-        {
-          stdout: io.stdout,
-          stderr: io.stderr,
-          streamFn: fakeStreamFn("hello from mori"),
-          credentialStore: new InMemoryCredentialStore(),
-          kernel,
-        },
-      );
+      const exitCode = await runCli(["hi"], env, {
+        stdout: io.stdout,
+        stderr: io.stderr,
+        models: fakeProviderModels(env, credentialStore, fakeStreamFn("hello from mori")),
+        credentialStore,
+        kernel,
+      });
 
       expect(exitCode).toBe(0);
       expect(kernel.consolidateCalls).toHaveLength(1);
@@ -270,18 +268,16 @@ describe("runCli", () => {
     it("never calls kernel.consolidate when MORI_CONSOLIDATE_MODEL is unset, and warns nothing", async () => {
       const io = captureOutput();
       const kernel = spyKernel();
+      const env = { ANTHROPIC_API_KEY: "sk-ant-test" };
+      const credentialStore = new InMemoryCredentialStore();
 
-      const exitCode = await runCli(
-        ["hi"],
-        { ANTHROPIC_API_KEY: "sk-ant-test" },
-        {
-          stdout: io.stdout,
-          stderr: io.stderr,
-          streamFn: fakeStreamFn("hello from mori"),
-          credentialStore: new InMemoryCredentialStore(),
-          kernel,
-        },
-      );
+      const exitCode = await runCli(["hi"], env, {
+        stdout: io.stdout,
+        stderr: io.stderr,
+        models: fakeProviderModels(env, credentialStore, fakeStreamFn("hello from mori")),
+        credentialStore,
+        kernel,
+      });
 
       expect(exitCode).toBe(0);
       expect(kernel.consolidateCalls).toHaveLength(0);
@@ -293,18 +289,16 @@ describe("runCli", () => {
       const kernel = spyKernel(async () => {
         throw new Error("consolidator misconfigured");
       });
+      const env = { ANTHROPIC_API_KEY: "sk-ant-test", MORI_CONSOLIDATE_MODEL: "anthropic/claude-x" };
+      const credentialStore = new InMemoryCredentialStore();
 
-      const exitCode = await runCli(
-        ["hi"],
-        { ANTHROPIC_API_KEY: "sk-ant-test", MORI_CONSOLIDATE_MODEL: "anthropic/claude-x" },
-        {
-          stdout: io.stdout,
-          stderr: io.stderr,
-          streamFn: fakeStreamFn("hello from mori"),
-          credentialStore: new InMemoryCredentialStore(),
-          kernel,
-        },
-      );
+      const exitCode = await runCli(["hi"], env, {
+        stdout: io.stdout,
+        stderr: io.stderr,
+        models: fakeProviderModels(env, credentialStore, fakeStreamFn("hello from mori")),
+        credentialStore,
+        kernel,
+      });
 
       expect(exitCode).toBe(0);
       expect(io.out()).toBe("hello from mori\n");
@@ -322,6 +316,7 @@ describe("runCli", () => {
     // Anthropic's built-in subscription-OAuth capability (standing #16 decision), both
     // consistently report "unauthenticated" instead of diverging.
     const io = captureOutput();
+    const env = {};
     const store = await storeWith({
       type: "oauth",
       access: "at-valid",
@@ -329,16 +324,12 @@ describe("runCli", () => {
       expires: Date.now() + ONE_HOUR_MS,
     });
 
-    const exitCode = await runCli(
-      ["hi"],
-      {},
-      {
-        stdout: io.stdout,
-        stderr: io.stderr,
-        streamFn: fakeStreamFn("hello from mori"),
-        credentialStore: store,
-      },
-    );
+    const exitCode = await runCli(["hi"], env, {
+      stdout: io.stdout,
+      stderr: io.stderr,
+      models: fakeProviderModels(env, store, fakeStreamFn("hello from mori")),
+      credentialStore: store,
+    });
 
     expect(exitCode).toBe(1);
     expect(io.err()).toContain("mori login");
@@ -351,6 +342,7 @@ describe("runCli", () => {
     // valid API key env var now that anthropic's wiring never accepts OAuth as a real
     // request credential (see agent.ts's hidingOAuth).
     const io = captureOutput();
+    const env = { ANTHROPIC_API_KEY: "sk-ant-test" };
     const store = await storeWith({
       type: "oauth",
       access: "at-valid",
@@ -358,17 +350,13 @@ describe("runCli", () => {
       expires: Date.now() + ONE_HOUR_MS,
     });
 
-    const exitCode = await runCli(
-      ["hi"],
-      { ANTHROPIC_API_KEY: "sk-ant-test" },
-      {
-        stdout: io.stdout,
-        stderr: io.stderr,
-        streamFn: fakeStreamFn("hello from mori"),
-        credentialStore: store,
-        root: cliRoot,
-      },
-    );
+    const exitCode = await runCli(["hi"], env, {
+      stdout: io.stdout,
+      stderr: io.stderr,
+      models: fakeProviderModels(env, store, fakeStreamFn("hello from mori")),
+      credentialStore: store,
+      root: cliRoot,
+    });
 
     expect(exitCode).toBe(0);
     expect(io.out()).toBe("hello from mori\n");
@@ -377,6 +365,7 @@ describe("runCli", () => {
 
   it("falls back to ANTHROPIC_API_KEY when the stored OAuth token is expired", async () => {
     const io = captureOutput();
+    const env = { ANTHROPIC_API_KEY: "sk-ant-test" };
     const store = await storeWith({
       type: "oauth",
       access: "at-expired",
@@ -384,17 +373,13 @@ describe("runCli", () => {
       expires: Date.now() - ONE_HOUR_MS,
     });
 
-    const exitCode = await runCli(
-      ["hi"],
-      { ANTHROPIC_API_KEY: "sk-ant-test" },
-      {
-        stdout: io.stdout,
-        stderr: io.stderr,
-        streamFn: fakeStreamFn("hello from mori"),
-        credentialStore: store,
-        root: cliRoot,
-      },
-    );
+    const exitCode = await runCli(["hi"], env, {
+      stdout: io.stdout,
+      stderr: io.stderr,
+      models: fakeProviderModels(env, store, fakeStreamFn("hello from mori")),
+      credentialStore: store,
+      root: cliRoot,
+    });
 
     expect(exitCode).toBe(0);
     expect(io.out()).toBe("hello from mori\n");
@@ -427,22 +412,21 @@ describe("runCli", () => {
       const seen: Context[] = [];
       const reply = fakeStreamFn("ok");
       const input = scriptedInput(["question one", "question two"]);
+      const env = { ANTHROPIC_API_KEY: "sk-ant-test" };
+      const credentialStore = new InMemoryCredentialStore();
+      const recordingFn: StreamFn = (model, context, options) => {
+        seen.push(context);
+        return reply(model, context, options);
+      };
 
-      const exitCode = await runCli(
-        [],
-        { ANTHROPIC_API_KEY: "sk-ant-test" },
-        {
-          stdout: io.stdout,
-          stderr: io.stderr,
-          credentialStore: new InMemoryCredentialStore(),
-          streamFn: (model, context, options) => {
-            seen.push(context);
-            return reply(model, context, options);
-          },
-          openReplInput: () => input.source,
-          root: cliRoot,
-        },
-      );
+      const exitCode = await runCli([], env, {
+        stdout: io.stdout,
+        stderr: io.stderr,
+        credentialStore,
+        models: fakeProviderModels(env, credentialStore, recordingFn),
+        openReplInput: () => input.source,
+        root: cliRoot,
+      });
 
       expect(exitCode).toBe(0);
       expect(seen).toHaveLength(2);
@@ -547,19 +531,17 @@ describe("runCli", () => {
       const io = captureOutput();
       const kernel = spyKernel();
       const input = scriptedInput(["question one"]);
+      const env = { ANTHROPIC_API_KEY: "sk-ant-test", MORI_CONSOLIDATE_MODEL: "anthropic/claude-x" };
+      const credentialStore = new InMemoryCredentialStore();
 
-      const exitCode = await runCli(
-        [],
-        { ANTHROPIC_API_KEY: "sk-ant-test", MORI_CONSOLIDATE_MODEL: "anthropic/claude-x" },
-        {
-          stdout: io.stdout,
-          stderr: io.stderr,
-          credentialStore: new InMemoryCredentialStore(),
-          streamFn: fakeStreamFn("ok"),
-          openReplInput: () => input.source,
-          kernel,
-        },
-      );
+      const exitCode = await runCli([], env, {
+        stdout: io.stdout,
+        stderr: io.stderr,
+        credentialStore,
+        models: fakeProviderModels(env, credentialStore, fakeStreamFn("ok")),
+        openReplInput: () => input.source,
+        kernel,
+      });
 
       expect(exitCode).toBe(0);
       expect(kernel.consolidateCalls).toHaveLength(1);
@@ -586,18 +568,16 @@ describe("runCli", () => {
 
   it("streams from the openai provider when MORI_MODEL selects it and OPENAI_API_KEY is set", async () => {
     const io = captureOutput();
+    const env = { MORI_MODEL: "openai/gpt-5.4", OPENAI_API_KEY: "sk-oai-test" };
+    const credentialStore = new InMemoryCredentialStore();
 
-    const exitCode = await runCli(
-      ["hi"],
-      { MORI_MODEL: "openai/gpt-5.4", OPENAI_API_KEY: "sk-oai-test" },
-      {
-        stdout: io.stdout,
-        stderr: io.stderr,
-        streamFn: fakeStreamFn("hello from gpt"),
-        credentialStore: new InMemoryCredentialStore(),
-        root: cliRoot,
-      },
-    );
+    const exitCode = await runCli(["hi"], env, {
+      stdout: io.stdout,
+      stderr: io.stderr,
+      models: fakeProviderModels(env, credentialStore, fakeStreamFn("hello from gpt"), "openai"),
+      credentialStore,
+      root: cliRoot,
+    });
 
     expect(exitCode).toBe(0);
     expect(io.out()).toBe("hello from gpt\n");
@@ -863,16 +843,18 @@ describe("runCli", () => {
       writeFileSync(join(credentialsDir, "credentials.json"), "{ not valid json", "utf8");
 
       const io = captureOutput();
-      const exitCode = await runCli(
-        ["hi"],
-        { XDG_CONFIG_HOME: configDir, ANTHROPIC_API_KEY: "sk-ant-test" },
-        {
-          stdout: io.stdout,
-          stderr: io.stderr,
-          streamFn: fakeStreamFn("hello from mori"),
-          root: cliRoot,
-        },
-      );
+      const env = { XDG_CONFIG_HOME: configDir, ANTHROPIC_API_KEY: "sk-ant-test" };
+      // No `deps.credentialStore` injected — the point of this test is the real, on-disk
+      // `FileCredentialStore` mori builds by default (cli/runtime.ts). Building `models`
+      // against that same real store (rather than an in-memory one) is what keeps this
+      // seam swap from accidentally routing auth resolution away from the corrupt file.
+      const credentialStore = new FileCredentialStore(defaultCredentialsPath(env), io.stderr);
+      const exitCode = await runCli(["hi"], env, {
+        stdout: io.stdout,
+        stderr: io.stderr,
+        models: fakeProviderModels(env, credentialStore, fakeStreamFn("hello from mori")),
+        root: cliRoot,
+      });
 
       expect(exitCode).toBe(0);
       expect(io.out()).toBe("hello from mori\n");
