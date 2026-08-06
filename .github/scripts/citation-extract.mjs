@@ -47,6 +47,27 @@
 //   대상이 node_modules/ · dist/ 아래인 것
 //        → 리포가 관리하지 않는 산출물이다(§Q1.3-1의 다른 저장소 dist/ 3건이 이 부류).
 //
+// ── 경고가 되는 두 가지 ───────────────────────────────────────────────────────────────
+//   (1) **대상 있음** — 인용의 대상 파일이 head 트리에 있고, 그 경로가 PR diff에 들었다.
+//        → "그 줄이 아직 인용이 말하는 내용인지 확인하라".
+//   (2) **대상 없음(삭제·리네임)** — 인용의 대상이 head 트리에 **없고**, 그 경로가 PR diff에
+//        들었다. 그 PR이 대상 파일을 지웠거나 이름을 바꾼 것이다.
+//        → 줄이 밀린 정도가 아니라 **가리키는 자리가 통째로 없어진** 인용이므로 낡음의
+//          최악의 경우인데, (1)만 세면 미해결로 빠져 잡 요약에만 남고 코멘트가 아예
+//          생기지 않는다 = false-green (PR #351 owner 수정요청 1 / Codex P2 ①).
+//        판정 규칙은 토큰 형태별로 이렇다:
+//          · 루트 상대(`packages/a/b.ts`) — changed 목록에 그 경로가 그대로 있으면 경고
+//          · ㉠c(`README`)              — `README.md`가 changed에 있으면 경고
+//          · basename(`b.ts`)           — changed 경로 중 `/b.ts`로 끝나는 것이 있으면 경고.
+//            **basename도 경고로 올린다.** basename 잔여가 packages/에 실재하는 한(위 ㉠a/㉠b
+//            항목), 안 올리면 가장 많이 인용되는 파일이 삭제·리네임될 때만 잡이 침묵한다 —
+//            탐지에서 가장 아픈 자리다. 오탐 위험은 좁다: 이 갈래에 오는 토큰은 head 트리에
+//            같은 basename이 **0건**이라, 매치된 changed 경로는 반드시 이 PR에서 사라진 파일이다.
+//          · basename 중의(트리에 2건 이상) — 대상이 살아 있으므로 여기 오지 않는다.
+//   리네임의 옛 경로가 changed 목록에 들어오는 것은 워크플로 몫이다 — GitHub의 pulls/files는
+//   리네임에 filename=새 경로 / previous_filename=옛 경로를 주므로 **둘 다** 뽑아야 한다.
+//   (citation-advisory.yml의 `Collect the PR's changed files`)
+//
 // 수집 범위는 packages/ 아래로 못 박는다. docs/를 넣으면 PR당 최대 107건이 뜨고, 경고를 받은
 // PR은 docs/를 고칠 권한이 없다 — 신호가 아니라 소음이 된다(§Q4.1).
 //
@@ -133,6 +154,10 @@ const hasExcludedSegment = (path) => path.split("/").some((seg) => EXCLUDED_SEGM
 /**
  * 인용 토큰을 리포 루트 상대 경로로 푼다. 못 풀면 path=null과 사유를 낸다 — 조용히 버리지
  * 않는 것이 중요하다. 버려진 인용이 곧 "조용히 놓치는 인용"이기 때문이다.
+ *
+ * 못 풀 때의 `code`는 기계가 읽는다: `missing`은 "대상이 트리에 없다"이고, 그 경로가 PR diff에
+ * 들어 있으면 경고로 올라간다(위 §경고가 되는 두 가지). `ambiguous`는 대상이 살아 있으나
+ * 어느 것인지 정할 수 없는 것이라 경고로 올리지 않는다.
  * @param {string} token
  * @param {Set<string>} tree 리포 루트 상대 경로 집합
  */
@@ -147,20 +172,28 @@ export function resolveTarget(token, tree) {
     const candidate = `${token}.md`;
     return tree.has(candidate)
       ? { path: candidate }
-      : { path: null, reason: `리포 루트에 ${candidate}가 없다` };
+      : { path: null, code: "missing", candidate, reason: `리포 루트에 ${candidate}가 없다` };
   }
   if (tree.has(token)) return { path: token };
   if (token.includes("/")) {
-    return { path: null, reason: "루트 상대 경로가 트리에 없다" };
+    return {
+      path: null,
+      code: "missing",
+      candidate: token,
+      reason: "루트 상대 경로가 트리에 없다",
+    };
   }
   const matches = [...tree].filter((p) => p.endsWith(`/${token}`));
   if (matches.length === 1) return { path: matches[0] };
+  if (matches.length === 0) {
+    // candidate=null — 대상 경로를 하나로 지목할 수 없다. changed 목록과는 basename으로 맞춘다.
+    return { path: null, code: "missing", candidate: null, reason: "리포에 그 이름의 파일이 없다" };
+  }
   return {
     path: null,
-    reason:
-      matches.length === 0
-        ? "리포에 그 이름의 파일이 없다"
-        : `basename이 중의적이다(${matches.length}건: ${matches.join(", ")})`,
+    code: "ambiguous",
+    candidate: null,
+    reason: `basename이 중의적이다(${matches.length}건: ${matches.join(", ")})`,
   };
 }
 
@@ -217,8 +250,14 @@ export function collectCitations(root) {
           targetEndLine: hit.endLine,
         };
         if (resolved.dropped) continue;
-        if (resolved.path === null) unresolved.push({ ...record, reason: resolved.reason });
-        else citations.push(record);
+        if (resolved.path === null) {
+          unresolved.push({
+            ...record,
+            reason: resolved.reason,
+            code: resolved.code,
+            candidate: resolved.candidate ?? null,
+          });
+        } else citations.push(record);
       }
     });
   }
@@ -229,6 +268,20 @@ const cite = (c) =>
   `${c.target ?? c.token}:${c.targetLine}${c.targetEndLine ? `-${c.targetEndLine}` : ""}`;
 const at = (c) => `${c.source}:${c.sourceLine}`;
 
+/**
+ * 대상을 못 푼 인용(`code === "missing"`)의 토큰이 PR이 만진 경로와 맞는지 본다. 맞으면 그
+ * PR이 대상 파일을 지웠거나 이름을 바꾼 것이다 — 맞은 경로들을 낸다(없으면 빈 배열).
+ * @param {{token: string, candidate: string|null}} u
+ * @param {Set<string>} changed
+ */
+export function matchMissingTarget(u, changed) {
+  // 루트 상대·㉠c는 대상 경로가 하나로 정해지므로 문자열 비교로 끝난다.
+  if (u.candidate !== null) return changed.has(u.candidate) ? [u.candidate] : [];
+  // basename 토큰은 지목할 경로가 없다. head 트리에 같은 이름이 0건이라는 것이 이 갈래의
+  // 전제이므로, changed에 같은 basename이 있으면 그것이 사라진 그 파일이다.
+  return [...changed].filter((p) => p === u.token || p.endsWith(`/${u.token}`)).sort();
+}
+
 function renderText(result) {
   const lines = [];
   lines.push(`인용 전수(packages/, ㉠ 계열): ${result.citations.length}건`);
@@ -238,9 +291,12 @@ function renderText(result) {
     for (const u of result.unresolved) lines.push(`  ${at(u)}  →  ${u.raw}  (${u.reason})`);
   }
   if (result.changedCount !== null) {
-    lines.push(`PR이 만진 파일: ${result.changedCount}건`);
+    lines.push(`PR이 만진 파일: ${result.changedCount}건 (리네임의 옛 경로 포함)`);
     lines.push(`경고(대상 파일 ∈ diff): ${result.warnings.length}건`);
-    for (const c of result.warnings) lines.push(`  ${at(c)}  →  ${cite(c)}`);
+    for (const c of result.warnings) {
+      const tail = c.missing ? `  [대상 없음(삭제·리네임): ${c.missingMatch}]` : "";
+      lines.push(`  ${at(c)}  →  ${cite(c)}${tail}`);
+    }
   }
   return lines.join("\n");
 }
@@ -248,6 +304,7 @@ function renderText(result) {
 function renderMarkdown(result, headSha) {
   const shown = result.warnings.slice(0, COMMENT_ROW_CAP);
   const rest = result.warnings.length - shown.length;
+  const missingCount = result.warnings.filter((c) => c.missing).length;
   const body = [
     MARKER,
     `### 줄 인용 advisory — 이 PR이 만진 파일을 가리키는 인용 ${result.warnings.length}건`,
@@ -255,11 +312,27 @@ function renderMarkdown(result, headSha) {
     "차단하지 않습니다. 아래는 `packages/` 안의 코드 주석이 **이 PR이 건드린 파일의 특정 줄**을",
     "가리키고 있다는 목록입니다. 그 줄이 여전히 인용이 말하는 내용인지 확인하고, 어긋났다면",
     "이 PR에서 함께 고치거나(같은 줄 번호 갱신) 별건으로 남겨 주세요.",
+  ];
+  if (missingCount > 0) {
+    // 「줄 번호를 확인하라」와 「가리키는 파일이 사라졌다」는 사람이 다르게 읽어야 한다.
+    body.push(
+      "",
+      `그중 **${missingCount}건은 대상 파일이 이 PR의 head 트리에 아예 없습니다**(삭제되었거나 이름이`,
+      "바뀌었습니다). 줄 번호를 맞추는 문제가 아니라 인용이 가리키는 자리가 없어진 것이므로,",
+      "인용을 새 경로로 옮기거나 지워 주세요.",
+    );
+  }
+  body.push(
     "",
     "| 인용 위치 | 인용 | 대상 |",
     "| --- | --- | --- |",
-    ...shown.map((c) => `| \`${at(c)}\` | \`${c.raw}\` | \`${cite(c)}\` |`),
-  ];
+    ...shown.map((c) => {
+      const target = c.missing
+        ? `**대상 없음(삭제·리네임)** — \`${c.missingMatch}\``
+        : `\`${cite(c)}\``;
+      return `| \`${at(c)}\` | \`${c.raw}\` | ${target} |`;
+    }),
+  );
   if (rest > 0) {
     body.push("", `…외 ${rest}건 (표는 ${COMMENT_ROW_CAP}행까지만 싣습니다 — 전체는 잡 로그에).`);
   }
@@ -270,6 +343,33 @@ function renderMarkdown(result, headSha) {
       "이 코멘트는 판정이 아니며 required check가 아닙니다.</sub>",
   );
   return body.join("\n");
+}
+
+/**
+ * 경고 목록을 만든다. 교집합은 **대상 파일**로 잰다 — 인용이 적힌 파일이 diff에 있는지는 묻지
+ * 않는다. 인용과 그 인용을 낡게 만든 편집이 같은 PR에 든 형태를 잡아야 하기 때문이다(§Q3.5-a).
+ * @param {object[]} citations
+ * @param {object[]} unresolved
+ * @param {Set<string>} changed
+ */
+export function collectWarnings(citations, unresolved, changed) {
+  const missing = [];
+  for (const u of unresolved) {
+    if (u.code === "ambiguous") continue;
+    if (u.code !== "missing") {
+      // 사유 코드를 모르는 미해결을 조용히 건너뛰면 그것이 곧 "조용히 놓치는 인용"이다.
+      // 새 사유가 생기면 여기서 죽어서, 경고에 넣을지 말지를 사람이 정하게 한다.
+      throw new Error(`알 수 없는 미해결 코드 ${JSON.stringify(u.code)}: ${at(u)} → ${u.raw}`);
+    }
+    const hits = matchMissingTarget(u, changed);
+    if (hits.length > 0) missing.push({ ...u, missing: true, missingMatch: hits.join(", ") });
+  }
+  const present = citations
+    .filter((c) => changed.has(c.target))
+    .map((c) => ({ ...c, missing: false, missingMatch: null }));
+  // **대상 없음을 앞에 둔다.** 표에는 COMMENT_ROW_CAP행만 실리는데, 뒤에 두면 대상 있음이
+  // 100건을 넘는 PR에서 더 심한 쪽(가리키는 자리가 통째로 없어진 인용)이 통째로 잘려 나간다.
+  return [...missing, ...present];
 }
 
 function parseArgs(argv) {
@@ -302,9 +402,7 @@ function main(argv) {
         .filter((l) => l !== ""),
     );
   }
-  // 교집합은 **대상 파일**로 잰다. 인용이 적힌 파일이 diff에 있는지는 묻지 않는다 — 인용과
-  // 그 인용을 낡게 만든 편집이 같은 PR에 든 형태를 잡아야 하기 때문이다(§Q3.5-a).
-  const warnings = changed === null ? [] : citations.filter((c) => changed.has(c.target));
+  const warnings = changed === null ? [] : collectWarnings(citations, unresolved, changed);
 
   const result = {
     root: args.root,

@@ -36,6 +36,18 @@ extract() {
   node "${DIR}/citation-extract.mjs" --root "$1" --format json
 }
 
+# PR이 만진 파일 목록을 만들고 그 경로를 낸다.
+changed_list() {
+  local f
+  f="$(mktemp "${SANDBOX}/changed-XXXXXX")"
+  printf '%s\n' "$@" >"$f"
+  echo "$f"
+}
+
+extract_changed() {
+  node "${DIR}/citation-extract.mjs" --root "$1" --changed "$2" --format json
+}
+
 # 뽑힌 인용을 `<대상>:<줄>[-<끝줄>]` 한 줄짜리 요약으로 접는다 (없으면 빈 문자열).
 targets() {
   jq -r '.citations | map("\(.target):\(.targetLine)\(if .targetEndLine then "-\(.targetEndLine)" else "" end)") | join(" ")'
@@ -88,5 +100,26 @@ assert_eq "packages/kernel/src/services/consolidate-service.ts:2877 packages/ker
     'consolidate-service.ts:2877' \
     'Owner adjudication on PR #136 diff line 377' \
     'the anchor L1234 form is not used here')" | targets)"
+
+# owner가 명시적으로 허가한 추가 케이스 (PR #351 수정요청 4). 대상 파일이 head 트리에 없는
+# 인용은 이전에 미해결로만 빠져 경고가 0건이 되고, 그러면 코멘트가 아예 안 생겨 false-green이
+# 됐다 — 인용 낡음의 최악의 경우(가리키는 자리가 없어짐)에만 잡이 침묵하던 자리다.
+# **삭제와 리네임은 여기서 같은 코드 경로다**: 리네임의 옛 경로도 워크플로가 previous_filename을
+# 함께 뽑으므로 「changed에 있고 트리에 없다」로 똑같이 들어온다. 그래서 케이스는 하나다.
+# 세 인용을 한 번에 넣어 두 갈래(루트 상대 · basename)가 경고로 올라오고, diff에 없는
+# 사라진 대상은 올라오지 않는 것까지 본다.
+warnings() {
+  jq -r '.warnings | map(if .missing then "없음:\(.token):\(.targetLine)" else "\(.target):\(.targetLine)" end) | join(" ")'
+}
+
+it "대상 파일이 사라지고(삭제·리네임) 그 경로가 diff에 들면 경고로 뜬다 — diff 밖이면 안 뜬다"
+fixture="$(make_fixture \
+  'mirrors packages/kernel/src/deleted.ts:10' \
+  'mirrors renamed-away.ts:20' \
+  'mirrors untouched-gone.ts:30')"
+assert_eq "없음:packages/kernel/src/deleted.ts:10 없음:renamed-away.ts:20" \
+  "$(extract_changed "$fixture" \
+    "$(changed_list 'packages/kernel/src/deleted.ts' 'packages/kernel/src/services/renamed-away.ts')" |
+    warnings)"
 
 finish
