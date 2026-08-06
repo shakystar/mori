@@ -246,6 +246,44 @@ describe("runCli", () => {
     expect(io.err()).toBe("");
   });
 
+  it("has the auth gate and the turn resolve through the one injected Models instance (#336)", async () => {
+    // `cli/runtime.ts:56-57` requires the auth gate and the real turn to "ask the same
+    // question of the same instance" — otherwise "gate passes, turn fails" becomes
+    // reachable. Before #336 each built its own `Models` from the same inputs, so they
+    // agreed by construction. Now `prepareAgent` threads one instance to both, and that
+    // is what this pins: a second, independently-built `Models` anywhere on the prompt
+    // path would leave its half of `seenBy` empty.
+    const io = captureOutput();
+    const env = { ANTHROPIC_API_KEY: "sk-ant-test" };
+    const credentialStore = new InMemoryCredentialStore();
+    const models = fakeProviderModels(env, credentialStore, fakeStreamFn("hello from mori"));
+
+    const seenBy: string[] = [];
+    const checkAuth = models.checkAuth.bind(models);
+    const streamSimple = models.streamSimple.bind(models);
+    models.checkAuth = async (providerId) => {
+      seenBy.push("gate");
+      return checkAuth(providerId);
+    };
+    models.streamSimple = (model, context, options) => {
+      seenBy.push("turn");
+      return streamSimple(model, context, options);
+    };
+
+    const exitCode = await runCli(["hi"], env, {
+      stdout: io.stdout,
+      stderr: io.stderr,
+      models,
+      credentialStore,
+      root: cliRoot,
+    });
+
+    expect(exitCode).toBe(0);
+    expect(seenBy).toEqual(["gate", "turn"]);
+    // The turn really streamed through that instance rather than merely touching it.
+    expect(io.out()).toBe("hello from mori\n");
+  });
+
   describe("session-end consolidation (#107)", () => {
     it("calls kernel.consolidate exactly once when MORI_CONSOLIDATE_MODEL is set", async () => {
       const io = captureOutput();
