@@ -1,0 +1,804 @@
+# append와 커서 커밋 사이의 잔여(R1) 산정 — CAS도 유니크 제약도 덮지 않는 자리 (#315, #310 발견)
+
+#310 / [PR #313](https://github.com/shakystar/mori/pull/313)의 산정이 §Q1.1 (c)에서 R1을 찾아
+**「발견」 절로 넘겼다.** A 축(#301/#305)과 B 축(#310/#314)이 각각 "더 실을 자리가 없다"·"둘 다
+넣지 않는다"로 닫혔는데도 남은 자리이고, [승인 리뷰](https://github.com/shakystar/mori/pull/313#issuecomment-5199059761)에서
+owner가 인터리브를 실물로 재확인했다. 이 문서는 그 잔여의 산정이다.
+
+**이 문서는 산정이다.** `packages/` 아래 변경은 **0줄**이고 실행되는 코드도 0줄이다.
+결론은 §Q5의 후속 조각 목록으로 나간다.
+
+**기준선**: `main` = `c58d5c2`
+(`docs(kernel): 낡힌 bare 줄번호 인용 전수 판정 — conflict-service.ts 14건 갱신 (#309 후속) (#312) (#323)`,
+`2026-08-06T11:10:10+09:00`).
+이 문서의 모든 `파일:줄` 인용은 **그 커밋에서 파일을 직접 열어 대조한 것**이다 — 이슈 본문,
+#310 문서, #189·#103 본문의 줄번호를 옮겨 적은 것은 하나도 없다. 대조표는
+[부록 A](#부록-a--인용-대조표)에 전부 있다. 이 리포는 크로스파일 인용이 여섯 번 낡았고
+(#274·#276, #299, #300·#302, #306, #309, #312), 이 문서는 후속 판단의 입력이 되므로 틀린 인용이
+그대로 전파된다.
+
+**트랜잭션 판정은 추정이 아니라 실측이다.** 이 리포가 실제로 링크하는 엔진
+(`sqlite_version() = 3.53.2`, `better-sqlite3 12.11.1`) 위에서 직접 실행해 얻은 결과이며,
+스크립트와 원문 출력은 [부록 B](#부록-b--better-sqlite3-실측)에 있다.
+
+## 필수 질문 → 절 매핑
+
+| 질문                               | 절                                         | 한 줄 답                                                                                                                                                                                 |
+| ---------------------------------- | ------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Q1 창이 실제로 얼마나 열려 있는가  | [Q1](#q1--창이-실제로-얼마나-열려-있는가)  | **밀리초가 아니다.** 두 커밋 사이에 `await`가 4개 있고 그중 셋이 네트워크·전체 리빌드다. 두 커밋은 **같은 커넥션의 서로 다른 두 트랜잭션**이다. 창은 **크래시 없이 예외만으로도 열린다** |
+| Q2 재증류가 실제로 무엇을 남기는가 | [Q2](#q2--재증류가-실제로-무엇을-남기는가) | **읽기 표면 8곳 중 중복 메모리를 접는 곳은 0곳이다.** 시스템에 있는 유일한 fold(`dedupeMemoriesBySource`)는 **R1이 만드는 모양을 구조적으로 못 본다**                                    |
+| Q3 후보 수단과 각각의 대가         | [Q3](#q3--후보-수단과-각각의-대가)         | 후보1은 **비용이 로그 계층 seam 하나**, 후보2는 **정상 동작을 막는다**, 후보3은 **페이로드 확장 + 하네스 신뢰 문제**, 후보4는 **Q2가 떠받쳐 주지 않는다**                                |
+| Q4 권고                            | [Q4](#q4--권고)                            | **고친다 — 후보1(커서 커밋을 append 트랜잭션에 합류).** 차선은 후보3. 후보4("고치지 않는다")는 이 자리에서는 §Q2가 근거를 대주지 못한다                                                  |
+| Q5 조각 나누기                     | [Q5](#q5--조각-나누기)                     | 조각 3개, **★ 0개** (마이그레이션도 이벤트 페이로드 변경도 없다). 인터리브 테스트는 조각 2에 붙는다                                                                                      |
+
+**한 줄 결론**: R1은 "드문 크래시가 남기는 흔적"이 아니라 **평범한 꼬리 예외 하나로도 열리는
+창**이고(§Q1), 그 창이 남기는 중복 메모리를 **접는 읽기 표면이 하나도 없다**(§Q2). #310이
+후보2·3을 각하한 이유("제약이 그 축을 표현하지 못한다", "정상 동작을 같이 막는다")는 후보1에는
+적용되지 않는다 — 트랜잭션 경계는 이 축을 정확히 표현하고, 정상 경로에서 막는 것이 없다.
+
+## 0. 무엇을 R1이라고 부르는가
+
+#310 §Q1.1 (c)가 붙인 이름을 그대로 쓴다.
+
+> **홀더가 `:2693`의 append에 성공한 뒤 `:2920`의 커서 커밋에 닿기 전에 멈추면, 다음 경계가
+> 같은 대화 슬라이스를 다시 읽어 다시 증류한다.**
+
+이 문서는 그 정의를 기준선에서 다시 세우고(§Q1.0), 세 가지를 새로 판정한다.
+
+1. **창의 실제 폭** — 두 커밋 사이에서 무엇이 실행되고, 둘이 한 트랜잭션인가 (§Q1)
+2. **남는 것의 정체** — 세그먼트 중복과 메모리 중복을 갈라서, 읽기 경로가 각각을 접는가 (§Q2)
+3. **닫을 수단** — 넷을 재고 하나로 닫는다 (§Q3·§Q4)
+
+세 번째가 "닫지 않는다"로 나올 수 있고 그것도 정당한 결론이다 — #305(A 축)와 #314(B 축)가
+그렇게 닫혔다. 이 문서는 그 결론에 **도달하지 않았고**, 왜 도달하지 않았는지가 §Q2다.
+
+### Q1.0 R1의 자리 — 기준선 실물
+
+`consolidateBoundary`의 `run()`(`consolidate-service.ts:2200`)이 커서를 읽고 쓰는 자리는 셋뿐이다.
+
+| 줄                            | 무엇                                                                                |
+| ----------------------------- | ----------------------------------------------------------------------------------- |
+| `consolidate-service.ts:2211` | `getConsolidateWatermark` — 이벤트 워터마크를 **`meta`에서** 읽는다                 |
+| `consolidate-service.ts:2238` | `probeBoundaryStart` → `expectedHead` 스탬프. 로그의 첫 접촉                        |
+| `consolidate-service.ts:2254` | `await source.read(sliceStartOffset)` — 대화 슬라이스. 오프셋도 **`meta`에서** 왔다 |
+| `consolidate-service.ts:2331` | `readEvents` — 창·`consumed`·`existing`이 전부 여기서 나온다 (#298)                 |
+| `consolidate-service.ts:2693` | `appendEvents(..., { expectedHead })` — **CAS**                                     |
+| `consolidate-service.ts:2920` | `commitBoundaryCursors` — 워터마크·대화 오프셋 커밋. **append 뒤**                  |
+
+대화 오프셋의 키는 `cls_conversation_offset:<sourceId>`이고
+(`consolidate-service.ts:1286`), 쓰기는 `writeConversationOffset`
+(`consolidate-service.ts:1296`) 하나뿐이며 그 유일한 호출자가 `commitBoundaryCursors`
+(`consolidate-service.ts:1445`)다. 즉 **대화 축의 상태는 전적으로 `:2920` 한 자리에 걸려 있다.**
+
+`:2693`이 성공하고 `:2920`이 실행되지 않으면 디스크에는 이렇게 남는다.
+
+- `memory.consolidated`(+ `memory.superseded`) 이벤트 — **durable**
+- 이 슬라이스의 세그먼트 행 — **durable** (`insertSegments`, `consolidate-service.ts:2624`)
+- 이벤트 워터마크 — **안 움직임**
+- 대화 오프셋 — **안 움직임**
+
+다음 경계는 `:2211`에서 옛 워터마크를, `:2253`에서 옛 오프셋을 읽고, `:2238`에서 **A의 append가
+만든 새 head를 스탬프한다.** CAS가 비교하는 것은 "내가 head를 찍은 뒤 로그가 움직였는가"뿐이므로
+(`event-store.ts:318`의 트랜잭션 안에서 `event-store.ts:322`가 비교한다) **B의 CAS는 통과한다.**
+CAS의 결함이 아니라 CAS가 말하지 않는 것이다.
+
+두 축의 운명이 갈린다.
+
+- **관찰 축은 흡수된다.** B의 `:2331` `readEvents`가 A의 `memory.consolidated`를 포함하므로
+  `:2380`의 `consumed`가 A가 소비한 관찰 id를 담고 `:2387`의 필터가 창에서 뺀다.
+- **대화 축은 흡수자가 없다.** 오프셋은 `meta`에 있고 안 움직였다. 세그먼트 id는
+  `createId("seg")`로 주조되고(`:2617`), 오프셋 커서는 단조 증가만 한다. **B는 같은 슬라이스를
+  다시 읽어 다시 증류한다.**
+
+코드 자신이 그 갈림을 `:2653-2680` 주석에 이미 적어 뒀다 — 대화 슬라이스는 로그에서 파생될 수
+없고 downstream에 흡수자가 없다는 문장이 거기 있다.
+
+## Q1 — 창이 실제로 얼마나 열려 있는가
+
+### 판정: **밀리초가 아니다. 그리고 크래시 전용이 아니다.**
+
+### Q1.1 `:2693`과 `:2920` 사이에서 실행되는 것 — 전수
+
+기준선에서 `:2694`부터 `:2919`까지를 전수로 훑었다. `await`는 **정확히 4개**이고, 그 밖의 코드는
+전부 동기 계산이다.
+
+| 순서 | 줄                            | 무엇                                                          | 성질                                                   |
+| ---- | ----------------------------- | ------------------------------------------------------------- | ------------------------------------------------------ |
+| 1    | `consolidate-service.ts:2716` | `pruneSegments` (동기)                                        | SQLite 삭제 + FTS·임베딩 행 정리. `try`로 감쌈         |
+| 2    | `consolidate-service.ts:2733` | `sliceFullyStored` 계산 (동기)                                | 순수 계산                                              |
+| 3    | `consolidate-service.ts:2783` | `conversationOffsetTarget` 분기 (동기)                        | 순수 계산                                              |
+| 4    | `consolidate-service.ts:2811` | `capturedConversationSliceHeld` 미러 (동기)                   | 대입 하나                                              |
+| 5    | `consolidate-service.ts:2858` | **`await rebuildProjectProjection(..., reindexSearch:true)`** | **로그 전체 replay + 전체 테이블 재작성 + FTS 재색인** |
+| 6    | `consolidate-service.ts:2865` | **`await ensureEmbeddings(...)`**                             | **임베더 네트워크 왕복**                               |
+| 7    | `consolidate-service.ts:2874` | **`await detectContradictions({...})`**                       | **로그 전체 replay + 비교쌍마다 judge LLM 왕복**       |
+| 8    | `consolidate-service.ts:2885` | **`await ensureSegmentEmbeddings(...)`**                      | **임베더 네트워크 왕복**                               |
+| 9    | `consolidate-service.ts:2903` | `eventWatermarkId` 계산 (동기)                                | 배열 인덱싱                                            |
+
+5번의 비용은 이 리포가 스스로 재 뒀다 — `projection-store.ts:339`의 주석이
+_"#277 measured the cost: n=1000 → ~319ms, n=5000 → ~1.9s per reindex"_ 라고 적는다. 6·8번은
+하네스가 주입한 `Embedder`의 원격 호출이고, 7번은 코사인 프리필터를 통과한 **쌍마다 한 번씩**
+LLM judge를 부른다(`contradiction-service.ts:253`의 `await judge(...)`가 이중 루프 안에 있다).
+
+**따라서 창의 폭은 "저장소 크기 × 임베더 지연 × 판정 쌍 수"의 함수다.** 밀리초 단위의 경합
+창이 아니라 **초~분 단위**로 열려 있는 구간이고, 그 사이 디스크에는 A의 메모리가 이미 durable하게
+누워 있는데 두 커서는 A가 시작할 때의 값 그대로다.
+
+한 가지 더: 5·7번은 **동기 SQLite 트랜잭션을 안고 있다**(`projection-store.ts:424`의
+`db.transaction(...)`). better-sqlite3는 동기이므로 그 구간 동안 이벤트 루프가 멈춘다 — 이것이
+§Q1.3의 하트비트 논의에 걸린다.
+
+### Q1.2 두 커밋의 트랜잭션 경계 — 실물 판정
+
+**판정: 두 커밋은 같은 커넥션 위의 서로 다른 두 트랜잭션이고, 오늘 구조에서 하나로 합칠 수 없다.**
+
+근거 셋을 실물로 적는다.
+
+1. **append 쪽**: `event-store.ts:318`이 `db.transaction(() => {...})`으로 배치를 만들고,
+   `expectedHead`가 있을 때 `event-store.ts:344`가 `batch.immediate()`로 **BEGIN IMMEDIATE**를
+   건다. CAS 비교(`event-store.ts:322`)는 그 트랜잭션 **안**에 있다. 트랜잭션은 `:344`에서 끝난다.
+2. **커서 쪽**: `consolidate-service.ts:1469`가 별도의 `getDb(projectId).transaction(...)`을
+   만들고 `consolidate-service.ts:1504`가 `commit.immediate()`로 **또 한 번** BEGIN IMMEDIATE를
+   건다. 그 안에서 `watermarkWouldRegress`(#211)와 `segmentsStillPresent`(#255,
+   `consolidate-service.ts:1479`)의 read-modify-write가 돈다.
+3. **커넥션은 같다**: `commitBoundaryCursors`의 doc(`consolidate-service.ts:1407-1408`)이
+   _"`getDb(projectId)` is a cached per-project connection (storage/db.ts), so the nested writes
+   below run on the same connection `.transaction()` wraps"_ 라고 스스로 적는다. `appendEvents`도
+   `event-store.ts:316`에서 같은 `getDb(projectId)`를 쓴다.
+
+**같은 커넥션인데 왜 못 합치는가.** 둘 사이에 §Q1.1의 `await` 4개가 있기 때문이다. 이 리포가
+실제로 링크하는 엔진 위에서 실측했다 —
+`db.transaction(...)`에 프라미스를 반환하는 함수를 주면 `Transaction function cannot return a
+promise`로 끝난다([부록 B](#부록-b--better-sqlite3-실측), 케이스 A·B). 즉 트랜잭션 콜백은
+동기 함수여야 하고 그 안에서는 `await`를 쓸 수 없다. **오늘의 `run()`이 두 커밋 사이에 네트워크
+왕복을 두고 있는 한, 둘은 한 트랜잭션이 되지 못한다.** 이것이 §Q3 후보1의 입력이다: 후보1은
+"트랜잭션을 넓히는" 변경이 아니라 **"둘 사이에서 `await`를 걷어내는"** 재배치 변경이다.
+
+같은 실측이 후보1의 실현 가능성도 하나 확인해 줬다: **트랜잭션은 중첩할 수 있고, 안쪽에
+`.immediate()`를 걸어도 받는다**(부록 B 케이스 C). 즉 `consolidate-service`가 바깥 트랜잭션을
+열고 그 안에서 로그 계층의 append를 부르는 모양(§Q3의 1b)은 엔진 쪽 제약에 걸리지 않는다 —
+걸리는 것은 `appendEvents`가 `async`라는 사실 하나뿐이다.
+
+부수적으로 확인한 사실 하나: `getDb`가 커넥션을 캐싱하므로 두 트랜잭션은 **직렬화된다** —
+append 트랜잭션이 커밋되기 전에는 커서 트랜잭션이 시작될 수 없다. 그래서 R1은 "두 트랜잭션이
+서로 끼어든다"가 아니라 **"두 번째 트랜잭션이 아예 도달되지 않는다"**는 모양이다.
+
+### Q1.3 크래시 말고 무엇이 이 창을 여는가
+
+이슈가 묻는 세 번째 질문이다. 셋을 따로 판정한다.
+
+**(가) 프로세스 사망 — 연다.** SIGKILL·OOM·전원 손실·하네스의 타임아웃 종료. `session-end`
+경계가 §Q1.1의 꼬리(임베더 두 번 + judge N번)에 들어가 있을 때 하네스가 세션을 끊으면 정확히
+이 모양이다. **이것이 R1의 이름이 유래한 경로이고, 유일한 경로가 아니다.**
+
+**(나) 꼬리에서 던지는 예외 — 연다. 크래시가 필요 없다.** `run()`은 `:2957`의 `try` 안에서
+불리고, 던진 것은 `:2961`의 `recordAttempt`가 기록한 뒤 `:2970`이 **그대로 다시 던진다.**
+`:2920`은 그 아래에 있으므로 실행되지 않는다. §Q1.1의 넷 중 어느 것이 실제로 던질 수 있는지
+호출된 함수를 열어서 갈랐다.
+
+| 호출                                 | 던지는가                   | 근거                                                                                                         |
+| ------------------------------------ | -------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| `rebuildProjectProjection` (`:2858`) | **던진다**                 | `projection-store.ts:385`가 genesis 없는 프로젝트에 `throw new Error`. 디스크 읽기·SQLite 오류도 그대로 전파 |
+| `ensureEmbeddings` (`:2865`)         | 안 던진다                  | `embeddings-service.ts:92`의 `try`가 본문 전체를 감싸고 `catch`가 경고만 쓴다                                |
+| `detectContradictions` (`:2874`)     | **던진다**                 | `contradiction-service.ts:345`가 조건부로 `rebuildProjectProjection`을 부르고 감싸지 않는다                  |
+| `ensureSegmentEmbeddings` (`:2885`)  | 안 던진다                  | `embeddings-service.ts:174`의 `try`가 본문 전체를 감싼다                                                     |
+| judge LLM 자체                       | 안 던진다                  | `contradiction-service.ts:101`의 `catch`가 `{ contradicts: false }`로 삼킨다                                 |
+| `appendEvents` (contradiction 내부)  | 안 던진다 (StaleHead 한정) | `contradiction-service.ts:314`가 `isStaleHeadError`만 삼키고 나머지는 다시 던진다 — 즉 **일부는 던진다**     |
+
+**즉 `:2858`과 `:2874`가 던지면 R1의 창이 크래시 없이 열린다.** 그리고 그 둘이 던지는 사유는
+"프로젝트가 망가졌다"만이 아니다 — 디스크 가득참, `busy_timeout = 5000`을 넘긴 SQLITE_BUSY,
+토픽 파일 읽기 실패(`projection-store.ts:412`의 `readJson`)가 전부 여기로 나온다. `#232`가
+`:2798-2805` 주석에 _"everything from here to the end of this function (the projection rebuild,
+embeddings, contradiction detection, and the cursor commit) can throw"_ 라고 이미 적어 둔 것과
+같은 사실이다. **#232는 그 사실을 텔레메트리 관점에서 다뤘고, 커서 관점에서는 다루지 않았다.**
+
+**(다) 락 강탈 — 열지 않는다.** 이 판정은 이슈가 명시적으로 물은 것이므로 근거를 길게 적는다.
+
+- `withProjectLock`은 `project-lock.ts:818`에서 `fn`을 끝까지 기다린 뒤
+  `project-lock.ts:826`에서 비로소 `ProjectLockCompromisedError`를 던진다. 즉 강탈은 임계구역을
+  **중단시키지 않는다.**
+- 안쪽으로 전달되는 신호(`lockSignal`)는 `throwIfDispossessed` 체크 포인트에서만 효력을 낸다.
+  기준선에서 `:2694`부터 `:2919`까지를 훑어 **`throwIfDispossessed` 호출이 0건**임을 확인했다
+  (마지막 체크 포인트 ④는 append 직전 `:2648`이다). `#211`이 `:2916-2919` 주석에
+  _"there is deliberately no check point between it and ④ above"_ 라고 그 부재를 의도로 적었다.
+- 따라서 **강탈당한 홀더도 `:2920`에 도달해 커서를 커밋한다.** #211의 단조성이 그 늦은 커밋을
+  무해하게 만드는 장치다(`watermarkWouldRegress`, `consolidate-service.ts:1386`).
+
+한 가지 곁가지: §Q1.1의 5·7번이 동기 트랜잭션을 안고 있으므로 그 구간에 이벤트 루프가 멈추고
+`setInterval` 하트비트도 멈춘다. 그 정지가 `LOCK_STALE_MS = 30_000`(`project-lock.ts:483`)을
+넘으면 다른 프로세스가 락을 stale로 회수할 수 있다. 그러나 그 결과도 **강탈**이고, 위 논증에
+따라 강탈은 커서 커밋을 건너뛰게 하지 않는다. 다만 그 사이 새 홀더가 시작한 경계는 옛 커서를
+읽으므로 **R1과 같은 재증류를 낸다** — 창을 여는 것은 강탈 자체가 아니라 "A의 꼬리가 길다"는
+사실이고, 그것은 (가)·(나)와 같은 뿌리다.
+
+### Q1.4 창의 폭 — 판정
+
+- **폭**: `await` 4개, 그중 3개가 네트워크·전체 리빌드. 저장소가 크고 판정 쌍이 많을수록 넓어진다.
+- **트랜잭션**: 같은 커넥션의 **두 트랜잭션**. 사이의 `await` 때문에 오늘 구조에서 하나가 될 수 없다.
+- **여는 사유**: 프로세스 사망 **그리고** `:2858`·`:2874`가 던지는 평범한 예외. 락 강탈 단독으로는
+  열리지 않는다.
+
+**이슈 본문이 "크래시로"라고 쓴 것보다 창이 넓다**는 것이 이 절의 결론이다.
+
+## Q2 — 재증류가 실제로 무엇을 남기는가
+
+### 판정: **중복 메모리를 접는 읽기 표면이 0곳이다.**
+
+### Q2.0 남는 것 둘 — 세그먼트와 메모리를 분리한다
+
+R1의 두 번째 경계가 같은 슬라이스를 다시 처리하면 두 가지가 생긴다. 이슈가 분리해서 적으라고
+요구한 지점이고, #103의 범위가 걸리는 지점이다.
+
+| 무엇              | 어디서 생기는가                                                                            | 식별자                                    |
+| ----------------- | ------------------------------------------------------------------------------------------ | ----------------------------------------- |
+| **중복 세그먼트** | `consolidate-service.ts:2624` `insertSegments` — 같은 청크를 다시 삽입                     | `createId("seg")`로 **주조** (`:2617`)    |
+| **중복 메모리**   | `consolidate-service.ts:2693` append — 같은 슬라이스에서 다시 추출된 `memory.consolidated` | `createConsolidatedMemory`가 새 id를 준다 |
+
+둘의 성질이 다르다. 세그먼트는 **상한이 있는 파생 버퍼**다 —
+`pruneSegments`(`consolidate-service.ts:2716`)가 나이·개수 상한을 걸고, 리빌드가 살아남은 행에서
+FTS를 다시 채운다. 메모리는 **로그의 사실**이다 — append-only이고, 접히려면 누군가가 접어야 한다.
+
+### Q2.1 #103이 받아들인 범위 — 원문으로 확정
+
+#103 본문의 ② 절 전문이다(GitHub API로 읽은 원문).
+
+> ### ② 세그먼트가 이벤트보다 먼저 쓰인다
+>
+> `consolidate()`는 `insertSegments` → `appendEvents` 순서다. `appendEvents`가 실패하면 세그먼트는
+> 남고 대화 offset은 전진하지 않으므로, 다음 경계가 같은 슬라이스를 다시 청킹해 **중복 세그먼트**를
+> 쓴다. 파생 버퍼이고 `pruneSegments`가 상한을 잡으므로 심각하지 않다 — **관찰된 사실을 코드에 명시**하는
+> 것으로 충분한지, 아니면 순서를 바꿔야 하는지 판단하는 것이 이 이슈의 몫이다.
+
+**"중복 세그먼트"라고 명시돼 있고, 메모리는 나오지 않는다.** 그리고 #103이 낸 답은 코드에
+남아 있다 — `consolidate-service.ts:2589-2598` 주석이 순서를 바꾸지 않기로 한 이유를 적고,
+`:2594-2596`이 _"segments are a derived, prunable buffer (pruneSegments caps the total below), so
+that duplication is bounded and self-healing"_ 이라고 쓴다. `:2633-2643`의 체크 포인트 ④ 주석도
+같은 범위를 되풀이한다 — _"On disk from this boundary at this instant: the raw conversation
+SEGMENTS written just above, if the buffer is on, and nothing else."_
+
+**#103이 다룬 상황은 `appendEvents`가 실패한 경우다.** 그때는 메모리 이벤트가 아예 없으므로
+메모리 중복이 생길 수 없고, 그래서 그 판단이 메모리를 언급하지 않은 것이 맞다. R1은 정확히
+반대다 — **`appendEvents`가 성공한 뒤**의 창이므로 메모리가 이미 durable하다. #103의 문장이
+R1을 덮지 않는다는 것은 범위 누락이 아니라 **다른 상황**이라는 뜻이다.
+
+### Q2.2 중복 메모리의 읽기 표면 — 전수
+
+**두 중복 메모리는 서로 다른 id, 서로 다른 `createdAt`, 같은(또는 유사한) `text`, `invalidAt`
+없음, self-lane이다.** 이 상태의 두 행이 각 읽기 표면에서 어떻게 보이는지 **읽기 경로 구현을
+열어서** 판정했다. 쓰는 쪽만 보고 낸 판정은 하나도 없다.
+
+| #   | 표면                         | 읽기 경로                                       | 접는가        | 왜                                                                                                                    |
+| --- | ---------------------------- | ----------------------------------------------- | ------------- | --------------------------------------------------------------------------------------------------------------------- |
+| 1   | 프로젝션 fold (유일한 dedup) | `projector.ts:234` `dedupeMemoriesBySource`     | **안 접는다** | 키에 `sourceObservationIds` 집합이 들어가고(`:246`), 빈 집합은 그룹에 아예 안 들어간다(`:239`). §Q2.3                 |
+| 2   | 유효 메모리 목록             | `projection-store.ts:1014` `listValidMemories`  | **안 접는다** | SQL이 `invalid_at IS NULL AND laneWhere(lane)`(`:1024`)뿐이다. `GROUP BY`도 `DISTINCT`도 없다                         |
+| 3   | 주입(컨텍스트) 랭킹          | `memory-retrieval-service.ts:129`               | **안 접는다** | `listValidMemories`의 각 행을 그대로 pool에 넣고(`:145`) 점수순 정렬만 한다(`:165`). 텍스트 비교가 없다               |
+| 4   | 주입 예산                    | `context-service.ts:107` → `fitInjectionBudget` | **안 접는다** | 넘겨받는 것이 `retrieved.ranked`(3번의 결과)이고 예산은 개수를 자를 뿐 같은 텍스트를 골라내지 않는다                  |
+| 5   | 어휘 검색(FTS)               | `projection-store.ts:687`                       | **안 접는다** | 색인 게이트가 `!memory.dedupedBy && !memory.retractedAt`이다. 1번이 안 접으므로 `dedupedBy`가 없고 **둘 다 색인된다** |
+| 6   | 의미 검색                    | `search-service.ts:172`                         | **안 접는다** | 코퍼스를 `listValidMemories`에서 만든다. 두 id가 모두 valid이므로 둘 다 점수를 받는다                                 |
+| 7   | 임베딩 적재                  | `embeddings-service.ts:95`                      | **안 접는다** | `listValidMemories`의 각 메모리를 `entityId`로 upsert한다. 텍스트가 같아도 id가 다르므로 **행 두 개**                 |
+| 8   | 모순 판정                    | `contradiction-service.ts:212`                  | **안 접는다** | §Q2.4                                                                                                                 |
+| 9   | 다음 경계의 `existing`       | `consolidate-service.ts:2428`                   | **재량**      | 둘 다 추출기에게 보인다. 접는 것은 추출기의 supersede 힌트이지 코드의 판정이 아니다. §Q2.5                            |
+
+10번째 후보로 `memory-import-service`의 `textKey` dedup(`:641`, `:651`)을 봤다. 그것은 **앞으로
+들어올 import**를 기존 텍스트에 접는 장치이고, 이미 로그에 있는 두 증류 메모리를 무효화하지
+않는다. R1의 중복에 대해서는 "세 번째를 막아 주지만 둘을 하나로 만들지는 않는다"가 정확하다.
+
+**표의 결론: 중복 메모리는 주입에도, 검색에도, 임베딩에도 두 번 실린다.** 두 행의 `salience`와
+`createdAt`이 사실상 같으므로 3번의 점수도 거의 같고, 따라서 **랭킹에서 나란히 붙어 함께 주입될
+가능성이 높다** — 하나가 잘리고 하나가 남는 모양이 아니다.
+
+### Q2.3 유일한 fold가 R1을 못 접는 이유
+
+`dedupeMemoriesBySource`(`projector.ts:234`)는 이 시스템에서 중복 메모리를 접는 **유일한** 코드다.
+키가 이렇다(`projector.ts:246`).
+
+```
+`${lane}\n${[...ids].sort().join(",")}\n${memory.kind}\n${memory.text.trim().toLowerCase()}`
+```
+
+그리고 그 앞에 `projector.ts:239`의 게이트가 있다.
+
+```js
+const ids = memory.sourceObservationIds ?? [];
+if (ids.length === 0) continue;
+```
+
+R1의 두 메모리에 그 값이 어떻게 실리는지 따라간다. `consolidate-service.ts:2536`이
+`sourceObservationIds = bounded.observations.map((o) => o.id)`이다.
+
+- **혼합 경계(관찰 + 대화)**: A는 관찰 `{o1, o2}`를 소비했으므로 A의 키 조각은 `["o1","o2"]`.
+  B는 `:2380`의 `consumed`가 `o1`·`o2`를 이미 뺐으므로 `observations`가 비고 `[]`가 된다.
+  → **A는 그룹에 들어가고 B는 `:239`에서 걸러진다. 접힐 짝이 없다.**
+- **대화 전용 경계**: A도 B도 `[]`. → **둘 다 `:239`에서 걸러진다. 그룹 자체가 안 만들어진다.**
+
+**두 경우 모두 fold가 성립하지 않는다.** #310 §Q1.3이 후보2(유니크 인덱스)에 대해 낸 것과
+같은 구조의 결론인데, 여기서는 인덱스가 아니라 **이미 존재하는 fold**가 같은 이유로 빗나간다.
+`projector.ts:229`의 주석이 _"Empty/absent source sets never group (each stands alone)"_ 라고
+그 선택을 의도로 적었지만, 그 주석은 **replay·크로스머신 sync의 중복**을 염두에 둔 문장이고
+R1(같은 스토어 안에서 대화 축이 되감기는 경우)을 염두에 두지 않았다.
+
+### Q2.4 모순 판정이 접는가 — 접지 않는다
+
+`detectContradictions`가 R1의 중복을 접는다면 §Q2.2의 결론이 바뀐다. 세 가지가 각각 막는다.
+
+1. **대상이 좁다.** `contradiction-service.ts:212`의 필터가 `memory.kind === "decision"`을 건다.
+   `fact`·`preference` 등 다른 kind의 중복은 아예 후보에 들어가지 않는다.
+2. **판정 대상이 다르다.** judge 프롬프트(`contradiction-service.ts:58-60`)가
+   _"Judge whether they GENUINELY CONTRADICT each other (one invalidates or reverses the other) as
+   opposed to merely being similar, complementary, or …"_ 라고 **중복을 명시적으로 제외한다.**
+   같은 내용의 두 메모리에 대한 설계상의 정답은 `contradicts: false`이고, `:257`이 그때 `continue`한다.
+3. **승자 선택이 dedup이 아니다.** 설령 judge가 `true`를 내도 결과는 `memory.superseded` +
+   `conflict.detected`다 — 즉 **에이전트에게 충돌로 보고된다.** 조용히 하나를 접는 것과 다른 동작이다.
+
+### Q2.5 `existing`이 접는 빈도 — 재량인가 결정적인가
+
+**재량이다.** 근거 셋.
+
+- `consolidate-service.ts:2428`의 `existing`은 valid + self-lane 전부이고, 여기에 A의 메모리가
+  실린다. 그러나 그것을 접는 경로는 추출기가 `supersedesMemoryId`를 **돌려줄 때만** 열린다.
+- 코드가 거는 판정은 "그 id가 실제로 보였고 아직 valid한가"뿐이다 —
+  `consolidate-service.ts:2535`의 `validIds`와 `:2566`의 `validIds.has(...)`. 즉 **코드는 힌트를
+  검증할 뿐 만들어 내지 않는다.**
+- 예산 절단이 이 재량을 더 좁힌다. `existing`은 `boundExtractionInput`을 지나 `bounded.existingMemories`가
+  되고(`:2442`), 추출기에게는 그 **접두부**만 간다(`:2502`). A의 메모리가 절단된 꼬리에 있으면
+  추출기는 그것을 보지도 못한다 — `:2528-2534` 주석이 그 경우 id를 honour하지 않는 이유를 적는다.
+
+**따라서 "다음 증류가 알아서 접는다"는 이 자리에서 근거로 쓸 수 없다.** 접힐 수도 있고 아닐
+수도 있으며, 접히더라도 그것은 `memory.superseded` 한 건이 더 붙는 모양이지 중복이 없었던 것과
+같은 상태가 아니다.
+
+### Q2.6 남는 것 — 정리
+
+| 축       | 무엇이 남는가              | 흡수자                             | 판정                           |
+| -------- | -------------------------- | ---------------------------------- | ------------------------------ |
+| 관찰     | 없음                       | `consumed` 필터 (`:2380`·`:2387`)  | **자기 치유**                  |
+| 세그먼트 | 중복 청크                  | `pruneSegments` (`:2716`) — 상한만 | **상한 있음, #103이 받아들임** |
+| 메모리   | 중복 `memory.consolidated` | **없음** (§Q2.2 전수)              | **남는다**                     |
+| 임베딩   | 중복 벡터 행               | 없음 (`embeddings-service.ts:95`)  | 메모리에 종속                  |
+| FTS      | 중복 색인 행               | 없음 (`projection-store.ts:687`)   | 메모리에 종속                  |
+
+## Q3 — 후보 수단과 각각의 대가
+
+이슈가 지정한 넷을 순서대로 잰다. 각 후보에 **닫는 것 / 대가 / 정상 운영에서 새로 생기는 실패
+모드** 셋을 붙인다. 마지막 항목은 #310이 후보2·3을 죽인 기준이므로 특히 엄히 본다.
+
+### 후보1 — 커서 커밋을 append와 같은 트랜잭션에 넣는다
+
+**닫는 것: R1 전부.** append와 커서 커밋이 한 트랜잭션이면 "append는 남고 커서는 안 움직인"
+상태가 존재하지 않는다. §Q1.3의 (가)·(나)·(다)가 전부 이 상태에 도달하지 못한다.
+
+**대가 1 — 꼬리 재배치가 선행돼야 한다.** §Q1.2가 보인 대로 `await` 4개가 사이에 있는 한 두
+트랜잭션은 합쳐지지 않는다. 커서 커밋을 append 자리로 끌어올릴 수 있는지 입력값을 전수로 따졌다.
+
+| 커밋이 필요로 하는 값        | 계산 자리    | append(`:2693`) 앞인가                                                                  |
+| ---------------------------- | ------------ | --------------------------------------------------------------------------------------- |
+| `eventWatermarkId`           | `:2901-2910` | 값의 출처는 전부 앞 (`bounded.observations`, `rawObservationEvents`) — **옮길 수 있다** |
+| `conversationOffsetTarget`   | `:2783-2789` | `bounded.transcriptTailCoverage`·`resumePoints`는 앞. `sliceFullyStored`만 뒤           |
+| `sliceFullyStored`           | `:2732-2733` | `storedSegmentIds`(`:2626`)는 앞, `prunedSegmentIds`(`:2716`)는 **뒤**                  |
+| `conversationOffsetGuardIds` | `:2787`      | `storedSegmentIds`와 같음 — 앞                                                          |
+
+**뒤에 있는 것은 `pruneSegments` 하나뿐이다.** 그것을 append 앞으로 옮기면 나머지가 전부 따라
+올라온다. `pruneSegments`가 지켜야 하는 순서 제약은 자기 주석(`:2696-2707`)이 적은 "리빌드보다
+먼저"인데, 리빌드는 `:2858`이므로 append 앞으로 옮겨도 그 제약은 유지된다.
+
+**대가 2 — 로그 계층 seam이 하나 는다.** `appendEvents`는 `async`이고(`event-store.ts:293`)
+better-sqlite3의 트랜잭션 함수는 프라미스를 반환하는 함수를 받지 않는다. 그래서 합류에는 둘 중
+하나가 필요하다.
+
+- **1a**: `appendEvents`에 "이 트랜잭션 안에서 같이 돌릴 동기 콜백" 옵션을 단다.
+  대가: 로그 계층에 **임의의 쓰기를 자기 트랜잭션에 실어 보내는 일반 통로**가 생긴다. 새로 만든
+  검사(CAS)를 그 통로로 우회할 수 있는 모양이므로, 게이트 우회 관점에서 값이 비싸다.
+- **1b**: `event-store`에 동기 변형(예: `appendEventsInTx`)을 두고 `consolidate-service`가
+  바깥 트랜잭션을 열어 그 안에서 부른다. 대가: **CAS seam의 두 번째 모양**이 생긴다 — #253·#270·#298이
+  하나로 수렴시킨 자리에 갈래를 내는 것이므로, 두 모양이 어긋나지 않게 유지하는 부담이 상시로 붙는다.
+
+**1b가 1a보다 싸다.** 1a는 통로를 모두에게 열지만 1b는 호출자를 명시적으로 늘리는 변경이고,
+`expectedHead` 비교를 그 안에 그대로 담아 두면 CAS의 위치가 안 바뀐다.
+
+**대가 3 — `inputs.length === 0` 경로는 합류할 append가 없다.** `:2650`이
+`if (inputs.length > 0)`로 감싸므로, 추출 결과가 0건인 경계는 append 자체를 하지 않는다. 그런데
+그런 경계도 커서를 커밋한다 — `:2783`(빈 슬라이스·whole)과 `:2785`(`sliceFullyStored`)가 그 경로다.
+**그 경우 커서 커밋은 오늘처럼 자기 트랜잭션으로 남는다.** 손실은 없다: append가 없으면 "append는
+남고 커서는 안 움직인" 반쪽 상태 자체가 만들어지지 않고, 그 순간 디스크에 있는 것은 세그먼트
+버퍼뿐이라 #103이 받아들인 범위에 정확히 들어간다.
+
+**정상 운영에서 새로 생기는 실패 모드**
+
+1. **꼬리가 던지면 창이 이미 소비된 상태가 된다.** 오늘은 `:2858`이 던지면 커서가 안 움직여
+   다음 경계가 같은 창을 다시 처리한다(= R1). 후보1 뒤에는 커서가 이미 움직였으므로 다시 처리하지
+   않는다. 잃는 것은 **그 경계의 리빌드·모순 판정**이다. 리빌드는 #284의 write-ahead 마커가
+   메꾼다(`projection-store.ts:344`가 다음 리빌드를 `true`로 승격시킨다). 모순 판정은 다음 경계가
+   같은 스윕을 다시 돈다 — `contradiction-service.ts:323-324` 주석이 이 함수를
+   _"a repeated best-effort sweep"_ 이라고 스스로 규정한다. **둘 다 다음 경계가 회수한다.**
+2. **#211의 단조성이 append 경로에서는 잉여가 된다.** 합류 뒤에는 커밋된 커서 쓰기가 전부 CAS를
+   통과한 append에 붙으므로, 늦게 도착한 홀더의 낡은 목표가 애초에 커밋되지 않는다. 그러나
+   **noop 경로 둘(`:2290`·`:2405`)은 append 없이 커서를 쓰므로 CAS가 없다.** 거기서는 단조성이
+   여전히 유일한 보호다 — 즉 #211의 가드는 **지우면 안 되고**, 그 이유가 바뀐다는 것을 주석에
+   반영해야 한다.
+3. **#255의 live 가드는 오히려 유리해진다.** `:2764-2768`이 가드를 커밋 시점으로 미룬 이유는
+   "그 사이에 꼬리가 있어서"인데, 후보1은 그 꼬리를 없앤다. 가드를 지울 이유는 아니고
+   (다른 프로세스의 `pruneSegments`는 락 밖이다) 근거 문장이 짧아진다.
+4. **append 트랜잭션이 길어진다.** `watermarkWouldRegress`의 두 `SELECT`(`:1370`)와
+   `segmentsStillPresent` 한 번이 추가된다. 전부 인덱스 조회이고, 같은 BEGIN IMMEDIATE 안이므로
+   락 보유 시간이 미미하게 는다. §Q1.1의 초 단위 꼬리와 비교할 규모가 아니다.
+
+### 후보2 — 대화 오프셋을 로그 파생으로 만든다
+
+**닫는 것: 대화 축 전부.** 오프셋이 로그에서 파생되면 A의 append가 곧 오프셋의 전진이므로
+크래시 창이 사라진다.
+
+**대가 1 — 워터마크가 `meta`에 남은 이유가 오프셋에 그대로 적용되지는 않는다.** 이슈가
+먼저 판정하라고 지목한 항목이므로 실물로 갈랐다. `:2201-2210`이 든 이유는 둘이다.
+
+| 이유                                  | 오프셋에 적용되는가 | 근거                                                                                        |
+| ------------------------------------- | ------------------- | ------------------------------------------------------------------------------------------- |
+| noop 경로가 흔적 없이 커서를 건너뛴다 | **아니다**          | noop 커밋 둘(`:2290`·`:2405`)은 `watermarkEventId`만 넘긴다. 대화 오프셋은 넘기지 않는다    |
+| gc 복구가 커서를 **뒤로** 옮긴다      | **아니다**          | `setConsolidateWatermark`(`:1273`)만 unguarded로 열려 있다. 오프셋에는 대응하는 복구가 없다 |
+
+**즉 #298이 워터마크에 대해 든 이유는 오프셋에 전이되지 않는다.** 후보2를 죽이는 것은 그 이유가
+아니라 다음 것이다.
+
+**대가 2 (치명) — 오프셋이 전진해야 하는데 append가 없는 경로가 셋이다.** §Q3 후보1 대가 3에서
+센 것과 같은 경로다.
+
+- `:2783` `shownWhole || slice.text.length === 0` — **빈 슬라이스는 항상 전진한다.**
+  `:2751` 주석이 _"An EMPTY slice has nothing to lose and always advances, so an idle conversation
+  never pins the cursor"_ 라고 그 의도를 적었다. 이때 추출 결과는 당연히 0건이므로 로그에 아무것도
+  안 찍힌다.
+- `:2785` `sliceFullyStored` — 원본이 세그먼트로 보관됐으므로 전진한다. 추출이 0건이어도 전진해야
+  한다.
+- `:2788` `shownPrefixOffset` — 부분 소비. 추출이 0건인 접두부도 있을 수 있다.
+
+**로그 파생으로 바꾸면 이 셋에서 커서가 영원히 고정된다.** 유휴 대화가 커서를 pin하지 않게
+하려고 `:2751`이 명시적으로 만든 성질이 뒤집힌다. 이것을 피하려면 "오프셋만 나르는 새 이벤트
+타입"이 필요하고, 그러면 후보3의 대가에 이벤트 타입 하나가 더 붙는다.
+
+**정상 운영에서 새로 생기는 실패 모드**: 유휴 대화가 매 경계마다 같은 빈 슬라이스를 다시 읽고
+`ConversationSource.read`를 다시 호출한다. `#310`이 후보2·3을 죽인 사유("효과 없음이 아니라
+정상 동작을 막는다")와 같은 모양이다.
+
+### 후보3 — 증류 결과에 대화 슬라이스 식별자를 실어 로그에서 흡수한다
+
+관찰 축의 `consumed`(`:2380`)와 같은 모양을 대화 축에 만든다. `memory.consolidated` 페이로드에
+`(sourceId, 소비한 오프셋 구간)`을 싣고, 다음 경계가 `:2331`의 같은 배열에서 그 구간들을 모아
+자기 슬라이스에서 뺀다.
+
+**닫는 것: R1의 메모리 축.** 그리고 흥미로운 성질이 하나 있다 — **후보3의 사각지대와 R1의 메모리
+축이 겹치지 않는다.** 후보3은 append가 없는 경계를 흡수하지 못하지만(`inputs.length === 0`이면
+실을 이벤트가 없다), R1이 메모리 중복을 만드는 경우는 **정의상 A가 메모리를 append한 경우**다.
+즉 사각지대는 세그먼트 축에만 남고, 그쪽은 #103이 이미 받아들였다.
+
+**대가 1 — 이벤트 페이로드 확장.** `ConsolidatedMemory`에 필드가 는다. #314가 남길 트리거 문장이
+**정확히 이 변화를 재판단 신호로 지목한다**(#310 §Q6 조각 1: _"워터마크나 대화 오프셋이 `meta`를
+떠나 이벤트 페이로드로 들어오면 … 후보2를 다시 잰다"_). 즉 후보3을 넣으면 #189 B 축의 각하가
+자동으로 재론 대상이 된다 — 되돌리기 어려운 변경이고, 다른 이슈의 결론을 건드린다.
+
+**대가 2 — 오프셋은 하네스 값이다.** `ConversationSource.read`가 주는 `newOffset`을 로그에 사실로
+박는 것이므로, 소스가 오프셋 체계를 바꾸면(컴팩션이 트랜스크립트를 재작성하는 경우) 저장된 구간이
+다른 내용을 가리킨다. 이 리포는 이미 소스를 불신하는 자세를 취한다 — `resumePointsOf`
+(`consolidate-service.ts:1326`)가 _"A `ConversationSource` is harness code, so the kernel VALIDATES
+rather than trusts"_ 라고 쓰고 위반 항목을 개별로 버린다. 흡수자도 같은 자세를 요구하는데,
+**여기서 잘못된 방향으로 degrade하면 중복이 아니라 유실이다** — 소비되지 않은 슬라이스를
+"이미 소비됨"으로 빼는 것이므로 #136이 닫은 손실이 다시 열린다.
+
+**대가 3 — 읽는 비용은 사실상 0이다.** 다음 경계는 이미 `:2331`에서 로그 전체를 replay하고
+`:2381`에서 그 배열을 한 번 돈다. 구간 수집은 그 루프에 조건 하나를 더하는 것이다.
+
+**정상 운영에서 새로 생기는 실패 모드**: (대가 2가 그것이다) 오프셋 체계가 흔들리는 소스에서
+슬라이스가 조용히 건너뛰어질 수 있다. 안전한 degrade 방향(흡수하지 않음 = 중복)을 명시적으로
+골라야 하고, 그 선택은 "R1을 닫는다"는 목적을 부분적으로 되돌린다.
+
+### 후보4 — 아무것도 하지 않고 근거를 코드 옆에 남긴다
+
+#305·#314가 취한 모양이다. **닫는 것: 없다.** 남기는 것은 재판단 트리거다.
+
+**대가**: 중복이 남는다. 그리고 이 후보가 정당해지는 조건을 이슈 본문이 정확히 적었다 —
+_"Q2의 답이 '읽기 표면이 접는다'면 이것이 정답일 수 있다"_. **§Q2의 답은 그렇지 않다.**
+읽기 표면 8곳에서 접는 곳이 0곳이고(§Q2.2), 유일한 fold는 구조적으로 빗나가며(§Q2.3),
+추출기의 supersede는 재량이다(§Q2.5).
+
+**정상 운영에서 새로 생기는 실패 모드**: 없다(변경이 없으므로). 대신 오늘의 결함이 유지된다 —
+꼬리 예외 하나에 중복 메모리가 주입·검색·임베딩에 모두 두 번 실린다.
+
+### 후보 비교
+
+| 후보 | 닫는 것        | 대가                                          | 정상 운영을 막는가 | 되돌리기   |
+| ---- | -------------- | --------------------------------------------- | ------------------ | ---------- |
+| 1    | **R1 전부**    | 꼬리 재배치 + CAS seam 두 번째 모양           | **아니오**         | 쉬움       |
+| 2    | 대화 축        | 커서가 전진해야 하는 경로 셋이 pin된다        | **예**             | 쉬움       |
+| 3    | R1의 메모리 축 | 페이로드 확장(#314 트리거 발동) + 하네스 신뢰 | 아니오             | **어려움** |
+| 4    | 없음           | 중복이 남는다                                 | 아니오             | —          |
+
+## Q4 — 권고
+
+### **고친다. 후보1 — 커서 커밋을 append 트랜잭션에 합류시킨다 (1b 형태).**
+
+근거 넷.
+
+1. **§Q2가 후보4를 떠받쳐 주지 않는다.** 이 리포가 "고치지 않는다"로 닫은 두 선례(#305, #314)는
+   각각 "실을 자리가 없다"·"제약이 그 축을 표현하지 못한다"를 근거로 삼았다. R1에는 그런 근거가
+   없다 — 트랜잭션 경계는 이 축을 **정확히** 표현한다. 남은 근거는 "읽기 표면이 접는다"뿐인데
+   §Q2.2가 8곳 전수로 아니라고 답했다.
+2. **창이 이슈 본문이 가정한 것보다 넓다.** §Q1.3 (나)가 크래시 없이 열리는 경로를 둘 찾았고
+   (`:2858`·`:2874`), 창의 폭은 저장소 크기와 임베더·judge 지연에 비례한다(§Q1.1). "드문 크래시"로
+   가격을 매기면 실제보다 싸게 잡는다.
+3. **후보1이 정상 동작에서 막는 것이 없다.** #310이 후보2·3을 죽인 기준을 그대로 적용하면
+   후보2는 여기서도 죽고(§Q3 후보2 대가 2), 후보1은 살아남는다. 새로 생기는 실패 모드 넷을
+   §Q3에서 세었는데 넷 다 다음 경계가 회수하거나(1) 이유 문장만 바뀐다(2·3) 또는 무시할 수 있다(4).
+4. **비용이 국소적이다.** `packages/` 아래에서 손대는 파일은 `event-store.ts`와
+   `consolidate-service.ts` 둘이고, 마이그레이션도 이벤트 페이로드 변경도 없다. 후보3은 페이로드를
+   바꾸므로 되돌리기 어렵고 #189 B 축의 각하를 재론 대상으로 만든다.
+
+**차선은 후보3이다.** owner가 §Q3 대가 2(CAS seam의 두 번째 모양)를 너무 비싸다고 판정하면,
+그 다음으로 R1의 메모리 축을 실제로 닫는 것은 후보3뿐이다 — 후보2는 정상 동작을 막고 후보4는
+아무것도 닫지 않는다. 그 경우 §Q5 조각 1·2를 버리고 "페이로드에 구간을 싣는 조각"으로 갈아
+끼우면 되며, 그때는 ★가 붙는다.
+
+**후보2는 각하한다.** 워터마크가 `meta`에 남은 이유는 오프셋에 전이되지 않지만(§Q3 후보2 대가 1),
+오프셋에는 **자기만의 이유**가 있다 — append 없이 전진해야 하는 경로가 셋이다.
+
+**세그먼트 중복은 이 권고의 범위가 아니다.** #103이 받아들인 그대로 두고, 후보1이 착지해도
+`inputs.length === 0` 경로에는 여전히 남는다(§Q3 후보1 대가 3). 그 사실을 조각 3의 주석으로 적는다.
+
+## Q5 — 조각 나누기
+
+§Q4가 "고친다"로 닫았으므로 조각을 낸다. **셋이고 ★는 0개다** — 마이그레이션도 이벤트 페이로드
+변경도 없다. 순서는 1 → 2 → 3이고 2는 1에 의존한다.
+
+### 조각 1 — `event-store`에 트랜잭션 합류 수단 (★ 아님)
+
+- **파일**: `packages/kernel/src/storage/event-store.ts`
+- **무엇**: `appendEvents`가 여는 트랜잭션(`:318`, `:344`) 안에서 호출자의 동기 쓰기를 같이
+  커밋할 수 있는 수단을 만든다. §Q3이 1b를 골랐으므로 **동기 변형**의 모양이다 — 기존
+  `appendEvents`의 시그니처와 동작은 그대로 두고, 호출자가 바깥 트랜잭션을 열어 쓸 수 있는
+  경로를 추가한다.
+- **완료 조건 초안**
+  - [ ] CAS 비교가 **여전히 트랜잭션 안**에 있다 — `event-store.ts:319-324`와 같은 자리
+  - [ ] 기존 `appendEvents` 호출자 전부(`grep -rn "appendEvents(" packages/ --include=*.ts`)가
+        **무변경**이고, 그 사실이 PR 본문에 grep 출력으로 첨부돼 있다
+  - [ ] 새 경로가 `expectedHead`를 **생략할 수 없다** — 생략 가능한 CAS는 #253이 닫은 구멍이다
+        (`AppendEventsOptions.expectedHead`의 `null` 대 `undefined` 규율을 그대로 따른다)
+  - [ ] 새 경로에도 BEGIN IMMEDIATE가 걸린다 (`event-store.ts:334-344`가 적은 이유 — deferred는
+        WAL에서 SQLITE_BUSY_SNAPSHOT으로 새어 나온다)
+  - [ ] 단위 테스트: 새 경로에서 CAS가 거절할 때 **호출자의 쓰기도 함께 롤백**된다
+- **인터리브 테스트**: 조각 2에 붙인다 (이 조각만으로는 동작이 안 바뀐다).
+
+### 조각 2 — `consolidateBoundary`의 꼬리 재배치 + 커서 합류 (★ 아님)
+
+- **파일**: `packages/kernel/src/services/consolidate-service.ts`
+- **무엇**: `pruneSegments`(`:2716`)와 그에 딸린 계산(`:2732-2733`, `:2775-2796`, `:2901-2910`)을
+  append(`:2693`) **앞으로** 옮기고, `commitBoundaryCursors`(`:2920`)를 조각 1의 수단으로 append
+  트랜잭션에 합류시킨다. `inputs.length === 0` 경로는 오늘처럼 독립 트랜잭션으로 남긴다.
+- **완료 조건 초안**
+  - [ ] `pruneSegments`가 리빌드(`:2858`)보다 **여전히 먼저** 돈다 — `:2696-2707`이 적은 제약
+  - [ ] `inputs.length > 0`인 경계에서 append와 두 커서 쓰기가 **한 트랜잭션**이다 (테스트로 고정)
+  - [ ] `inputs.length === 0`인 경계에서 커서 커밋이 종전처럼 독립 트랜잭션이고, 그 이유가
+        주석에 있다
+  - [ ] #211의 단조성 가드(`:1386`, `:1471`)가 **남아 있고**, 주석이 "이제 append 경로가 아니라
+        noop 경로(`:2290`·`:2405`)를 위해 존재한다"로 갱신됐다
+  - [ ] #255의 live 가드(`:1479`)가 남아 있고, `:2757-2773`의 근거 문단이 꼬리가 사라진 사실에
+        맞게 줄었다
+  - [ ] `ConsolidateResult.conversationSliceHeld`의 의미가 안 바뀌었다 — `cursorCommit.
+conversationOffsetHeld`(`:2931`)를 읽는 자리가 재배치 뒤에도 결과에 반영된다
+  - [ ] `#232`의 미러(`:2811`, `:2526`)가 재배치된 자리에서도 "던지기 전에 이미 알려진 값"을
+        유지한다
+- **인터리브 테스트** (이 조각의 핵심 산출물):
+  - **재현(고치기 전 상태를 고정한다)**: `commitBoundaryCursors`에 seam을 두고 **첫 경계의 커서
+    커밋만 건너뛰게** 한 뒤, 두 번째 경계가 같은 대화 슬라이스를 다시 증류하는지 본다. 첫 경계의
+    append는 **성공시키고** 커서 커밋만 잃게 하는 것이 크래시 창의 정확한 재현이다.
+    `kernel-capture-race.test.ts`가 `readEvents`에 지연을 주입하는 seam이 선례다 — sleep이 아니라
+    seam 주입이라 flaky하지 않다.
+  - **고친 뒤**: 위 seam이 append 경로에서 **도달 불가**가 되므로, 대신 `rebuildProjectProjection`
+    seam이 첫 경계의 꼬리에서 던지게 만들고 (§Q1.3 (나)의 실제 경로) 두 번째 경계가 같은 슬라이스를
+    **다시 증류하지 않는지**를 본다. 판정 값은 `ConsolidateResult.consolidated`와 대화 오프셋
+    `meta` 값 둘 다로 확인한다.
+  - **noop 경로 회귀**: `inputs.length === 0` + `sliceFullyStored`인 경계에서 대화 오프셋이
+    여전히 전진하는지 (`:2785`의 성질이 재배치로 깨지지 않았는지).
+
+### 조각 3 — 남는 축의 근거를 코드 옆에 (★ 아님)
+
+- **파일**: `packages/kernel/src/services/consolidate-service.ts` (`:2589-2598` 근처와 `:2536` 근처)
+- **무엇**: 후보1이 착지해도 남는 것과, 후보2·3을 각하한 이유를 코드 옆에 남긴다. **실행되는 코드
+  0줄.**
+- **완료 조건 초안**
+  - [ ] 세그먼트 중복이 `inputs.length === 0` 경로에 **여전히 남는다**는 사실과, 그것이 #103이
+        받아들인 범위임을 적었다
+  - [ ] `projector.ts:239`의 `ids.length === 0 continue`가 **대화 전용 경계의 메모리를 dedup 밖에
+        둔다**는 사실을 대화 축 주석에서 가리켰다 (§Q2.3)
+  - [ ] 재판단 트리거를 적었다 — 대화 오프셋이 `meta`를 떠나 이벤트 페이로드로 들어오면 후보3을,
+        `dedupeMemoriesBySource`의 키에서 `sourceObservationIds`가 빠지면 §Q2.3을 다시 잰다
+  - [ ] `packages/` 아래 실행되는 코드 변경 0줄 (주석만)
+- **인터리브 테스트**: **없다.** 실행 동작이 안 바뀌므로 새 테스트를 붙이지 않는다
+  (`TESTING.md`의 금지 패턴 — 문구를 검사하는 테스트).
+
+## 발견
+
+이 산정 중에 발견했으나 이 이슈에서 고치지 않는 것들이다 (비범위 규칙에 따라 기록만 한다).
+
+- **(발견, 범위 밖) `packages/kernel/src/services/consolidate-service.ts:2961` — 꼬리가 던진
+  경계의 텔레메트리가 "메모리 0건 실패"로 보인다.** `run()`이 `:2858`·`:2874`에서 던지면
+  `recordAttempt`가 `conversationSliceHeld`와 `extractionTruncated`만 미러하고(`:2967-2968`)
+  **`consolidated`는 미러하지 않는다.** 그런데 그 시점에 메모리는 이미 durable하다. #232가
+  미러 대상을 둘로 고른 판단은 그 이슈의 범위였고, "append는 성공했는데 꼬리가 실패했다"는
+  경우를 관측할 수단이 지금은 없다. `#51` attempt 텔레메트리의 목적("왜 메모리가 없나")에
+  비추면 반대 방향의 같은 결함이다.
+
+- **(발견, 범위 밖) `packages/kernel/src/projections/projector.ts:239` — `ids.length === 0`
+  게이트의 실질 범위가 주석보다 넓다.** `:229`의 주석은 _"Empty/absent source sets never group
+  (each stands alone)"_ 라고 적지만, import 메모리는 **항상** 빈 배열을 찍고 대화 전용 경계도
+  항상 빈 배열이다(`consolidate-service.ts:2536`). import 쪽은 그 사실을 자기 코드 옆에 적어 뒀다 —
+  `memory-import-service.ts:630-632`가 _"imported memories have EMPTY sourceObservationIds, which
+  the projection dedup never groups — a re-run would silently duplicate"_ 라고 쓰고, 그래서 그쪽에는
+  `textKey` dedup이 따로 있다(`memory-import-service.ts:641`). **대화 전용 증류 축에는 그
+  대체물이 없다** — 같은 게이트에 걸리는데 대신 서 주는 것이 없다는 뜻이다. 오늘 결함이라고
+  판정하지 않지만, §Q2.3의 판정이 이 게이트 하나에 걸려 있으므로 여기 적는다.
+
+- **(발견, 범위 밖) `packages/kernel/src/services/memory-retrieval-service.ts:129-165` — 주입
+  랭킹에 텍스트 dedup이 없다.** R1이 아니어도 같은 텍스트 두 건이 나란히 주입될 수 있다
+  (증류 × import 교차가 그 경로다). #310의 두 번째 발견("텍스트 dedup 비대칭")과 같은 뿌리이고,
+  그 산정이 "오늘 결함이 아니다"로 판정한 것을 뒤집지 않는다. 다만 §Q2.2가 보인 대로 **읽기 쪽에
+  마지막 방어선이 없다**는 사실은 R1 밖에서도 성립한다.
+
+- **(발견, 범위 밖) `packages/kernel/src/services/consolidate-service.ts:2858`·`:2874` — 꼬리
+  예외에 대한 방어가 비대칭이다.** 같은 꼬리에서 `ensureEmbeddings`·`ensureSegmentEmbeddings`는
+  전체 `try`로 감싸 never-throw인데(`embeddings-service.ts:92`·`:174`), 리빌드와 모순 판정은
+  감싸지 않는다. 어느 쪽이 옳은지는 이 이슈의 범위가 아니다 — `#282`/`#284`가 리빌드의
+  `committed:false`를 다뤘지만 **throw**는 다루지 않았다.
+
+## 부록 A — 인용 대조표
+
+기준선 `c58d5c2`에서 **직접 열어 대조한** 전체 목록이다. 맞은 것도 "맞음"으로 적는다.
+
+| 인용                              | 그 줄의 실제 내용                                                                         | 판정 |
+| --------------------------------- | ----------------------------------------------------------------------------------------- | ---- |
+| `consolidate-service.ts:1286`     | `function conversationOffsetKey(sourceId: string): string {`                              | 맞음 |
+| `consolidate-service.ts:1296`     | `function writeConversationOffset(projectId: string, sourceId: string, offset: number)`   | 맞음 |
+| `consolidate-service.ts:1326`     | `export function resumePointsOf(`                                                         | 맞음 |
+| `consolidate-service.ts:1370`     | `const row = getDb(projectId).prepare("SELECT seq FROM events WHERE id = ?")…`            | 맞음 |
+| `consolidate-service.ts:1386`     | `function watermarkWouldRegress(projectId: string, targetEventId: string): boolean {`     | 맞음 |
+| `consolidate-service.ts:1445`     | `function commitBoundaryCursors(`                                                         | 맞음 |
+| `consolidate-service.ts:1469`     | `const commit = getDb(projectId).transaction(() => {`                                     | 맞음 |
+| `consolidate-service.ts:1471`     | `if (watermarkEventId !== undefined && !watermarkWouldRegress(...)) {`                    | 맞음 |
+| `consolidate-service.ts:1479`     | `!segmentsStillPresent(projectId, guardIds)`                                              | 맞음 |
+| `consolidate-service.ts:1504`     | `commit.immediate();`                                                                     | 맞음 |
+| `consolidate-service.ts:2200`     | `const run = async (): Promise<ConsolidateResult> => {`                                   | 맞음 |
+| `consolidate-service.ts:2211`     | `const watermark = getConsolidateWatermark(params.projectId);`                            | 맞음 |
+| `consolidate-service.ts:2238`     | `const boundaryStart = probeBoundaryStart(params.projectId, watermark);`                  | 맞음 |
+| `consolidate-service.ts:2254`     | `const slice = source ? await source.read(sliceStartOffset) : undefined;`                 | 맞음 |
+| `consolidate-service.ts:2290`     | `commitBoundaryCursors(params.projectId, {` (게이트 noop 경로)                            | 맞음 |
+| `consolidate-service.ts:2331`     | `const events = await readEvents(params.projectId);`                                      | 맞음 |
+| `consolidate-service.ts:2380`     | `const consumed = new Set<string>();`                                                     | 맞음 |
+| `consolidate-service.ts:2387`     | `const observationEvents = selfObservationEvents.filter(`                                 | 맞음 |
+| `consolidate-service.ts:2405`     | `commitBoundaryCursors(params.projectId, {` (post-replay noop 경로)                       | 맞음 |
+| `consolidate-service.ts:2428`     | `const existing = Object.values(state.memories).filter(`                                  | 맞음 |
+| `consolidate-service.ts:2442`     | `existingMemories: existing,`                                                             | 맞음 |
+| `consolidate-service.ts:2498`     | `extracted = await consolidator.extract(`                                                 | 맞음 |
+| `consolidate-service.ts:2526`     | `capturedExtractionTruncated = extractionTruncated;`                                      | 맞음 |
+| `consolidate-service.ts:2535`     | `const validIds = new Set(bounded.existingMemories.map((m) => m.id));`                    | 맞음 |
+| `consolidate-service.ts:2536`     | `const sourceObservationIds = bounded.observations.map((o) => o.id);`                     | 맞음 |
+| `consolidate-service.ts:2566`     | `if (item.supersedesMemoryId && validIds.has(item.supersedesMemoryId)) {`                 | 맞음 |
+| `consolidate-service.ts:2617`     | `id: createId("seg"),`                                                                    | 맞음 |
+| `consolidate-service.ts:2624`     | `insertSegments(params.projectId, rows);`                                                 | 맞음 |
+| `consolidate-service.ts:2626`     | `storedSegmentIds = rows.map((r) => r.id);`                                               | 맞음 |
+| `consolidate-service.ts:2648`     | `throwIfDispossessed(params.lockSignal);` (체크 포인트 ④ — 마지막)                        | 맞음 |
+| `consolidate-service.ts:2650`     | `if (inputs.length > 0) {`                                                                | 맞음 |
+| `consolidate-service.ts:2693`     | `await appendEvents(params.projectId, inputs, { expectedHead });`                         | 맞음 |
+| `consolidate-service.ts:2716`     | `prunedSegmentIds = pruneSegments(params.projectId, params.segmentRetention);`            | 맞음 |
+| `consolidate-service.ts:2733`     | `storedSegmentIds.length > 0 && storedSegmentIds.every((id) => !prunedIds.has(id));`      | 맞음 |
+| `consolidate-service.ts:2783`     | `if (shownWhole \|\| slice.text.length === 0) {`                                          | 맞음 |
+| `consolidate-service.ts:2785`     | `} else if (sliceFullyStored) {`                                                          | 맞음 |
+| `consolidate-service.ts:2787`     | `conversationOffsetGuardIds = storedSegmentIds;`                                          | 맞음 |
+| `consolidate-service.ts:2788`     | `} else if (shownPrefixOffset !== undefined) {`                                           | 맞음 |
+| `consolidate-service.ts:2811`     | `capturedConversationSliceHeld = conversationSliceHeld;`                                  | 맞음 |
+| `consolidate-service.ts:2858`     | `await rebuildProjectProjection(params.projectId, { reindexSearch: true });`              | 맞음 |
+| `consolidate-service.ts:2865`     | `await ensureEmbeddings(params.projectId, params.embedder);`                              | 맞음 |
+| `consolidate-service.ts:2874`     | `await detectContradictions({`                                                            | 맞음 |
+| `consolidate-service.ts:2885`     | `await ensureSegmentEmbeddings(params.projectId, params.embedder);`                       | 맞음 |
+| `consolidate-service.ts:2903`     | `eventWatermarkId = observationEvents[bounded.observations.length - 1]!.id;`              | 맞음 |
+| `consolidate-service.ts:2920`     | `const cursorCommit = commitBoundaryCursors(params.projectId, {`                          | 맞음 |
+| `consolidate-service.ts:2931`     | `if (cursorCommit.conversationOffsetHeld) {`                                              | 맞음 |
+| `consolidate-service.ts:2957`     | `try {` (`run()` 호출을 감싸는 것)                                                        | 맞음 |
+| `consolidate-service.ts:2961`     | `recordAttempt(classifyConsolidateError(error, params.signal), {`                         | 맞음 |
+| `consolidate-service.ts:2970`     | `throw error;`                                                                            | 맞음 |
+| `event-store.ts:293`              | `export async function appendEvents<TPayload extends DomainEventPayload>(`                | 맞음 |
+| `event-store.ts:316`              | `const db = getDb(projectId);`                                                            | 맞음 |
+| `event-store.ts:318`              | `const batch = db.transaction(() => {`                                                    | 맞음 |
+| `event-store.ts:322`              | `throw new StaleHeadError(projectId, expectedHead, actualHead);`                          | 맞음 |
+| `event-store.ts:344`              | `batch.immediate();`                                                                      | 맞음 |
+| `projector.ts:234`                | `function dedupeMemoriesBySource(memories: Record<string, MemoryRecord>): void {`         | 맞음 |
+| `projector.ts:239`                | `if (ids.length === 0) continue;`                                                         | 맞음 |
+| `projector.ts:246`                | `const key = \`${lane}\n${[...ids].sort().join(",")}\n${memory.kind}\n…\`;`               | 맞음 |
+| `projector.ts:261`                | `dedupedBy: winner.id,`                                                                   | 맞음 |
+| `projection-store.ts:344`         | `const reindexSearch = (opts.reindexSearch ?? true) \|\| hasSearchReindexPending(...)`    | 맞음 |
+| `projection-store.ts:385`         | `throw new Error(\`Project ${projectId} has no project.created event\`);`                 | 맞음 |
+| `projection-store.ts:412`         | `const content = await readJson<{ title?: string; body?: string }>(`                      | 맞음 |
+| `projection-store.ts:424`         | `const writeAll = db.transaction(() => {`                                                 | 맞음 |
+| `projection-store.ts:687`         | `if (!memory.dedupedBy && !memory.retractedAt) {`                                         | 맞음 |
+| `projection-store.ts:1014`        | `export function listValidMemories(`                                                      | 맞음 |
+| `projection-store.ts:1024`        | `` `WHERE memories.invalid_at IS NULL AND ${laneWhere(lane)}`, ``                         | 맞음 |
+| `memory-retrieval-service.ts:129` | `for (const row of listValidMemories(projectId)) {`                                       | 맞음 |
+| `memory-retrieval-service.ts:145` | `pool.push({`                                                                             | 맞음 |
+| `memory-retrieval-service.ts:165` | `pool.sort((a, b) => b.score - a.score);`                                                 | 맞음 |
+| `search-service.ts:172`           | `listValidMemories(projectId).map((row) => [row.memory.id, row.memory.text]),`            | 맞음 |
+| `embeddings-service.ts:92`        | `try {` (`ensureEmbeddings` 본문 전체를 감싸는 것)                                        | 맞음 |
+| `embeddings-service.ts:95`        | `const memories = listValidMemories(projectId).map((row) => row.memory);`                 | 맞음 |
+| `embeddings-service.ts:174`       | `try {` (`ensureSegmentEmbeddings` 본문 전체를 감싸는 것)                                 | 맞음 |
+| `contradiction-service.ts:101`    | `} catch {` (judge LLM 실패를 `{ contradicts: false }`로 삼키는 자리)                     | 맞음 |
+| `contradiction-service.ts:212`    | `const decisions = Object.values(reduceProjectState(events, projectId).memories).filter(` | 맞음 |
+| `contradiction-service.ts:253`    | `const verdict = await judge({`                                                           | 맞음 |
+| `contradiction-service.ts:257`    | `if (!verdict.contradicts) continue;`                                                     | 맞음 |
+| `contradiction-service.ts:314`    | `if (!isStaleHeadError(error)) throw error;`                                              | 맞음 |
+| `contradiction-service.ts:345`    | `if (results.length > 0) {` (그 아래가 `await rebuildProjectProjection(projectId);`)      | 맞음 |
+| `memory-import-service.ts:641`    | `const key = textKey(memory.kind, memory.text);`                                          | 맞음 |
+| `memory-import-service.ts:651`    | `const seenTextKeys = new Set(memoryIdByTextKey.keys());`                                 | 맞음 |
+| `project-lock.ts:483`             | `const LOCK_STALE_MS = 30_000;`                                                           | 맞음 |
+| `project-lock.ts:818`             | `const result = await fn(dispossession.signal);`                                          | 맞음 |
+| `project-lock.ts:826`             | `if (dispossessed) throw new ProjectLockCompromisedError(projectId);`                     | 맞음 |
+| `sqlite-memory-kernel.ts:794`     | `return withProjectLock(this.options.projectId, async (lockSignal) => {`                  | 맞음 |
+
+범위 인용(`:2201-2210`, `:2589-2598`, `:2633-2643`, `:2653-2680`, `:2696-2707`, `:2757-2773`,
+`:2764-2768`, `:2798-2805`, `:2901-2910`, `:2916-2919`, `:1407-1408`, `:319-324`, `:334-344`,
+`projector.ts:229`, `contradiction-service.ts:58-60`, `contradiction-service.ts:322-325`,
+`memory-import-service.ts:630-632`, `projection-store.ts:339`)도 같은 커밋에서 열어 대조했다.
+모두 본문이 서술한 내용과 일치한다.
+
+**직접 센 것 두 가지**(줄 인용이 아니라 전수 확인이므로 여기 적는다):
+
+- `:2694`–`:2919` 구간의 `await`는 **4개**(`:2858`, `:2865`, `:2874`, `:2885`).
+- 같은 구간의 `throwIfDispossessed` 호출은 **0개**. 마지막 체크 포인트는 `:2648`이다.
+
+## 부록 B — better-sqlite3 실측
+
+§Q1.2와 §Q3 후보1의 판정은 추정이 아니라 실측이다. 리포가 실제로 링크하는 엔진에서 직접
+실행했다. `pnpm install` 후 `packages/kernel`에서 `node -e '...'`로 돌린 결과의 원문이다.
+
+```
+better-sqlite3: 12.11.1
+sqlite_version: 3.53.2
+
+# A — 트랜잭션 콜백이 async 함수
+async fn REJECTED: Transaction function cannot return a promise
+
+# B — 트랜잭션 콜백이 프라미스를 반환
+promise-returning fn REJECTED: Transaction function cannot return a promise
+
+# C — 트랜잭션 중첩 + 안쪽에 immediate()
+nested immediate(): ACCEPTED, rows= 1
+```
+
+재현 스크립트(요지):
+
+```js
+const db = new (require("better-sqlite3"))(":memory:");
+db.exec("CREATE TABLE t(a)");
+// A/B — 콜백이 프라미스를 반환하면 트랜잭션이 성립하지 않는다
+db.transaction(async () => {
+  /* … */
+})();
+// C — 바깥 트랜잭션 안에서 안쪽 트랜잭션에 immediate()를 걸어도 받는다
+const outer = db.transaction(() => {
+  db.transaction(() => {
+    db.prepare("INSERT INTO t VALUES (2)").run();
+  }).immediate();
+});
+outer.immediate();
+```
+
+**A·B가 §Q1.2의 근거다** — 두 커밋 사이에 `await`가 있는 한 하나의 트랜잭션이 되지 못한다.
+**C가 §Q3 후보1(1b)의 근거다** — 바깥 트랜잭션을 여는 모양 자체는 엔진이 받는다.
+
+## 참조
+
+- #310 / [PR #313](https://github.com/shakystar/mori/pull/313) — R1의 최초 관측 (§Q1.1 c, §Q1.3,
+  §Q6 초안, §발견). 이 문서의 출발점
+- #103 — 세그먼트 중복을 "bounded and self-healing"으로 받아들인 범위 (§Q2.1에 본문 인용)
+- #189 — idea 본문 (A·B·C 세 축)
+- #298 / PR #299 — `consolidateBoundary`의 근거 결속, `run()`의 순서 불변식
+- #301 / PR #304, #305 / PR #308 — A 축. **"안 넣는다"로 닫은 산정의 선례**
+- #314 — B 축의 트리거 문장. 후보3을 넣으면 그 트리거가 발동한다
+- #139 — 두 커서를 한 트랜잭션으로 (`commitBoundaryCursors`의 출발점)
+- #211 — 커서 단조성. §Q3 후보1 대가에서 그 존재 이유가 바뀐다
+- #232 — 꼬리 예외와 텔레메트리 미러 (§발견 1번의 배경)
+- #255 — `segmentsStillPresent` live 가드
+- #282 / #284 — 리빌드의 `committed:false`와 write-ahead 마커 (§Q3 후보1 실패 모드 1)
+- #136 / #144 — "shown or stored, or else not consumed" 불변식과 부분 소비
+- `TESTING.md` — 문서 문구를 검사하는 테스트 금지
