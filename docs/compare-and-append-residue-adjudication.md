@@ -114,8 +114,8 @@ packages/kernel/src/storage/db.ts:420:      INSERT INTO events_new
 | `sqlite-memory-kernel.ts:878` (`project.created`)                          | 단수  | 있음 — `hasGenesisEvent` (`:868` → `event-store.ts:72-81`), **로그 직접**                | 그렇다                                            | 없음 | 다른 수단으로 덮임 — v18 partial unique index |
 | `capture-service.ts:293` (`observation.captured`)                          | 단수  | **없음** — 앞선 두 단계가 순수 함수다                                                    | 해당 없음                                         | 없음 | 해당 없음 (read-then-write 아님)              |
 | `conflict-service.ts:97` (`conflict.resolved`)                             | 단수  | 있음 — `getConflict` (`:75`), 프로젝션                                                   | 그렇다 — `:79` 전이 검사의 입력                   | 없음 | **열림**                                      |
-| `consolidate-service.ts:2693` (`memory.consolidated` 외)                   | 복수  | 있음 — `probeBoundaryStart` (`:2238`) · 대화 슬라이스 (`:2254`) · `readEvents` (`:2331`) | 그렇다                                            | 있음 | 덮임                                          |
-| `memory-import-service.ts:810` (`memory.consolidated` 외)                  | 복수  | 있음 — `readValidMemoriesFromLog` (`:627` → `:210-230`), **로그**                        | 그렇다                                            | 있음 | 덮임                                          |
+| `consolidate-service.ts:2713` (`memory.consolidated` 외)                   | 복수  | 있음 — `probeBoundaryStart` (`:2238`) · 대화 슬라이스 (`:2254`) · `readEvents` (`:2331`) | 그렇다                                            | 있음 | 덮임                                          |
+| `memory-import-service.ts:834` (`memory.consolidated` 외)                  | 복수  | 있음 — `readValidMemoriesFromLog` (`:627` → `:210-230`), **로그**                        | 그렇다                                            | 있음 | 덮임                                          |
 | `contradiction-service.ts:287` (`memory.superseded` + `conflict.detected`) | 복수  | 있음 — `readEvents` (`:190`), **로그**                                                   | 그렇다                                            | 있음 | 덮임                                          |
 
 집계: **덮임 3 · 다른 수단으로 덮임 1 · 해당 없음 2 · 열림 1.**
@@ -227,7 +227,7 @@ packages/kernel/tests/integration/two-reader-equivalence.test.ts: (2건)
 `:53-54`의 *"#118 item 5 — deliberately no CAS added here"*가 그 결정의 흔적이다.
 판정은 **열림**이며, 지금 닫는 것이 옳은지는 §Q4에서 따로 재다.
 
-### Q1.5 `consolidate-service.ts:2693` — **덮임**
+### Q1.5 `consolidate-service.ts:2713` — **덮임**
 
 `run()`의 근거 읽기와 append의 순서 (전부 `db80dfc`에서 확인):
 
@@ -255,7 +255,7 @@ packages/kernel/tests/integration/two-reader-equivalence.test.ts: (2건)
    끝(`:2920`)에서 돌므로 커서는 로그보다 앞설 수 없고, 뒤처지면 윈도우가 넓어지는데
    그것은 로그 파생 `consumed` 필터가 흡수한다. #296 §Q4가 이 논거를 확정했다.
 
-### Q1.6 `memory-import-service.ts:810` — **덮임**
+### Q1.6 `memory-import-service.ts:834` — **덮임**
 
 `readValidMemoriesFromLog`(`:210-230`)가 근거와 head를 **같은 배열 하나**에서 낸다 —
 `readEvents` → `reduceProjectState` → 필터, 그리고 `head: events.at(-1)?.id ?? null`
@@ -296,12 +296,12 @@ PR #299 리뷰에서 확정된 구별을 그대로 승계한다: **CAS 통과는
 
 | 자리                           | 근거                      | 어디서 오는가                        | CAS가 그 근거에 충분한가                                                                                               |
 | ------------------------------ | ------------------------- | ------------------------------------ | ---------------------------------------------------------------------------------------------------------------------- |
-| `consolidate-service.ts:2693`  | 윈도우 (관측 집합)        | **로그** (`:2331` 배열)              | 충분 — head가 그 배열보다 먼저 스탬프됨 (`:2213-2237`)                                                                 |
+| `consolidate-service.ts:2713`  | 윈도우 (관측 집합)        | **로그** (`:2331` 배열)              | 충분 — head가 그 배열보다 먼저 스탬프됨 (`:2213-2237`)                                                                 |
 |                                | `consumed`                | **로그** (`:2380`, 같은 배열)        | 충분 — #298이 `memories` 프로젝션 질의를 대체함 (`:2368-2379`)                                                         |
 |                                | `existing`                | **로그** (`:2428`, 같은 배열)        | 충분 — 같음                                                                                                            |
 |                                | 대화 슬라이스             | **트랜스크립트** (로그로 표현 안 됨) | CAS가 **유일한** 커버. head-먼저 순서가 그것을 성립시킨다 (`:2225-2235`). #298이 이 축의 순서를 뒤집었다가 되돌린 자리 |
 |                                | 워터마크                  | `meta` 커서                          | 커버 불필요 — 뒤처지기만 하고, 넓어진 윈도우는 `consumed`가 흡수 (`:2201-2210`, #296 §Q4)                              |
-| `memory-import-service.ts:810` | dedup 스냅샷 + `validIds` | **로그** (`:210-230`)                | 충분 — head가 **같은 배열**에서 나옴 (`:228`), 두 읽기 사이 창 자체가 없다                                             |
+| `memory-import-service.ts:834` | dedup 스냅샷 + `validIds` | **로그** (`:210-230`)                | 충분 — head가 **같은 배열**에서 나옴 (`:228`), 두 읽기 사이 창 자체가 없다                                             |
 | `contradiction-service.ts:287` | decision 집합             | **로그** (`:190`)                    | 충분 — head가 같은 배열에서 나옴 (`:203`)                                                                              |
 |                                | 임베딩 벡터               | `embeddings` 테이블                  | 충분하지 않지만 **손해가 누락 한 종류**다 — append 내용에 영향 없음 (§Q1.7)                                            |
 | `sqlite-memory-kernel.ts:878`  | `hasGenesisEvent`         | **로그** (`event-store.ts:72-81`)    | 해당 없음 — CAS가 아니라 unique index가 덮는다. 이 자리에 CAS는 부적합 (§Q1.2)                                         |
@@ -329,7 +329,7 @@ PR #299 리뷰에서 확정된 구별을 그대로 승계한다: **CAS 통과는
 | 무엇               | 어디                                                                                     | 이슈/PR                    |
 | ------------------ | ---------------------------------------------------------------------------------------- | -------------------------- |
 | 프로세스 간 락     | `sqlite-memory-kernel.ts:794` (`withProjectLock`)                                        | #132 / 그 자신             |
-| CAS                | `consolidate-service.ts:2693` (`{ expectedHead }`)                                       | #253                       |
+| CAS                | `consolidate-service.ts:2713` (`{ expectedHead }`)                                       | #253                       |
 | 근거를 로그에 결속 | `consolidate-service.ts:2307-2330` (단일 `readEvents`) + `:2213-2237` (head-먼저 불변식) | #298 / PR #299 (`db80dfc`) |
 
 세 번째가 없으면 CAS는 통과하면서 근거가 탈취 이전 것일 수 있었다 —
@@ -356,7 +356,7 @@ W1·W2·W6·W8이 락 상실 이후의 꼬리 구간을 다루고, 그 표가 �
    기준 세 줄이 "import 두 건이 겹쳐 실행돼도", "append와 재구축 사이에서 중단된 뒤
    재시도해도", "파일 헤더 `:24-27`의 'No file lock' 논증을 이 경로에 대해 수정"이다.
 
-**오늘 어디**: `memory-import-service.ts:627`(근거 읽기) → `:810`(append).
+**오늘 어디**: `memory-import-service.ts:651`(근거 읽기) → `:810`(append).
 
 **무엇이 닫았나 — 세 겹이고, CAS는 그중 하나다**:
 
@@ -400,11 +400,11 @@ transaction"_.
 | 자리    | 오늘 자리                               | 열림/닫힘 | 무엇이 닫았나                                     |
 | ------- | --------------------------------------- | --------- | ------------------------------------------------- |
 | `#132②` | `consolidate-service.ts:2238` → `:2693` | 닫힘      | #132(락) + #253(CAS) + #298/PR #299(근거 결속)    |
-| `#114②` | `memory-import-service.ts:627` → `:810` | 닫힘      | #114(뮤텍스+로그 근거) + #137③ + #253(CAS+재시도) |
+| `#114②` | `memory-import-service.ts:651` → `:810` | 닫힘      | #114(뮤텍스+로그 근거) + #137③ + #253(CAS+재시도) |
 | `#118⑤` | `conflict-service.ts:75` → `:97`        | **열림**  | — (#118이 명문화만 하기로 확정)                   |
 
 **못 찾은 것은 없다.** #301 본문이 대비를 요구한 "`#114②`가 `capture-service`가
-아니라면 어느 자리인가"는 `memory-import-service.ts:627`→`:810`으로 특정됐다.
+아니라면 어느 자리인가"는 `memory-import-service.ts:651`→`:810`으로 특정됐다.
 
 ## Q3 — 단수형 `appendEvent`에 CAS를 어떻게 줄 것인가
 
@@ -488,7 +488,7 @@ that lock here — or wrap the span in a transaction"_.
 
 `getConflict`(프로젝션) 대신 `readEvents` + `reduceProjectState`로 conflict를 얻고, head를
 같은 배열에서 뽑아 복수형 CAS에 싣는다. 리포에 선례가 셋 있다 —
-`memory-import-service.ts:210-230`(#253), `projection-store.ts:441`(#270),
+`memory-import-service.ts:234-254`(#253), `projection-store.ts:441`(#270),
 `consolidate-service.ts:2331`(#298).
 
 **파급 실측**: 프로덕션 **1곳**(`conflict-service.ts:75` 치환 + `:97` 치환 + import 조정).
@@ -676,7 +676,7 @@ PR은 `packages/` 아래만 만지므로 이 3건은 덮이지 않는다. §Q5 �
 W9/C5가 이미 적은 것이고, 그 문서가 "A(#189)의 축이 아니다"로 분류했다. 이 문서는
 그 분류를 승계하며 새 조각을 내지 않는다 — 손해는 데이터 손상이 아니라 경계
 재시도까지의 벽시계 시간이고, 거절 시 커서가 움직이지 않아 다음 경계가 같은 창을
-다시 집는다(`consolidate-service.ts:2686-2692`).
+다시 집는다(`consolidate-service.ts:2706-2712`).
 
 ### F3. 이 문서가 각하한 것 — 다시 제안하지 않는다
 

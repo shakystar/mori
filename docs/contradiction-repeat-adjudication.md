@@ -70,7 +70,7 @@ UNSAFE로 분류하면서 비멱등성까지 적어 놨다 (`project-lock.ts:181
 다시 쓰인다 (`projection-store.ts:656-673`). 즉 `reindexSearch: false`인 리빌드도
 superseded를 테이블에 반영한다.
 
-`consolidate-service.ts:2603-2606`의 _"any later rebuild replays the full log
+`consolidate-service.ts:2623-2626`의 _"any later rebuild replays the full log
 unconditionally, `reindexSearch: false` ones included"_ 는 **실물에서 참이다.** 다만 한
 단어가 빠져 있고, ㉰에서는 그 단어가 전부다: 무조건인 것은 replay와 테이블 replace이지만,
 그 트랜잭션 전체가 CAS 뒤에 있다 — `if ((headEventId(db) ?? null) !== snapshotHead) return;`
@@ -135,7 +135,7 @@ unconditionally, `reindexSearch: false` ones included"_ 는 **실물에서 참�
 | `invalidAt`을 만지는 프로덕션 자리                          | 무엇으로 쓰나                                                   | 값이 보이나                               |
 | ----------------------------------------------------------- | --------------------------------------------------------------- | ----------------------------------------- |
 | `listValidMemories` (`projection-store.ts:1024`)            | `invalid_at IS NULL` — **불리언 술어**                          | 안 보임                                   |
-| `readValidMemoriesFromLog` (`memory-import-service.ts:222`) | `!memory.invalidAt` — **불리언 술어**                           | 안 보임                                   |
+| `readValidMemoriesFromLog` (`memory-import-service.ts:246`) | `!memory.invalidAt` — **불리언 술어**                           | 안 보임                                   |
 | `dedupeMemoriesBySource` (`projector.ts:237`)               | `if (memory.invalidAt) continue` — **불리언 술어**              | 안 보임                                   |
 | 임베딩 스코프 (`embeddings-store.ts:161`)                   | `invalid_at IS NULL` — **불리언 술어**                          | 안 보임                                   |
 | `projector.ts:599` (`memory.retracted`)                     | `existing.invalidAt ?? event.createdAt` — **보존용 읽기**       | 값을 읽지만 다시 `invalidAt`으로만 흘러감 |
@@ -315,7 +315,7 @@ genesis id 두 개)이고, 바로 위 주석이 _"A repeated SAME id (idempotent
 `makeLlmJudge`(`contradiction-service.ts:95-105`)를 보면 음성이 나오는 자리가 셋이다:
 
 - `if (!llm) return { contradicts: false }` (`:97`) — **LLM 미배선 스토어는 모든 쌍이 음성**이다.
-  `consolidate-service.ts:2650`이 `makeLlmJudge(params.llm)`로 부르고 `params.llm`은 선택적이다.
+  `consolidate-service.ts:2670`이 `makeLlmJudge(params.llm)`로 부르고 `params.llm`은 선택적이다.
 - `catch { return { contradicts: false } }` (`:101-103`) — **LLM 일시 장애도 음성**이다.
 - 실제 LLM 응답 (`:99-100`) — 비결정적이다.
 
@@ -345,7 +345,7 @@ Q4가 (가)의 반대 위험으로 물은 것은 이쪽이다 — **결정적 id
    그 이벤트가 supersede 뒤에 한 번 더 오면 `invalidAt`이 **사라진다.** 오늘 그 경로가
    닫혀 있는 이유는 projector가 아니라 **두 appender가 전부 새 id를 민팅**하기 때문이다
    (경계는 `consolidate-service.ts:2325`의 `createConsolidatedMemory` → `:2339-2345`의 append,
-   import는 `memory-import-service.ts:729`의 같은 팩토리 → `:743-750`의 append). 남의 이벤트를 받아들이는
+   import는 `memory-import-service.ts:753`의 같은 팩토리 → `:743-750`의 append). 남의 이벤트를 받아들이는
    경로가 생기는 날 이 근거는 다시 대조해야 한다 (아래 회색지대).
 3. **승자는 결정적이다.** `pickWinner`는 `(createdAt, id)` 규칙이라
    (`contradiction-service.ts:125-133`) 같은 쌍을 다시 판정해도 승패가 뒤집히지 않는다 —
@@ -368,7 +368,7 @@ Q4가 (가)의 반대 위험으로 물은 것은 이쪽이다 — **결정적 id
 - **동기화 수신**: 오늘 이 리포에는 남의 이벤트를 로그로 받아들이는 경로가 없다 —
   `memory.retracted`를 append하는 프로덕션 코드는 0건이고 테스트뿐이며,
   `readEvents`를 쓰는 비-스토어 코드도 두 곳뿐이다(`projection-store.ts:378`,
-  `memory-import-service.ts:213`). 수신 경로가 생기면 §4.3 근거 **1·2·3을 전부** 다시
+  `memory-import-service.ts:237`). 수신 경로가 생기면 §4.3 근거 **1·2·3을 전부** 다시
   대조해야 한다. 특히 근거 2가 그렇다 — 그 보장은 projector가 아니라 "두 appender가 전부
   새 id를 민팅한다"에 얹혀 있고, 남이 보낸 `memory.consolidated`가 이미 무효화된 memory
   id를 실어 오면 `projector.ts:551-559`의 통째 덮어쓰기가 `invalidAt`을 지운다. 즉
@@ -390,7 +390,7 @@ basis를 `listValidMemories`(프로젝션) 대신 **로그 replay**로 잡으면
 **양성으로 판정돼 패배자가 무효화된 쌍**의 재판정뿐이다. 음성으로 판정된 쌍은 오늘도
 후보② 뒤에도 매 패스 다시 판정되고, 그것은 결함이 아니라 설계다 — §4.2.)
 
-구현 모양은 새로 발명할 것이 없다 — `memory-import-service.ts:210-230`의
+구현 모양은 새로 발명할 것이 없다 — `memory-import-service.ts:234-254`의
 `readValidMemoriesFromLog`가 **같은 이유로 이미 존재한다**: 프로젝션 캐시가 아니라
 이벤트 로그가 멱등성의 정본이라는 것(`memory-import-service.ts:52-57`).
 `kind === "decision"` 필터만 얹으면 된다.
@@ -405,7 +405,7 @@ basis를 `listValidMemories`(프로젝션) 대신 **로그 replay**로 잡으면
 프리필터에서 탈락한다.
 
 이것이 결론을 흔들지 않는 이유는 방향이 반대이기 때문이다: 그것은 **누락**(비교되지 않음)
-이지 ㉰가 문제 삼는 **중복**이 아니고, 오늘도 똑같이 일어나며(그래서 `consolidate-service.ts:2641-2643` 주석이
+이지 ㉰가 문제 삼는 **중복**이 아니고, 오늘도 똑같이 일어나며(그래서 `consolidate-service.ts:2661-2663` 주석이
 `detectContradictions`를 `ensureEmbeddings` **뒤에** 두라고 적어 놨다) 후보②가 악화시키지
 않는다. 다만 _"후보②는 판정을 로그 위에 온전히 올린다"_ 는 **과장이므로 쓰지 않는다** —
 후보②가 로그 위로 올리는 것은 **유효성 집합**이고, **커버리지(어느 쌍이 비교되는가)는
@@ -432,7 +432,7 @@ basis를 `listValidMemories`(프로젝션) 대신 **로그 replay**로 잡으면
 
 리포는 이 문제를 이미 세 곳에서 같은 방법으로 닫았다 — **basis와 그것을 증명하는 head를
 한 배열에서 뽑는다**: `readValidMemoriesFromLog`(#253,
-`memory-import-service.ts:224-228`), `attemptProjectionRebuild`(#270,
+`memory-import-service.ts:248-252`), `attemptProjectionRebuild`(#270,
 `projection-store.ts:376-379`), 그리고 #262의 dedup 스냅샷. 후보②는 `detectContradictions`에
 같은 규율을 적용한다.
 
@@ -464,7 +464,7 @@ basis를 `listValidMemories`(프로젝션) 대신 **로그 replay**로 잡으면
 `SELECT * FROM events ORDER BY seq` 전량이다 (`event-store.ts:377`, `readEvents`는
 `readEventsWithIntegrity`를 그대로 돌려준다 `:381-384`). 구현 모양으로 제시한
 `readValidMemoriesFromLog`도 마찬가지로 전량 replay다
-(`memory-import-service.ts:213-214`). 실제 스토어에서 `decision`은 로그의 소수이고
+(`memory-import-service.ts:237-238`). 실제 스토어에서 `decision`은 로그의 소수이고
 `observation.captured`가 압도적 다수이므로, decision 축의 수치는 비용을 **과소평가한다.**
 아래는 `n`을 **총 로그 이벤트 수**로 다시 잡은 재측정이며, 첫 판의 표를 **폐기하고 대체**한다.
 
@@ -531,11 +531,11 @@ head)를 **대체**한다. 20000 셀은 이슈가 준 격자에 없지만, 로�
 
 - 경계: `if (inputs.length > 0 || segmentsWritten > 0)` 게이트 안에서
   `rebuildProjectProjection(..., { reindexSearch: true })`
-  (`consolidate-service.ts:2630-2631`) → 그 다음 `if (inputs.length > 0)` 안에서
+  (`consolidate-service.ts:2650-2651`) → 그 다음 `if (inputs.length > 0)` 안에서
   `detectContradictions` (`:2646-2653`). 뒤 게이트가 성립하면 앞 게이트는 **반드시**
   성립하므로, 이것은 확률이 아니라 **보장**이다.
 - import: `rebuildProjectProjection(..., { reindexSearch: true })`
-  (`memory-import-service.ts:815`) → 바로 다음 줄 `detectContradictions` (`:817`).
+  (`memory-import-service.ts:839`) → 바로 다음 줄 `detectContradictions` (`:817`).
 
 그리고 **리빌드는 replay + 쓰기**다 — 같은 `readEvents` 전량 replay를 안에 품고 있다
 (§1.1, `projection-store.ts:378-379`의 `readEvents` + `:447-449`의 replace-all). 그래서 후보②의 한계비용은 위 표의
@@ -546,8 +546,8 @@ head)를 **대체**한다. 20000 셀은 이슈가 준 격자에 없지만, 로�
 나머지 해석 셋:
 
 - **호출자는 둘이고, 오늘 프로덕션 도달은 경계 하나뿐이다.**
-  `detectContradictions`는 경계(`consolidate-service.ts:2646-2653`)와
-  import(`memory-import-service.ts:817`) 두 곳에서 호출되며, 주석 자신이 _"this function
+  `detectContradictions`는 경계(`consolidate-service.ts:2666-2673`)와
+  import(`memory-import-service.ts:841`) 두 곳에서 호출되며, 주석 자신이 _"this function
   is tail work for **both its callers** (a consolidation boundary and an import)"_ 라고
   적는다 (`contradiction-service.ts:273-274`). import 경로는 오늘 `packages/kernel/src/index.ts`에서
   export되지 않아 프로덕션 호출부가 0건이므로(#189 "확인된 사실") **오늘 비용을 내는 것은
@@ -616,8 +616,8 @@ invalidate-not-delete 규율). 그 곡선은 후보②가 만든 것이 아니�
    **남는다**. §5.2의 표가 닫는 자리와 남는 자리를 각각 명시한다.
 3. 비용이 재측정됐고(§5.3, 총 로그 길이 축), **직전에 이미 지불한 리빌드의 0.15–0.97배로
    상한이 잡힌다** — 두 호출자 모두 `detectContradictions` 직전에 전량 리빌드를 끝내기
-   때문이고(`consolidate-service.ts:2630-2631` → `:2647`,
-   `memory-import-service.ts:815` → `:817`), 그 비는 로그가 20배 길어져도 1을 넘지
+   때문이고(`consolidate-service.ts:2650-2651` → `:2647`,
+   `memory-import-service.ts:839` → `:817`), 그 비는 로그가 20배 길어져도 1을 넘지
    않는다. embedder가 없으면 0. 이벤트 정체성을 건드리지 않으므로 #282가 경고한 오판
    비용을 지지 않는다. **첫 판이 쓴 _"두 자릿수 싸다"_ 는 틀렸고 폐기한다** (§5.4).
 
@@ -704,8 +704,8 @@ invalidate-not-delete 규율). 그 곡선은 후보②가 만든 것이 아니�
 
 **비용 쪽 근거는 바뀌었다.** 재측정 후에도 각하가 서는 근거는 "싸다"가 아니라
 **"이미 내고 있는 것보다 더 내지 않는다"** 이다: 두 호출자 모두 `detectContradictions`
-직전에 전량 리빌드를 끝내므로(`consolidate-service.ts:2630-2631` → `:2647`,
-`memory-import-service.ts:815` → `:817`) 후보②의 한계비용은 그 리빌드의 0.15–0.97배로
+직전에 전량 리빌드를 끝내므로(`consolidate-service.ts:2650-2651` → `:2647`,
+`memory-import-service.ts:839` → `:817`) 후보②의 한계비용은 그 리빌드의 0.15–0.97배로
 상한이 잡히고, 그 비는 로그 길이에 따라 발산하지 않는다(§5.4). 만약 재측정이 이 상한을
 깼다면 — 즉 replay가 리빌드보다 비쌌다면 — 이 각하는 뒤집혔을 것이고, 그 경우의 정당한
 결론은 "고치지 않는다"였을 것이다(#289 Q1이 그 결론도 정당하다고 적었다).
@@ -716,7 +716,7 @@ invalidate-not-delete 규율). 그 곡선은 후보②가 만든 것이 아니�
 무언가 하게 만들자는 안이다(예: 플래그를 남겨 다음 패스가 판정을 건너뛰게 한다). 두 가지로
 막힌다. 첫째, **이 자리의 정책은 이미 확정돼 있다** — #284가 "`committed: false`로는
 호출 자리에서 아무것도 하지 않는다"를 정본으로 못박았고 회복은 한 층 아래로 내렸다
-(`projection-store.ts:323-333`, `consolidate-service.ts:2615-2624`). 다섯 호출 자리 중
+(`projection-store.ts:323-333`, `consolidate-service.ts:2635-2644`). 다섯 호출 자리 중
 하나만 다른 규율을 갖는 것은 그 결정을 되돌리는 것이다. 둘째, 그 플래그는 **판정을
 건너뛰게** 만드는데, 건너뛴 경계는 진짜 새 모순을 놓친다 — 희귀한 중복을 확실한 누락과
 바꾸는 것이고, 이것이야말로 §6의 세 인용이 금지하는 거래의 모양이다.
