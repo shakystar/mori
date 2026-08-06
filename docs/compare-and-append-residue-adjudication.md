@@ -194,11 +194,11 @@ append한다. 전형적인 read-then-write이고, 두 프로세스가 새 스토
 
 ### Q1.4 `conflict-service.ts:97` — `conflict.resolved` — **열림**
 
-스팬은 `resolveConflict`(`:40`) 안에서 **`:55`에서 시작해 `:77`에서 끝난다**:
+스팬은 `resolveConflict`(`:40`) 안에서 **`:75`에서 시작해 `:97`에서 끝난다**:
 
-- `:55` `const existing = getConflict(params.projectId, params.conflictId);` — 프로젝션 읽기
-- `:59` `assertConflictStatusTransition(existing.status, params.status);` — 그 읽기를 근거로 한 판정
-- `:77` `await appendEvent({ type: "conflict.resolved", … })` — 판정 결과를 로그에 쓴다
+- `:75` `const existing = getConflict(params.projectId, params.conflictId);` — 프로젝션 읽기
+- `:79` `assertConflictStatusTransition(existing.status, params.status);` — 그 읽기를 근거로 한 판정
+- `:97` `await appendEvent({ type: "conflict.resolved", … })` — 판정 결과를 로그에 쓴다
 
 이 함수는 스스로 열려 있다고 적어 두었다 (`:41-54`). 그 주석의 요지 셋:
 
@@ -381,10 +381,10 @@ W1·W2·W6·W8이 락 상실 이후의 꼬리 구간을 다루고, 그 표가 �
 
 **오늘 어디, 정확한 스팬**: `packages/kernel/src/services/conflict-service.ts`
 
-- 스팬 시작: **`:55`** — `const existing = getConflict(params.projectId, params.conflictId);`
-- 스팬 안: `:56-58`(미발견 시 throw), **`:59`** — `assertConflictStatusTransition(existing.status, params.status);`, `:61-69`(순수 계산)
-- 스팬 끝: **`:77`** — `await appendEvent({ type: "conflict.resolved", … })`
-- 그 뒤: `:85` `await rebuildProjectProjection(params.projectId)`
+- 스팬 시작: **`:75`** — `const existing = getConflict(params.projectId, params.conflictId);`
+- 스팬 안: `:76-78`(미발견 시 throw), **`:79`** — `assertConflictStatusTransition(existing.status, params.status);`, `:81-89`(순수 계산)
+- 스팬 끝: **`:97`** — `await appendEvent({ type: "conflict.resolved", … })`
+- 그 뒤: `:105` `await rebuildProjectProjection(params.projectId)`
 
 **열려 있고, 열어 둔 이유도 그대로다** — 프로덕션 호출부 0건(§Q1.4의 실측).
 `:41-54`의 주석이 #118⑤의 산출물이며, 그것이 요구한 명문화는 이미 충족돼 있다:
@@ -480,7 +480,7 @@ that lock here — or wrap the span in a transaction"_.
   잡아야 하고, import처럼 seam 밖 경로면 그 자리에서 잡아야 한다. 호출자가 없는
   지금은 어느 쪽인지 고를 근거가 없다.
 - **단점 2**: 트랜잭션으로 감싸는 쪽은 더 크다 — `getConflict`(동기 프로젝션 읽기)과
-  `appendEvent`(비동기)가 한 트랜잭션 안에 들어가야 하고, `rebuildProjectProjection`(`:85`)까지
+  `appendEvent`(비동기)가 한 트랜잭션 안에 들어가야 하고, `rebuildProjectProjection`(`:105`)까지
   포함할지 갈린다. better-sqlite3의 트랜잭션 콜백은 동기라서
   `event-store.ts:158-163`이 적은 제약(비동기 함수는 그 콜백에서 못 부른다)에 그대로 걸린다.
 
@@ -498,7 +498,7 @@ that lock here — or wrap the span in a transaction"_.
 - **장점**: §Q1.8의 구별을 만족하는 유일한 CAS 안이다. 이 리포가 세 번 검증한 형태다.
 - **단점**: `resolveConflict` 한 번이 **전량 로그 replay**를 사게 된다. #296 §Q3이 그 비용을
   20k 이벤트 스토어에서 +179 ms로 실측했다. 호출자가 없어 호출 빈도를 모르므로 그 교환을
-  지금 값 매길 수 없고, 이 함수는 `:85`에서 이미 전량 리빌드를 하므로 상대 비용이 작을
+  지금 값 매길 수 없고, 이 함수는 `:105`에서 이미 전량 리빌드를 하므로 상대 비용이 작을
   가능성도 있지만 **그 판단의 입력이 호출자다.**
 
 ### Q3 판정
@@ -520,7 +520,7 @@ replay 비용, (a)의 API 표면이 전부 "첫 호출자가 무엇인가"에 �
    첫 호출자를 배선하는 사람이 그 파일의 그 자리를 열어 본다는 보장이 규율뿐이다.
 2. **파급이 작다.** (d)로 1곳, (a)로 2곳(§Q3 실측). 지금이 가장 싸다.
 3. **#189 A의 완료 조건 문구가 이 자리를 명시적으로 센다.** 문구대로면 A는 미완이다.
-4. **`resolveConflict`는 이미 락 밖 리빌드를 한다** (`:85`). `projection-store.ts:160-165`이
+4. **`resolveConflict`는 이미 락 밖 리빌드를 한다** (`:105`). `projection-store.ts:160-165`이
    *"a new caller that reaches `importMemories` / `resolveConflict` outside the project lock
    would widen this gap"*라고 적는다 — 즉 이 자리는 CAS 축 하나가 아니라 둘이다.
 

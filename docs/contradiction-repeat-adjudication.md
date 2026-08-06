@@ -207,7 +207,7 @@ unconditionally, `reindexSearch: false` ones included"_ 는 **실물에서 참�
   (`storage/db.ts:884-889`)와 그 판별자 `isDuplicateGenesisError`
   (`event-store.ts:100-106`). #189 B가 노린 자리가 정확히 이것이다.
 
-즉 "유니크 제약으로 중복 append를 거부한다"는 이 리포에서 검증된 수단이다. 다만 ㉰에
+즉 "중복 append가 유니크 제약에 걸린다"는 이 리포에서 검증된 수단이다. 다만 ㉰에
 쓰려면 **호출자가 이벤트 id를 지정하는 새 이음매**가 필요하다 (`AppendEventInput.id`).
 
 **그 이음매를 넣으면 (가)는 ㉰를 실제로 완전히 닫는다.** 두 이벤트는 **한 번의
