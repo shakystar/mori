@@ -446,13 +446,60 @@ better-sqlite3의 트랜잭션 함수는 프라미스를 반환하는 함수를 
 
 **정상 운영에서 새로 생기는 실패 모드**
 
+**이 절과 §Q4가 쓰는 「회수된다 / 읽힌다 / 남는다」 주장에는 예외 없이 셋을 같이 단다** —
+① **무엇이 낡는가**(테이블·인덱스 이름 단위), ② **그것을 다시 채우는 쓰기 자리**(`파일:줄`, 읽기
+경로가 아니라 **쓰기** 경로), ③ **그 쓰기가 도는 조건과 상한**(발화 / 미발화 / 상한). 셋 중
+하나라도 못 채우면 그 주장을 쓰지 않는다. 아래가 이 절과 §Q4의 회계다 — 낡는 자원이 없는 주장은
+"낡음 주장이 아님"으로 분류하고 그 이유를 적는다(그런 주장에는 3종 세트를 요구하지 않는다).
+
+| 자리                                  | 주장                                                    | 낡음 주장인가 | 3종 세트를 받은 자리 / 아니면 왜 아닌가                                                                                                                                               |
+| ------------------------------------- | ------------------------------------------------------- | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 실패 모드 1 (가)                      | 모순 판정이 회수된다                                    | 예            | 아래 (가)                                                                                                                                                                             |
+| 실패 모드 1 (나-1)                    | 투영 테이블이 회수된다                                  | 예            | 아래 (나-1)                                                                                                                                                                           |
+| 실패 모드 1 (나-2)                    | `search_fts`가 회수된다                                 | 예            | 아래 (나-2)                                                                                                                                                                           |
+| 실패 모드 1 (다)                      | 메모리 임베딩이 회수된다                                | 예            | 아래 (다)                                                                                                                                                                             |
+| 실패 모드 1 (라)                      | 세그먼트 임베딩이 회수된다                              | 예            | 아래 (라)                                                                                                                                                                             |
+| 실패 모드 2                           | noop 경로를 위해 #211 단조성 가드가 **남는다**          | **아니다**    | 코드가 남는다는 말이고 낡는 자원이 없다                                                                                                                                               |
+| 실패 모드 3                           | 가드 hold 축의 중복 메모리가 **남는다**                 | **아니다**    | 두 행 다 durable하게 **쓰인** 상태다 — 빈 자리를 채우는 문제가 아니라 지울 자리가 없는 문제라 「다시 채우는 쓰기 자리」가 성립하지 않는다. 흡수자 0곳 판정은 §Q2.2가 읽기 경로로 냈다 |
+| 실패 모드 4                           | (없음 — 비용 서술만)                                    | —             | —                                                                                                                                                                                     |
+| §Q4 근거 3                            | 낡는 동안에도 메모리가 투영 테이블에서 **읽힌다**       | 예            | §Q4 근거 3 본문 (아래 (나-1)·(나-2)·(다)를 그대로 받는다)                                                                                                                             |
+| §Q4 차선 근거 2                       | 후보1의 새 대가는 **늦어지는 것**이다                   | 예            | §Q4 근거 3과 같은 자리                                                                                                                                                                |
+| §Q4 「가드 hold 축은 범위가 아니다」  | 그 축이 **남는다**                                      | **아니다**    | 실패 모드 3과 같은 이유                                                                                                                                                               |
+| §Q4 「세그먼트 중복은 범위가 아니다」 | `inputs.length === 0` 경로에 세그먼트 중복이 **남는다** | **아니다**    | 같은 이유 — 중복 청크는 쓰인 행이고, 상한은 `pruneSegments`(`:2716`)의 보존 정책이지 회수 쓰기가 아니다(§Q2.6)                                                                        |
+
 1. **꼬리가 던지면 창이 이미 소비된 상태가 된다.** 오늘은 `:2858`이 던지면 커서가 안 움직여
    다음 경계가 같은 창을 다시 처리한다(= R1). 후보1 뒤에는 커서가 이미 움직였으므로 다시 처리하지
-   않는다. 잃는 것은 **그 경계의 리빌드·모순 판정**이고, **둘의 회수는 조건부다.** 두 축을 나눠
-   적는다 — 각 축에 발화 조건과 상한을 붙인다.
+   않는다. 잃는 것은 그 경계의 **리빌드(`:2858`)·메모리 임베딩(`:2865`)·모순 판정(`:2874`)·세그먼트
+   임베딩(`:2885`)** 넷이고, **넷의 회수 조건과 상한이 서로 다르다.**
+
+   **먼저 「꼬리 리빌드가 커밋에 닿지 못하는 갈래」를 전수로 가른다.** 낡는 대상은 갈래마다 같고,
+   갈래마다 다른 것은 **write-ahead 마커가 서 있는지** 하나다.
+
+   | 갈래   | 어디서                                                                                                      | 던지는가                                  | 마커(`prj_search_reindex_pending`)                            |
+   | ------ | ----------------------------------------------------------------------------------------------------------- | ----------------------------------------- | ------------------------------------------------------------- |
+   | **b1** | `markSearchReindexPending` 자신 (`projection-store.ts:297`, 호출 `:350`)                                    | 던진다                                    | **안 선다**                                                   |
+   | **b2** | `readEvents`(`:378`) / `reduceProjectState`(`:383`)                                                         | 던진다                                    | 서 있다                                                       |
+   | **b3** | 토픽 `.md` 읽기(`:412`) — `readJson`은 ENOENT만 삼키고 나머지는 다시 던진다(`storage/fs-utils.ts:94`·`:97`) | 던진다                                    | 서 있다                                                       |
+   | **b4** | `writeAll.immediate()`(`:731`) — DELETE·INSERT 중 `SQLITE_BUSY`·디스크 풀                                   | 던진다                                    | 서 있다 (마커 지우기 `:727`가 같은 트랜잭션 안이라 함께 롤백) |
+   | **b5** | CAS가 매 시도 진다(`:441`, `REBUILD_STALE_HEAD_RETRIES` = 2 `:269`)                                         | **안 던진다** (`:358` `committed: false`) | 서 있다                                                       |
+
+   **b5는 후보1이 만드는 것이 아니다.** 오늘도 `:2858`은 반환값을 보지 않고 지나가고(`:2819-2824`
+   주석이 그 판단을 명시한다) 커서는 그대로 커밋된다. 아래 (나-1)·(나-2)의 낡음은 b5에도 그대로
+   적용되지만 **후보1의 새 대가로 계산하지 않는다** — 새 대가는 **던지는** 갈래(b1~b4)뿐이다.
+
+   **다섯 갈래 전부에서 낡는 대상은 같다.** b1·b2·b3는 `writeAll`(`:424`)에 닿지 못하고, b4는 그
+   트랜잭션이 롤백되며, b5는 `:441`에서 아무것도 쓰지 않고 돌아온다. 어느 쪽이든 투영 테이블은
+   **직전에 커밋된 리빌드의 내용 그대로** 남고, 이 경계가 append한 `memory.consolidated`는 그 안에
+   없다.
 
    **(가) 모순 판정 — 회수하는 것은 「다음 경계」가 아니라 「다음으로 추출 결과가 0건이 아닌
    경계」이고, 그 간격에는 상한이 없다.**
+
+   - **① 낡는 것**: 이 경계의 메모리에 대한 모순 판정이 안 돈 결과 — `memory.superseded` ·
+     `conflict.detected` 이벤트가 로그에 없고, 따라서 그로부터 파생되는 `memories.invalid_at` ·
+     `memories.superseded_by` 컬럼과 `conflicts` 테이블 행도 없다.
+   - **② 다시 채우는 쓰기 자리**: `contradiction-service.ts:287`(`appendEvents`로 두 이벤트를
+     쓴다) → `contradiction-service.ts:346`(`results.length > 0`일 때만 도는 리빌드, `:345`).
 
    ```
    consolidate-service.ts:2861      if (inputs.length > 0) {
@@ -464,41 +511,121 @@ better-sqlite3의 트랜잭션 함수는 프라미스를 반환하는 함수를 
    않는다.** `contradiction-service.ts:323-324`의 자기 규정(_"a repeated best-effort sweep"_)은
    그 함수가 불렸을 때 무엇을 하는지에 대한 말이고 **언제 불리는지**에 대한 말이 아니다.
 
-   - **발화하는 조건**: `inputs.length > 0`인 경계 — 즉 새 관찰이나 새 대화 슬라이스에서 추출
+   - **③ 발화하는 조건**: `inputs.length > 0`인 경계 — 즉 새 관찰이나 새 대화 슬라이스에서 추출
      결과가 나온 경계. 그때 스윕이 보는 입력은 그 시점의 유효 self-lane `decision` **전수**이므로
-     (`contradiction-service.ts:212-217`), 건너뛴 경계의 메모리도 그 안에 든다.
-   - **발화하지 않는 조건**: 추출 결과가 0건인 경계 — 후보1 뒤의 조용한 프로젝트가 정확히 그
+     (`contradiction-service.ts:212-217`), 건너뛴 경계의 메모리도 그 안에 든다. 그 입력은
+     투영 테이블이 아니라 **로그**에서 접힌다(`contradiction-service.ts:212`의
+     `reduceProjectState(events, projectId)`) — 즉 이 축은 아래 (나-1)에 **종속되지 않는다.**
+   - **③ 발화하지 않는 조건**: 추출 결과가 0건인 경계 — 후보1 뒤의 조용한 프로젝트가 정확히 그
      상태다. `memory-import-service.ts:815` 뒤의 import도 같은 스윕을 부르지만 그 역시 새 활동을
      전제한다.
-   - **상한: 없다.** 다음으로 추출 결과가 나올 때까지의 간격을 코드가 묶어 두는 자리가 없다.
+   - **③ 상한: 없다.** 다음으로 추출 결과가 나올 때까지의 간격을 코드가 묶어 두는 자리가 없다.
 
    오늘(후보1 전)은 커서가 안 움직여 다음 경계가 같은 창을 다시 추출하므로 `inputs.length > 0`이
    되기 쉽다. **즉 후보1은 이 회수를 실제로 약하게 만든다.** 그것이 이 후보가 내는 대가이고,
    초안이 "둘 다 다음 경계가 회수한다"로 적었을 때 빠뜨린 것이다.
 
-   **(나) 리빌드 — 마커가 durable했으면 상한은 「다음 capture 1회」, 마커 쓰기 자신이 실패하면
-   상한이 없다.**
+   **(나) 리빌드 — 한 축이 아니라 두 축이고, 상한이 서로 다르다.** 2라운드가 이 둘을 하나로 묶어
+   뒤쪽(FTS) 상한만 적었고, 그래서 §Q4 근거 3이 "메모리는 투영 테이블에서 그대로 읽힌다"로 샜다.
+   **던지는 갈래에서는 그 표도 비어 있다.** 가르는 근거는 `writeAll` 안에서 `reindexSearch`가
+   게이트하는 범위다 — 게이트는 `search_fts` 쪽(`:467-468`, `:480`)에만 걸리고, 투영 테이블의
+   DELETE 루프(`:447-448`)와 재적재에는 걸리지 않는다.
 
-   `projection-store.ts:344`가 `reindexSearch: false` 요청을 마커가 서 있는 동안 `true`로
-   승격시키므로, **마커가 durable한 갈래**의 회수는 `capture-service.ts:314`가 capture마다 도는
-   그 `false` 리빌드다 — 상한 1회. #284가 세운 그대로다.
+   **(나-1) 투영 테이블 축 — 회수는 「종류를 안 가리는 리빌드 1회」다.**
 
-   그러나 마커는 리빌드 앞에 **별도의 `meta` 쓰기**로 놓인다(`projection-store.ts:297`의
-   `INSERT … ON CONFLICT`, 호출은 `:350`). 그 쓰기 자신이 던지면(`SQLITE_BUSY` — 열 때 걸어 둔
-   `busy_timeout` 만료 — 또는 디스크 풀) `:2858`은 **마커를 남기지 않고** 던진다. 후보1 뒤에는
-   그 시점에 커서가 이미 커밋돼 있으므로 그 경계를 다시 돌지 않고, 승격이 안 걸린 `false`
-   리빌드는 `search_fts`를 건드리지 않으므로(`projection-store.ts:406`·`:467`) **방금 append된
-   메모리의 FTS 행이 계속 빈다.**
+   - **① 낡는 것**: `SINGLETON_TABLES`(`projection-store.ts:99` — `projects`, `memory_index`)와
+     `ENTITY_TABLES`(`:100-112` — `workstreams`, `tasks`, `task_requests`, `handoffs`,
+     `checkpoints`, `decisions`, `rules`, `conflicts`, `sessions`, `observations`, `memories`)
+     **열세 개 전부.** R1에서 값을 갖는 것은 `memories`다 — 이 경계가 append한
+     `memory.consolidated`의 행이 없다. (`memory_access`는 이 목록에 **없어서** 낡지 않는다 —
+     `:442-446`이 그 제외를 의도로 적었다. `segments`·`embeddings`도 두 목록 밖이라 리빌드가
+     지우지도 채우지도 않는다.)
+   - **② 다시 채우는 쓰기 자리**: `writeAll`(`projection-store.ts:424`) 한 곳뿐이다 — 와이프
+     `:447-448`, `insertObservation` `:641`/`:645`, `insertMemory` `:656`/`:664`. **로그의 메모리를
+     `memories` 테이블로 투영하는 `INSERT`는 리포 전체에서 이 트랜잭션 하나다** — 전수 확인과
+     함께 잡힌 두 번째 `INTO memories`(v17 마이그레이션의 스키마 재작성)를 왜 회수 자리로 세지
+     않는지는 부록 A-2 「직접 센 것」 (1)에 적었다.
+   - **③ 발화하는 조건**: 리빌드 다섯 자리(`consolidate-service.ts:2858`,
+     `memory-import-service.ts:815`, `conflict-service.ts:105`, `contradiction-service.ts:346`,
+     `capture-service.ts:314`) **어느 하나라도** 커밋하면 채워진다. `reindexSearch`가 `false`인
+     것(`capture-service.ts:314`, capture마다 돈다)도 포함이다 — 위 게이트가 이 축에는 안 걸리기
+     때문이다. 코드 자신이 그렇게 적었다(`consolidate-service.ts:2829-2833`: _"The memories this
+     boundary appended do still reach the projection TABLES (any later rebuild replays the full
+     log unconditionally, `reindexSearch: false` ones included), but they reach `search_fts` only
+     via a LATER rebuild that both requests an effective `reindexSearch: true` AND commits"_).
+     **그 주석이 놓인 자리는 b5(CAS를 잃은 갈래)지만**, 인용한 문장이 말하는 것은 갈래가 아니라
+     **두 쓰기 경로의 비대칭 자체**이므로 던지는 갈래(b1~b4)에도 그대로 적용된다.
+   - **③ 발화하지 않는 조건**: 프로젝트에 아무 활동도 없어 리빌드가 한 번도 안 도는 동안, 그리고
+     도는 리빌드가 매번 CAS를 잃는 동안(`:441` → `:358`).
+   - **③ 상한: 커밋하는 리빌드 1회 — 종류 무관.** 다만 **그 1회가 언제 오는지에는 상한이 없다**
+     (새 활동에 종속). 두 문장을 붙여 읽어야 이 축의 값이 정확하다.
+   - **후보1이 이 축을 약하게 만드는가 — 거의 만들지 않는다.** 오늘의 재처리도 표를 직접 채우지는
+     않는다(채우는 것은 재처리한 경계의 `:2858`이다). 후보1이 없애는 것은 다섯 자리 중
+     `consolidate-service.ts:2858` **하나**가 조용한 경계에서 안 도는 것이고, 나머지 넷은 그대로다.
 
-   - **발화하는 조건**: 마커가 durable했으면 다음 capture 1회. 아니면 다음 `reindexSearch: true`
-     리빌드 — 그 자리는 넷이고(`consolidate-service.ts:2858`, `memory-import-service.ts:815`,
-     `conflict-service.ts:105`, `contradiction-service.ts:346` — 뒤 둘은 인자 없이 부르므로
-     `opts.reindexSearch ?? true`가 `true`다) 넷 다 새 활동을 전제한다.
-   - **상한**: 마커 갈래는 capture 1회. **마커 쓰기가 실패한 갈래는 상한이 없다.**
+   **(나-2) FTS 축 — 회수는 마커가 섰는지에 따라 「리빌드 1회」이거나 「상한 없음」이다.**
 
-   정리하면 이 실패 모드의 회수는 "무조건 있다"가 아니라 **"(가)는 다음으로 추출이 0건이 아닌
-   경계, (나)는 마커가 durable했으면 다음 capture·아니면 다음 `true` 리빌드"**이고, 상한이 없는
-   갈래가 축마다 하나씩 있다.
+   - **① 낡는 것**: `search_fts` — 이 경계가 append한 메모리의 `kind='memory'` 행(`:688`), 그리고
+     `segmentsWritten > 0`이었으면 이 경계가 쓴 세그먼트의 `kind='segment'` 행(`:704-705`).
+   - **② 다시 채우는 쓰기 자리**: 같은 `writeAll` 안의 **게이트된** 구간 — 와이프 `:467-468`,
+     삽입 `insertSearch`(`:470-473`)를 `indexEntity`의 `if (reindexSearch && text)`(`:480`)가
+     감싼다. 메모리 행은 `:688`, 세그먼트 행은 `:704-705`.
+   - **③ 발화하는 조건 (마커가 선 갈래 b2~b5)**: `projection-store.ts:344`의 승격이 다음 리빌드를
+     **종류 무관으로** `true`로 만든다. `capture-service.ts:314`의 `false` 리빌드가 그대로 회수
+     자리가 된다. **상한: 리빌드 1회** (#284가 세운 그대로).
+   - **③ 발화하는 조건 (마커가 안 선 갈래 b1)**: 승격이 없으므로 **`reindexSearch`가 `true`로
+     해소되는 리빌드**가 와야 한다 — 자리는 넷이다(`consolidate-service.ts:2858`,
+     `memory-import-service.ts:815`, `conflict-service.ts:105`, `contradiction-service.ts:346`;
+     뒤 둘은 인자 없이 불러 `:344`의 `opts.reindexSearch ?? true`로 `true`가 된다).
+     `capture-service.ts:314`의 `false` 리빌드는 **몇 번을 돌아도 이 축을 안 채운다.**
+     **상한: 없다.**
+   - **③ 발화하지 않는 조건**: b1에서 새 활동이 없는 동안, 그리고 도는 것이 `false` 리빌드뿐인
+     동안. `contradiction-service.ts:346`은 `:345`의 `results.length > 0`까지 통과해야 한다.
+   - **후보1이 이 축을 약하게 만드는가 — b1 갈래에서 그렇다.** 넷 중 `:2858`은 `:2857`의
+     `inputs.length > 0 || segmentsWritten > 0`을 지나야 하는데, 후보1 뒤의 조용한 경계는 그
+     조건을 만들지 않는다.
+
+   **(다) 메모리 임베딩 축 — 상한이 없고, (나-1)에 종속된다.**
+
+   - **① 낡는 것**: `embeddings` 테이블의 `kind = "memory"` 행 — 이 경계가 append한 메모리에 대한
+     벡터가 없다. (`embeddings`는 `ENTITY_TABLES` 밖이라 리빌드가 채워 주지 않는다.)
+   - **② 다시 채우는 쓰기 자리**: `embeddings-service.ts:116`(`upsertEmbedding`), `ensureEmbeddings`
+     (`:88`) 안. 호출 자리는 둘 — `consolidate-service.ts:2865`, `memory-import-service.ts:816`.
+   - **③ 발화하는 조건**: `:2865`는 `:2861`의 `inputs.length > 0` 안이다 — **(가)와 같은 게이트**다.
+     `memory-import-service.ts:816`도 import라는 새 활동을 전제한다.
+   - **③ 발화하지 않는 조건**: 추출 결과가 0건인 경계, 그리고 embedder가 없는 구성(`:93`이 그때
+     no-op). **그리고 (나-1)이 아직 안 채워진 동안** — `ensureEmbeddings`의 입력이
+     `listValidMemories`(`embeddings-service.ts:95`), 즉 `memories` 투영 테이블이므로, 표가 비어
+     있으면 스윕이 발화해도 그 메모리를 후보로 **보지 않는다**(`:101-107`의 `stale` 계산이 그
+     목록 위에서만 돈다). 한 경계 안에서는 `:2858`이 `:2865`보다 앞이라 순서가 맞지만, 다른
+     경계가 회수하는 경우에는 **(나-1)이 먼저 커밋돼야 한다.**
+   - **③ 상한: 없다.**
+
+   **(라) 세그먼트 임베딩 축 — 상한이 없고, (나-1)에 종속되지 않는다.**
+
+   - **① 낡는 것**: `embeddings`의 `kind = "segment"` 행 — 이 경계가 쓴 세그먼트의 벡터.
+   - **② 다시 채우는 쓰기 자리**: `embeddings-service.ts:203`(`upsertSegmentEmbeddingIfLive`,
+     정의 `:151`), `ensureSegmentEmbeddings`(`:170`) 안. 호출 자리는 하나 —
+     `consolidate-service.ts:2885`.
+   - **③ 발화하는 조건**: `:2884`의 `segmentsWritten > 0`. 입력은 `listSegments`(`:182`) —
+     세그먼트 테이블을 직접 읽으므로 이 축은 **(나-1)에 종속되지 않는다.**
+   - **③ 발화하지 않는 조건**: 세그먼트를 안 쓴 경계, embedder 없음(`:175`).
+   - **③ 상한: 없다.**
+
+   **정리 — 축마다 상한이 다르다.**
+
+   | 축                   | 낡는 것                                              | 회수 쓰기                                                  | 상한                                      |
+   | -------------------- | ---------------------------------------------------- | ---------------------------------------------------------- | ----------------------------------------- |
+   | (가) 모순 판정       | `memory.superseded`·`conflict.detected`, `conflicts` | `contradiction-service.ts:287` → `:346`                    | **없음** (`inputs.length > 0` 필요)       |
+   | (나-1) 투영 테이블   | `memories` 외 12개 테이블                            | `projection-store.ts:424` (`:447-448`, `:656`/`:664`)      | **리빌드 1회, 종류 무관**                 |
+   | (나-2) FTS (b2~b5)   | `search_fts`                                         | 같은 `writeAll`의 게이트 구간 (`:467-468`, `:480`, `:688`) | **리빌드 1회, 종류 무관** (마커 승격)     |
+   | (나-2) FTS (b1)      | `search_fts`                                         | 같은 자리 — 단 `true` 리빌드 넷 중 하나여야                | **없음**                                  |
+   | (다) 메모리 임베딩   | `embeddings` (`kind='memory'`)                       | `embeddings-service.ts:116` (`:2865`·`:816`)               | **없음** — 게다가 (나-1) 뒤에만 발화 가능 |
+   | (라) 세그먼트 임베딩 | `embeddings` (`kind='segment'`)                      | `embeddings-service.ts:203` (`:2885`)                      | **없음**                                  |
+
+   즉 이 실패 모드의 회수는 "무조건 있다"도 아니고 하나의 상한으로 적을 수 있는 것도 아니다.
+   **상한이 있는 축은 (나-1)과 (나-2)의 마커 갈래 둘뿐이고, 그 상한도 「리빌드 수 1회」이지
+   「시간」이 아니다.**
 
 2. **#211의 단조성이 append 경로에서는 잉여가 된다.** 합류 뒤에는 커밋된 커서 쓰기가 전부 CAS를
    통과한 append에 붙으므로, 늦게 도착한 홀더의 낡은 목표가 애초에 커밋되지 않는다. 그러나
@@ -601,12 +728,12 @@ _"Q2의 답이 '읽기 표면이 접는다'면 이것이 정답일 수 있다"_.
 
 ### 후보 비교
 
-| 후보 | 닫는 것                                               | 대가                                                                       | 정상 운영을 막는가 | 되돌리기   |
-| ---- | ----------------------------------------------------- | -------------------------------------------------------------------------- | ------------------ | ---------- |
-| 1    | **R1의 창 축 전부** (메모리·세그먼트·임베딩·FTS 모두) | 꼬리 재배치 + CAS seam 두 번째 모양 + **꼬리 회수 약화**(실패 모드 1 (가)) | **아니오**         | 쉬움       |
-| 2    | 대화 축                                               | 커서가 전진해야 하는 경로 셋이 pin된다                                     | **예**             | 쉬움       |
-| 3    | R1 창 축의 메모리 + **가드 hold 축의 메모리**         | 페이로드 확장(#314 트리거 발동) + 하네스 신뢰                              | 아니오             | **어려움** |
-| 4    | 없음                                                  | 중복이 남는다                                                              | 아니오             | —          |
+| 후보 | 닫는 것                                               | 대가                                                                                                               | 정상 운영을 막는가                                                                                                       | 되돌리기   |
+| ---- | ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------ | ---------- |
+| 1    | **R1의 창 축 전부** (메모리·세그먼트·임베딩·FTS 모두) | 꼬리 재배치 + CAS seam 두 번째 모양 + **꼬리 회수 약화** — 상한 없는 세 축(실패 모드 1 (가)·(다)·(나-2)의 b1 갈래) | **아니오** (§Q4 근거 3 — 상한 없는 축은 전부 「늦음」이고, 「못 읽음」인 (나-1)은 상한 리빌드 1회이며 후보1 전후로 같다) | 쉬움       |
+| 2    | 대화 축                                               | 커서가 전진해야 하는 경로 셋이 pin된다                                                                             | **예**                                                                                                                   | 쉬움       |
+| 3    | R1 창 축의 메모리 + **가드 hold 축의 메모리**         | 페이로드 확장(#314 트리거 발동) + 하네스 신뢰                                                                      | 아니오                                                                                                                   | **어려움** |
+| 4    | 없음                                                  | 중복이 남는다                                                                                                      | 아니오                                                                                                                   | —          |
 
 **후보1과 후보3이 남기는 것**: 후보1은 가드 hold 축을 남기고(별개 축), 후보3은 창 축의 세그먼트
 중복을 남긴다(#103이 받아들인 범위). 어느 쪽도 §Q2.6 표 전체를 비우지 않는다.
@@ -615,10 +742,13 @@ _"Q2의 답이 '읽기 표면이 접는다'면 이것이 정답일 수 있다"_.
 
 ### **고친다. 후보1 — 커서 커밋을 append 트랜잭션에 합류시킨다 (1b 형태).**
 
-**대가를 다시 잰 뒤에도 후보1이다.** 초안이 후보1의 대가를 두 자리에서 싸게 매겼고(꼬리 회수를
-"둘 다 다음 경계가 회수한다"로, 닫는 것을 "R1 전부"로), 그 둘을 실물 호출 자리로 고쳐 다시
-비교했다. 아래 근거 4의 순위가 바뀌지 않는다 — 바뀌는 것은 근거 3의 문장 하나(실패 모드 1이
-"회수된다"에서 "조건부로 회수된다"로)와, 아래 「차선」 문단이다.
+**대가를 세 번 잰 뒤에도 후보1이다.** 초안이 후보1의 대가를 두 자리에서 싸게 매겼고(꼬리 회수를
+"둘 다 다음 경계가 회수한다"로, 닫는 것을 "R1 전부"로), 2라운드가 그 둘을 실물 호출 자리로
+고쳤다. 3라운드는 그 수정 자신이 **낡는 대상을 `search_fts` 하나로 좁힌 것**을 고쳤다 — 같은
+갈래에서 `memories` 투영 테이블도 함께 비고, 그것을 채우는 자리는 `writeAll` 하나다. 아래 근거
+4의 순위는 세 번 다 바뀌지 않았다. 3라운드에서 바뀌는 것은 **근거 3의 근거이지 결론이 아니고**
+(아래 근거 3의 「판정」), 「차선」 문단 근거 2의 대가 서술 한 문단이다. §Q5는 조각·완료 조건·
+인터리브 테스트가 전부 그대로다 — 근거 3의 결론이 유지되므로 손댈 자리가 없다.
 
 근거 넷.
 
@@ -629,14 +759,46 @@ _"Q2의 답이 '읽기 표면이 접는다'면 이것이 정답일 수 있다"_.
 2. **창이 이슈 본문이 가정한 것보다 넓다.** §Q1.3 (나)가 크래시 없이 열리는 경로를 둘 찾았고
    (`:2858`·`:2874`), 창의 폭은 저장소 크기와 임베더·judge 지연에 비례한다(§Q1.1). "드문 크래시"로
    가격을 매기면 실제보다 싸게 잡는다.
-3. **후보1이 정상 동작에서 막는 것이 없다.** #310이 후보2·3을 죽인 기준을 그대로 적용하면
-   후보2는 여기서도 죽고(§Q3 후보2 대가 2), 후보1은 살아남는다. 새로 생기는 실패 모드 넷 중
-   셋은 이유 문장만 바뀌거나(2·3) 무시할 수 있고(4), **하나(1)는 실제 대가다** — 꼬리 회수가
-   조건부가 되고 두 축 모두 상한 없는 갈래를 남긴다. 그래도 "막는다"에는 해당하지 않는다:
-   조용한 프로젝트에서 늦어지는 것은 **모순 판정과 FTS 색인**이고, 그 둘이 늦는 동안에도 메모리
-   자체는 durable하며 투영 테이블에서 읽힌다 — §Q2.2 표의 아홉 표면 중 `search_fts`를 거치는 것은
-   5번(어휘 검색) 하나이고, 주입(3·4번)·의미 검색(6번)·`existing`(9번)은 `listValidMemories`
-   경로라 마커가 서지 않은 갈래에서도 그대로 읽힌다.
+3. **후보1이 정상 동작에서 막는 것이 없다 — 다시 판정한 뒤에도 선다.** #310이 후보2·3을 죽인
+   기준을 그대로 적용하면 후보2는 여기서도 죽고(§Q3 후보2 대가 2), 후보1은 살아남는다. 새로
+   생기는 실패 모드 넷 중 셋은 이유 문장만 바뀌거나(2·3) 무시할 수 있고(4), **하나(1)는 실제
+   대가다.**
+
+   **2라운드가 여기서 틀렸다.** "메모리 자체는 durable하며 투영 테이블에서 읽힌다"고 적고
+   낡는 것을 `search_fts` 하나로 좁혔는데, 꼬리 리빌드가 **커밋에 닿지 못하는 갈래**에서는
+   `memories` 투영 테이블도 함께 비어 있다. `memories`에 행을 넣는 자리는 `writeAll`
+   (`projection-store.ts:424`, `insertMemory` `:656`/`:664`) 하나뿐이고, `listValidMemories`
+   (`:1014`, `:1024`)가 읽는 것은 로그가 아니라 그 테이블이다. 그러니 그 갈래에서는 §Q2.2 표의
+   2·3·4·6·7번이 **그 메모리를 아예 못 본다** — 늦게 보는 것이 아니라 못 보는 것이다.
+   (5번도 못 보지만 그것은 `search_fts` 축이라 아래에서 따로 센다.)
+
+   그래도 "막는다"에는 해당하지 않는다. 근거는 **상한이 축마다 다르다**는 §Q3 실패 모드 1의
+   판정이고, 갈리는 자리가 정확히 여기다.
+
+   - **못 읽는 축(투영 테이블)은 상한이 있고, 후보1이 그 상한을 바꾸지 않는다.** 회수는
+     「커밋하는 리빌드 1회, 종류 무관」이다 — `reindexSearch` 게이트가 `search_fts`
+     쪽(`:467-468`, `:480`)에만 걸리고 DELETE 루프·재적재(`:447-448`, `:656`/`:664`)에는 안
+     걸리기 때문이다. 그 1회를 주는 자리가 다섯이고 그중 하나가 capture마다 도는
+     `capture-service.ts:314`다. **그리고 이 상태는 오늘도 똑같다** — 오늘의 재처리도 표를 직접
+     채우지 않으므로(채우는 것은 재처리한 경계의 `:2858`이다), 후보1이 이 축에서 없애는 것은
+     다섯 자리 중 하나뿐이다. **새로 생기는 대가가 아니다.**
+   - **상한이 없는 축은 전부 「늦어지는」 축이다.** (가) 모순 판정, (다) 메모리 임베딩, (나-2)의
+     b1 갈래(FTS)가 그것이다. 이 셋이 낡아 있는 동안 §Q2.2에서 실제로 비는 것은 5번(어휘 검색),
+     6번의 **의미 점수**, 7번(임베딩 적재 자체)이고, 2·3·4번은 (나-1)이 채워지는 순간 그 메모리를
+     그대로 읽는다.
+     주입 랭킹(`memory-retrieval-service.ts:129`)은 의미 점수가 없으면 `semBoost`가 0이 될 뿐
+     메모리를 떨어뜨리지 않고, 의미 검색(`search-service.ts:169`·`:172`)은 임베딩과 유효 메모리
+     목록의 교집합이라 벡터가 없으면 그 메모리가 안 실릴 뿐이다.
+   - **로그에서 읽는 표면은 어느 갈래에서도 안 낡는다.** 8번(모순 판정 입력)은
+     `contradiction-service.ts:212`의 `reduceProjectState(events, projectId)`이고, 9번(`existing`)은
+     `consolidate-service.ts:2428`의 `Object.values(state.memories)`다. 둘 다 투영 테이블을 거치지
+     않으므로 (나-1)·(나-2)와 무관하다. **2라운드가 9번을 `listValidMemories` 경로로 적은 것도
+     틀렸다** — 틀린 것은 §Q4 근거 3의 이 문장이고, §Q2.2 표는 처음부터 읽기 경로를 `:2428`로
+     적었다. `:2422-2427` 주석이 #298에서 그 읽기를 SQL에서 로그 fold로 옮긴 사실을 적고 있다.
+
+   **판정: 근거 3은 선다.** 후보1이 새로 만드는 대가는 전부 **상한 없는「늦음」**이고, **「못
+   읽음」은 상한이 리빌드 1회이며 후보1이 만들지 않는다.** 결론은 후보1로 유지된다.
+
 4. **비용이 국소적이다.** `packages/` 아래에서 손대는 파일은 `event-store.ts`와
    `consolidate-service.ts` 둘이고, 마이그레이션도 이벤트 페이로드 변경도 없다. 후보3은 페이로드를
    바꾸므로 되돌리기 어렵고 #189 B 축의 각하를 재론 대상으로 만든다.
@@ -651,9 +813,12 @@ _"Q2의 답이 '읽기 표면이 접는다'면 이것이 정답일 수 있다"_.
    **바로 그 경계가 방금 쓴** 세그먼트를 지워야 열린다. 후보1은 큰 쪽을 통째로 닫는다.
 2. **후보3이 남기는 것도 있다.** 창 축의 세그먼트 중복은 후보3의 사각지대에 그대로 남고
    (`inputs.length === 0`이면 실을 이벤트가 없다), 그 대신 페이로드 확장·#189 B 축 재론·하네스
-   오프셋 신뢰라는 대가를 낸다. 후보1의 새 대가(꼬리 회수의 조건화)는 **관측·색인이 늦어지는
-   것**이고, 후보3의 대가는 **잘못된 흡수가 슬라이스를 건너뛰면 유실**이다(§Q3 후보3 대가 2 —
-   #136이 닫은 손실). 대가의 종류가 다르고 후자가 더 무겁다.
+   오프셋 신뢰라는 대가를 낸다. 후보1이 **새로** 내는 대가는 근거 3의 판정대로 상한 없는 세 축
+   — (가) 모순 판정, (다) 메모리 임베딩, (나-2)의 b1 갈래 — 이고 셋 다 **관측·색인이 늦어지는
+   것**이다. 같은 갈래에서 함께 비는 투영 테이블((나-1))은 「늦음」이 아니라 「못 읽음」이지만
+   상한이 리빌드 1회이고 **후보1 전후로 같으므로** 이 비교에 들어가지 않는다. 후보3의 대가는
+   **잘못된 흡수가 슬라이스를 건너뛰면 유실**이다(§Q3 후보3 대가 2 — #136이 닫은 손실). 대가의
+   종류가 다르고 후자가 더 무겁다.
 3. **되돌리기 비용이 여전히 갈린다.** 후보1은 마이그레이션도 페이로드 변경도 없고, 가드 hold
    축이 나중에 값을 하면 그때 후보3을 **후보1 위에 얹을 수 있다.** 반대 순서는 성립하지 않는다.
 
@@ -922,6 +1087,79 @@ conversationOffsetHeld`(`:2931`)를 읽는 자리가 재배치 뒤에도 결과�
 (`grep -rn "rebuildProjectProjection(" packages/*/src --include=*.ts`), 그중 `reindexSearch`가
 `false`로 도는 것은 `capture-service.ts:314` **하나**다. 나머지 넷 중 둘은 `true`를 명시하고
 둘은 인자 없이 불러 `projection-store.ts:344`의 `opts.reindexSearch ?? true`로 `true`가 된다.
+
+### 부록 A-2 — 3라운드에서 새로 인용한 자리
+
+§Q3 후보1 실패 모드 1을 다섯 축으로 다시 가르고 §Q4 근거 3을 다시 쓰면서 새로 연 자리다. 기준은
+같다 — 착수 시점 `main`(= `23d9716`, 이 브랜치의 병합 커밋 `076dd2b` 기준선)에서 직접 열어
+대조했고, 맞은 것도 "맞음"으로 적는다.
+
+| 인용                               | 그 줄에 실제로 있는 것                                                                      | 대조 |
+| ---------------------------------- | ------------------------------------------------------------------------------------------- | ---- |
+| `projection-store.ts:99`           | `const SINGLETON_TABLES = ["projects", "memory_index"] as const;`                           | 맞음 |
+| `projection-store.ts:100-112`      | `ENTITY_TABLES` 배열 — 원소 11개, 마지막이 `:111` `"memories",`                             | 맞음 |
+| `projection-store.ts:269`          | `const REBUILD_STALE_HEAD_RETRIES = 2;`                                                     | 맞음 |
+| `projection-store.ts:355`          | `if (await attemptProjectionRebuild(projectId, reindexSearch)) return { committed: true };` | 맞음 |
+| `projection-store.ts:358`          | `return { committed: false };`                                                              | 맞음 |
+| `projection-store.ts:378`          | `const events = await readEvents(projectId);`                                               | 맞음 |
+| `projection-store.ts:383`          | `const state = reduceProjectState(events, projectId);`                                      | 맞음 |
+| `projection-store.ts:412`          | `const content = await readJson<{ title?: string; body?: string }>(`                        | 맞음 |
+| `projection-store.ts:424`          | `const writeAll = db.transaction(() => {`                                                   | 맞음 |
+| `projection-store.ts:441`          | `if ((headEventId(db) ?? null) !== snapshotHead) return;`                                   | 맞음 |
+| `projection-store.ts:442-446`      | `memory_access`를 두 목록에서 뺀 이유를 적은 주석                                           | 맞음 |
+| `projection-store.ts:447`          | `for (const table of [...SINGLETON_TABLES, ...ENTITY_TABLES]) {`                            | 맞음 |
+| `projection-store.ts:448`          | 위 루프의 본문 — 템플릿 리터럴로 `DELETE FROM <table>`을 `prepare(...).run()`               | 맞음 |
+| `projection-store.ts:468`          | `db.prepare("DELETE FROM search_fts").run();`                                               | 맞음 |
+| `projection-store.ts:470-473`      | `const insertSearch = db.prepare(` … `);`                                                   | 맞음 |
+| `projection-store.ts:480`          | `if (reindexSearch && text) insertSearch.run({ entityId, kind, sourceProjectId, text });`   | 맞음 |
+| `projection-store.ts:641`          | `const insertObservation = db.prepare(`                                                     | 맞음 |
+| `projection-store.ts:645`          | `for (const observation of Object.values(state.observations)) {`                            | 맞음 |
+| `projection-store.ts:656`          | `const insertMemory = db.prepare(`                                                          | 맞음 |
+| `projection-store.ts:664`          | `for (const memory of Object.values(state.memories)) {`                                     | 맞음 |
+| `projection-store.ts:688`          | `indexEntity(memory.id, "memory", searchText([memory.text]), sourceProjectId);`             | 맞음 |
+| `projection-store.ts:704`          | `for (const seg of listSegments(projectId, "union")) {`                                     | 맞음 |
+| `projection-store.ts:705`          | `indexEntity(seg.id, "segment", seg.text, seg.sourceProjectId ?? null);`                    | 맞음 |
+| `projection-store.ts:727`          | `db.prepare("DELETE FROM meta WHERE key = ?").run(SEARCH_REINDEX_PENDING_META_KEY);`        | 맞음 |
+| `projection-store.ts:731`          | `writeAll.immediate();`                                                                     | 맞음 |
+| `projection-store.ts:1014`         | `export function listValidMemories(`                                                        | 맞음 |
+| `projection-store.ts:1024`         | `listValidMemories`의 WHERE — `memories.invalid_at IS NULL` + `laneWhere(lane)`             | 맞음 |
+| `storage/fs-utils.ts:94`           | `if (isEnoent(error)) {`                                                                    | 맞음 |
+| `storage/fs-utils.ts:97`           | `throw error;` (ENOENT만 삼키고 나머지는 다시 던진다)                                       | 맞음 |
+| `embeddings-service.ts:88`         | `export async function ensureEmbeddings(`                                                   | 맞음 |
+| `embeddings-service.ts:93`         | `if (!embedder) return { embedded: 0 };`                                                    | 맞음 |
+| `embeddings-service.ts:95`         | `const memories = listValidMemories(projectId).map((row) => row.memory);`                   | 맞음 |
+| `embeddings-service.ts:101-107`    | `const stale = memories.filter((memory) => {` … `if (stale.length === 0) return …`          | 맞음 |
+| `embeddings-service.ts:116`        | `upsertEmbedding(projectId, {`                                                              | 맞음 |
+| `embeddings-service.ts:151`        | `function upsertSegmentEmbeddingIfLive(projectId: string, embedding: StoredEmbedding)…`     | 맞음 |
+| `embeddings-service.ts:170`        | `export async function ensureSegmentEmbeddings(`                                            | 맞음 |
+| `embeddings-service.ts:175`        | `if (!embedder) return { embedded: 0 };`                                                    | 맞음 |
+| `embeddings-service.ts:182`        | `const segments = listSegments(projectId);`                                                 | 맞음 |
+| `embeddings-service.ts:203`        | `const wrote = upsertSegmentEmbeddingIfLive(projectId, {`                                   | 맞음 |
+| `consolidate-service.ts:2422-2427` | #298이 `existing`을 SQL에서 로그 fold로 옮긴 사실을 적은 주석                               | 맞음 |
+| `consolidate-service.ts:2428`      | `const existing = Object.values(state.memories).filter(`                                    | 맞음 |
+| `consolidate-service.ts:2819-2824` | `:2858`의 반환값을 버리는 것이 판단임을 적은 #282 주석                                      | 맞음 |
+| `consolidate-service.ts:2829-2833` | 투영 테이블은 아무 리빌드나 채우고 `search_fts`는 `true` 리빌드만 채운다는 주석             | 맞음 |
+| `consolidate-service.ts:2865`      | `await ensureEmbeddings(params.projectId, params.embedder);`                                | 맞음 |
+| `consolidate-service.ts:2884`      | `if (segmentsWritten > 0) {`                                                                | 맞음 |
+| `consolidate-service.ts:2885`      | `await ensureSegmentEmbeddings(params.projectId, params.embedder);`                         | 맞음 |
+| `contradiction-service.ts:287`     | `appended = await appendEvents<MemorySupersededPayload \| Conflict>(`                       | 맞음 |
+| `contradiction-service.ts:345`     | `if (results.length > 0) {`                                                                 | 맞음 |
+| `search-service.ts:169`            | `const scores = await semanticMemoryScores(projectId, query, embedder);`                    | 맞음 |
+| `search-service.ts:172`            | `listValidMemories(projectId).map((row) => [row.memory.id, row.memory.text]),`              | 맞음 |
+| `memory-retrieval-service.ts:129`  | `for (const row of listValidMemories(projectId)) {`                                         | 맞음 |
+
+**직접 센 것 둘.**
+
+(1) **로그의 메모리를 `memories` 테이블로 투영하는 `INSERT`는 하나다.**
+`grep -rn "INTO memories" packages/*/src --include=*.ts`는 **2건**을 준다 — 세지 말고 둘 다 열었다.
+`projection-store.ts:657`이 `writeAll` 안의 그 `INSERT`(루프는 `:664`)이고,
+`storage/db.ts:825`는 v17 마이그레이션이 `memories_new`를 만들어 **기존 행을 그대로 옮겨 담고**
+`RENAME`하는 스키마 재작성이다(`db.ts:809-834`) — 로그에서 행을 만들어 내지 않으므로 회수
+자리가 아니다. 즉 (나-1)의 「다시 채우는 쓰기 자리」는 `:657`/`:664` 하나다.
+
+(2) **`writeAll` 안에서 `reindexSearch`가 게이트하는 자리는 둘뿐이다** — `:467`(FTS 와이프)과
+`:480`(`indexEntity`의 삽입). `:447-448`의 DELETE 루프와 그 아래 재적재는 게이트 밖이다.
+이것이 (나-1)과 (나-2)의 상한이 갈리는 근거다.
 
 ## 부록 B — better-sqlite3 실측
 
