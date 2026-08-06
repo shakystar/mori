@@ -5,7 +5,7 @@ import {
   type AgentTool,
   type StreamFn,
 } from "@earendil-works/pi-agent-core";
-import type { CredentialStore } from "@earendil-works/pi-ai";
+import type { CredentialStore, MutableModels } from "@earendil-works/pi-ai";
 import type { MemoryKernel } from "@mori/kernel";
 import { createMoriModels } from "./model-wiring.js";
 import {
@@ -45,6 +45,19 @@ export interface CreateMoriAgentOptions {
    */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- AgentTool<TArgs> erasure for a heterogeneous tool array
   tools?: AgentTool<any>[];
+  /**
+   * Test seam: the `Models` this agent resolves its model and streaming through, in
+   * place of building one via `createMoriModels(env, credentialStore)`. `cli/runtime.ts`'s
+   * `prepareAgent` passes its own `models` (real, or the `RunCliDeps.models` test seam)
+   * here so the auth gate and the turn always see the same instance — see `cli/types.ts`'s
+   * `models` doc for why that identity matters. Unset — the default at every non-test call
+   * site — builds a fresh instance exactly as before this seam existed.
+   *
+   * Setting it leaves the `credentialStore` argument unused by this function: the injected
+   * instance already carries whichever store it was built from. Build it from that same
+   * store, or the agent resolves auth against one store while its caller believes another.
+   */
+  models?: MutableModels;
 }
 
 export function createMoriAgent(
@@ -54,7 +67,7 @@ export function createMoriAgent(
   streamFn?: StreamFn,
   options: CreateMoriAgentOptions = {},
 ): Agent {
-  const models = createMoriModels(env, credentialStore);
+  const models = options.models ?? createMoriModels(env, credentialStore);
 
   const { providerId, modelId } = resolveProviderSelection(env);
   if (!supportedProviderIds(env).includes(providerId)) {
