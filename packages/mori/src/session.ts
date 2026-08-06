@@ -45,12 +45,21 @@ export interface MoriSession {
    * `agent.prompt` itself follows (see cli/repl.ts's equivalent check after every turn).
    */
   prompt(text: string): Promise<MoriSessionTurn>;
-  /** Runs a manual consolidation boundary now — the SDK equivalent of the REPL's `/consolidate` (cli/repl.ts). */
+  /**
+   * Runs a manual consolidation boundary now — the SDK equivalent of the REPL's `/consolidate`
+   * (cli/repl.ts). Throws once `close()` has been called, same table as `prompt()`.
+   */
   consolidate(signal?: AbortSignal): Promise<ExplicitConsolidateOutcome>;
   /**
    * Settles queued observations and runs the session-end consolidation trigger. Call once, at
    * episode end, in place of the process exit that does this for the CLI (cli/runtime.ts's
-   * `runPrompt`, index.ts's REPL exit path). Idempotent — a later call is a no-op.
+   * `runPrompt`, index.ts's REPL exit path).
+   *
+   * Idempotent under concurrency, not just in sequence: every call — first or Nth, awaited
+   * back-to-back or fired off in parallel — shares the same underlying settle and returns once
+   * `drain()` and the session-end boundary have actually finished, never before. If that settle
+   * throws, every caller (past and future) sees the same rejection; a cleanup failure never
+   * quietly reads as "closed".
    */
   close(): Promise<void>;
 }
@@ -88,15 +97,22 @@ export async function createMoriSession(
   if (!prepared.ok) return prepared;
 
   const { agent, kernel, llm, projectId } = prepared;
-  let closed = false;
+  // In-flight/settled close(), not a boolean: a second call — concurrent or later — must
+  // observe the *same* settle as the first, not a premature "done" while drain()/session-end
+  // are still running (owner review, PR #350).
+  let closePromise: Promise<void> | undefined;
+
+  function assertOpen(method: string): void {
+    if (closePromise) {
+      throw new Error(`mori: session is closed — ${method}() cannot be called after close()`);
+    }
+  }
 
   return {
     ok: true,
     session: {
       async prompt(text: string): Promise<MoriSessionTurn> {
-        if (closed) {
-          throw new Error("mori: close()된 session에는 더 이상 prompt()를 호출할 수 없습니다.");
-        }
+        assertOpen("prompt");
 
         const before = agent.state.messages.length;
         await agent.prompt(text);
@@ -112,17 +128,27 @@ export async function createMoriSession(
         };
       },
 
-      consolidate(signal?: AbortSignal): Promise<ExplicitConsolidateOutcome> {
+      async consolidate(signal?: AbortSignal): Promise<ExplicitConsolidateOutcome> {
+        // `async` (not a bare passthrough) so `assertOpen`'s throw rejects the returned
+        // promise instead of escaping synchronously — the same failure shape `prompt()` gives.
+        assertOpen("consolidate");
         return consolidateExplicit(kernel, llm, signal);
       },
 
-      async close(): Promise<void> {
-        if (closed) return;
-        closed = true;
-        // Same ordering as runPrompt's finally (cli/runtime.ts): drain queued observations
-        // before the session-end trigger, so the boundary sees everything this episode did.
-        await kernel.drain();
-        await consolidateOnSessionEnd(kernel, sessionEndLlm(llm, projectId), stderr);
+      close(): Promise<void> {
+        // Assigning the promise synchronously — before any `await` runs — is what makes this
+        // safe under concurrency: a second `close()` that arrives before the first has settled
+        // still sees `closePromise` already set (there is no gap where two calls could each
+        // start their own drain()) and returns that exact promise. A rejection stays cached
+        // as-is rather than being retried or swallowed — surfacing the same cleanup failure to
+        // every caller is what stops "closed" from lying about the state of the world.
+        closePromise ??= (async () => {
+          // Same ordering as runPrompt's finally (cli/runtime.ts): drain queued observations
+          // before the session-end trigger, so the boundary sees everything this episode did.
+          await kernel.drain();
+          await consolidateOnSessionEnd(kernel, sessionEndLlm(llm, projectId), stderr);
+        })();
+        return closePromise;
       },
     },
   };

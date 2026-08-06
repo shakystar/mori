@@ -171,7 +171,7 @@ describe("createMoriSession (#341)", () => {
     expect(kernel.consolidateCalls).toBe(0);
   });
 
-  it("close() is idempotent and rejects a prompt() called after it", async () => {
+  it("close() shares one in-flight settle across concurrent calls, and closes prompt()/consolidate() to further calls (PR #350 owner review)", async () => {
     const kernel = spyKernel();
     const provider = scriptedProvider([{ text: "ok" }]);
 
@@ -183,10 +183,14 @@ describe("createMoriSession (#341)", () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
 
-    await result.session.close();
-    await result.session.close();
+    // Fired concurrently, not awaited one after the other: both must observe the same
+    // drain()/session-end settle rather than the second racing ahead of the first's cleanup.
+    const [first, second] = await Promise.all([result.session.close(), result.session.close()]);
+    expect(first).toBeUndefined();
+    expect(second).toBeUndefined();
     expect(kernel.drainCalls).toBe(1);
 
     await expect(result.session.prompt("too late")).rejects.toThrow(/close/);
+    await expect(result.session.consolidate()).rejects.toThrow(/close/);
   });
 });
