@@ -60,12 +60,12 @@ export async function resolveConflict(params: ResolveConflictParams): Promise<Co
   //   - Inside the kernel seam (like `observe`/`consolidate`, which take
   //     `withProjectLock` at sqlite-memory-kernel.ts:724/:794 and pass a signal
   //     down): the lock belongs to the kernel, not here. Take a `signal` param
-  //     and check it, as capture-service.ts:291 does.
+  //     and check it, as packages/kernel/src/services/capture-service.ts:291 does.
   //   - Outside that seam (like `importMemories`): the shape is
   //     memory-import-service.ts's — a per-project mutex (packages/kernel/src/services/memory-import-service.ts:85), a LOG-derived
-  //     basis (packages/kernel/src/services/memory-import-service.ts:210-230) replacing the `getConflict` read below, and
+  //     basis (packages/kernel/src/services/memory-import-service.ts:234-254) replacing the `getConflict` read below, and
   //     `appendEvents(projectId, inputs, { expectedHead })` with a pre-append
-  //     retry (packages/kernel/src/services/memory-import-service.ts:239-273).
+  //     retry (packages/kernel/src/services/memory-import-service.ts:263-297).
   // Adding `expectedHead` ALONE does not close it: the basis below is the
   // `conflicts` projection, and a CAS pass says only that the log did not move
   // — not that the projection was fresh (#301 §Q1.8, PR #299 review). Whichever

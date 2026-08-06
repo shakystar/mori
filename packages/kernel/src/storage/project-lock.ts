@@ -744,7 +744,7 @@ async function detachAndJudge(
  * store": `projectStoreExists` keys off the DATABASE file, and every caller of
  * this function is on its way to `ensureProjectDirectories` in the same breath.
  * A session that captures nothing and consolidates nothing never gets here at
- * all, which is what keeps the read-only-turn guarantee (README.md:139-141) intact.
+ * all, which is what keeps the read-only-turn guarantee (README.md:140-142) intact.
  *
  * NOT reentrant. A holder must not call back into this function for the same
  * project — see `SqliteMemoryKernel.consolidateWithResult`, which drains its
