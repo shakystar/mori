@@ -1,7 +1,12 @@
 import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Agent, type AgentEvent, type AgentMessage, type StreamFn } from "@earendil-works/pi-agent-core";
+import {
+  Agent,
+  type AgentEvent,
+  type AgentMessage,
+  type StreamFn,
+} from "@earendil-works/pi-agent-core";
 import type {
   AssistantMessage,
   AssistantMessageEvent,
@@ -502,7 +507,9 @@ describe("bash/edit_file tool-level executionMode: sequential (#320)", () => {
       });
       agent.subscribe((event) => {
         if (event.type === "tool_execution_start" || event.type === "tool_execution_end") {
-          events.push(`${event.type === "tool_execution_start" ? "start" : "end"}:${event.toolName}`);
+          events.push(
+            `${event.type === "tool_execution_start" ? "start" : "end"}:${event.toolName}`,
+          );
         }
       });
 
