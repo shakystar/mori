@@ -198,6 +198,10 @@ export function createEditFileTool(
       "Fails without changing the file if oldString doesn't match exactly once (pass replaceAll to replace every " +
       "occurrence instead). To create a new file, pass an empty oldString for a path that doesn't exist yet.",
     parameters: editFileParameters,
+    // Performs its own read-modify-write cycle with no isolation; running it concurrently
+    // with another tool call risks racing on the same file. See bash.ts's executionMode
+    // comment — same tool-level equivalent of agent/index.ts's `toolExecution: "sequential"`.
+    executionMode: "sequential",
     execute: async (_toolCallId, params: Static<typeof editFileParameters>) => {
       const result = editFile(
         root,

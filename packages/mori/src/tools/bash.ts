@@ -82,6 +82,12 @@ export function createBashTool(
       "Commands are killed at the timeout and long output is truncated. stdin is not connected, " +
       "so interactive commands fail instead of hanging.",
     parameters: bashParameters,
+    // Not a sandbox (arbitrary reads/writes anywhere the host user can reach) — running it
+    // concurrently with another tool call risks racing on the same files with no isolation
+    // to fall back on. This is the tool-level equivalent of the agent-level
+    // `toolExecution: "sequential"` in agent/index.ts; the two overlap by OR (pi forces the
+    // whole batch sequential if either says so), so this alone does not change behavior yet.
+    executionMode: "sequential",
     execute: async (_toolCallId, params: Static<typeof bashParameters>, signal?: AbortSignal) => {
       // The model can ask for a shorter timeout, never a longer one — otherwise a
       // single tool call could park a process for hours.
