@@ -226,10 +226,10 @@
 - **원인 2 — 리빌드 자체의 재시도 소진 (`committed: false`, #270).**
   `rebuildProjectProjection`은 스냅샷 CAS가 지면 최대 `REBUILD_STALE_HEAD_RETRIES`
   (2)회 재시도하고, 그래도 지면 **던지지 않고** `{ committed: false }`를 반환한다
-  (`projection-store.ts:283-295`) — 락 상실과 무관하게, 동시 writer가 많아 로그가
+  (`projection-store.ts:351-358`) — 락 상실과 무관하게, 동시 writer가 많아 로그가
   계속 움직이기만 해도 일어난다. `captureObservation`은 이 반환값을 검사하지 않고
   버린다(`:314`) — 주석 자신이 "callers that ignore the result keep the pre-#270
-  behavior"라고 적는다(`projection-store.ts:238-239`). 즉 체크포인트②를 무사히
+  behavior"라고 적는다(`projection-store.ts:243-244`). 즉 체크포인트②를 무사히
   지나 예외가 하나도 나지 않아도, 이 캡처의 리빌드가 조용히 반영되지 않은 채 끝날
   수 있다.
 - 두 원인 모두 결과는 같다 — `listRecentObservations`가 읽는 것은 로그가 아니라
@@ -278,8 +278,8 @@ append된 **뒤에만** 전진하고, 커서 커밋은 `run()`의 가장 마지�
 
 **락 상실 두 등급의 차이가 폴백의 값을 바꾼다.** `withProjectLock`은 브레이크가 아니라
 보고다 — `fn`이 settle한 **뒤에** `ProjectLockCompromisedError`를 던진다
-(`project-lock.ts:814-822`). 체크포인트는 넷뿐이고 전부 append 앞쪽이며, 커서 커밋은
-꼬리의 **END**이고 그 앞에는 체크포인트가 **없다** (`consolidate-service.ts:2650-2660`의
+(`project-lock.ts:817-826`). 체크포인트는 넷뿐이고 전부 append 앞쪽이며, 커서 커밋은
+꼬리의 **END**이고 그 앞에는 체크포인트가 **없다** (`consolidate-service.ts:2916-2919`의
 #211 주석). 그래서 탈취당했지만 체크포인트를 하나도 만나지 않은 홀더는 리빌드·임베딩·
 모순 판정·커서 커밋까지 끝까지 돈다. 그 경우 _"승자가 그 창을 가져간다"_ 는 성립하지
 않는다 — 패자가 이미 그 창을 증류해 두었을 수 있기 때문이다. 이 등급에서 폴백이 실제로
@@ -307,7 +307,7 @@ append된 **뒤에만** 전진하고, 커서 커밋은 `run()`의 가장 마지�
 
 ### 4.1 오늘의 실물 셋
 
-**(a) `withProjectLock`의 성격** (`storage/project-lock.ts:735-760` + 모듈 doc).
+**(a) `withProjectLock`의 성격** (`storage/project-lock.ts:739-760` + 모듈 doc).
 
 - 프로젝트 단위·크로스 프로세스 상호배제. `mkdir` 원자성 + "detach, then judge" 이전
   규칙.
@@ -319,7 +319,7 @@ append된 **뒤에만** 전진하고, 커서 커밋은 `run()`의 가장 마지�
   그만큼 길어질 뿐이다.
 - 통보 지연: 하트비트 주기 `LOCK_HEARTBEAT_MS = 5_000`ms, stale 판정
   `LOCK_STALE_MS = 30_000`ms, 획득 타임아웃 `LOCK_ACQUIRE_TIMEOUT_MS = 60_000`ms
-  (`project-lock.ts:479-497`). **신호는 실제 탈취보다 최대 1 하트비트 늦다.**
+  (`project-lock.ts:483-501`). **신호는 실제 탈취보다 최대 1 하트비트 늦다.**
 - 체크포인트는 네 개뿐이고 전부 경계 앞쪽에 있다 (워터마크 전용 noop 커밋 앞, 추출
   호출 앞(요청 안으로 전달), raw 세그먼트 쓰기 앞, `memory.consolidated` append 앞 —
   `project-lock.ts:100-107`).
@@ -330,10 +330,10 @@ append된 **뒤에만** 전진하고, 커서 커밋은 `run()`의 가장 마지�
 `project-lock.ts:194-203`).
 
 **(c) 로그 append의 compare-and-append (#253)** — `run()`의 첫 문장에서 읽은
-`expectedHead`를 `memory.consolidated` append에 건다 (`consolidate-service.ts:2141`,
-`2466`). `expectedHead`를 읽은 **뒤에** 로그가 움직였으면 그 배치는 랜딩하지 않는다.
+`expectedHead`를 `memory.consolidated` append에 건다 (`consolidate-service.ts:2239`,
+`2693`). `expectedHead`를 읽은 **뒤에** 로그가 움직였으면 그 배치는 랜딩하지 않는다.
 **이 문서는 이것을 이중 증류에 대한 전제로 쓰지 않는다** — 코드 주석 자신이 무엇을 못
-잡는지 적어 두었기 때문이다 (`consolidate-service.ts:2437-2465`): CAS가 비교하는 것은
+잡는지 적어 두었기 때문이다 (`consolidate-service.ts:2657-2672`): CAS가 비교하는 것은
 로그의 움직임이지 판단 근거(`watermark` / `consumedObservationIds`)의 신선도가 아니고,
 둘은 서로 다른 시점에 따라잡는다. 그 부분집합은 아래 W4로 남는다 (#263).
 
@@ -354,7 +354,7 @@ append된 **뒤에만** 전진하고, 커서 커밋은 `run()`의 가장 마지�
 ```
 $ grep -n "UNSAFE" packages/kernel/src/storage/project-lock.ts
 172: *   than a rebuild that did not happen. Still UNSAFE for the READER, and
-181: * - `detectContradictions` — UNSAFE: runs after `ensureEmbeddings` (reads its
+183: * - `detectContradictions` — UNSAFE: runs after `ensureEmbeddings` (reads its
 ```
 
 두 건이 전부다. 각각이 compaction 경로(백그라운드 증류 ↔ 라이브 세션)에 걸리는지 판정한다.
