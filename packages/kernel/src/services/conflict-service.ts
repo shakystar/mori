@@ -58,7 +58,7 @@ export async function resolveConflict(params: ResolveConflictParams): Promise<Co
   // the whole defect, not a follow-up. Which shape depends on where that caller
   // sits, and #301 §Q3 priced all four:
   //   - Inside the kernel seam (like `observe`/`consolidate`, which take
-  //     `withProjectLock` at sqlite-memory-kernel.ts:724/:794 and pass a signal
+  //     `withProjectLock` at packages/kernel/src/kernel/sqlite-memory-kernel.ts:724 and packages/kernel/src/kernel/sqlite-memory-kernel.ts:794, then pass a signal
   //     down): the lock belongs to the kernel, not here. Take a `signal` param
   //     and check it, as packages/kernel/src/services/capture-service.ts:291 does.
   //   - Outside that seam (like `importMemories`): the shape is
