@@ -1,0 +1,129 @@
+name: Line citation advisory
+
+# 크로스파일 줄 인용은 이 리포에서 세 PR 연속으로 낡았고(#276·#299·#302), 원인은 인용의
+# 형태가 아니라 **파괴자와 인용자가 다른 PR**이라는 것이다
+# (docs/line-citation-staleness-adjudication.md §Q2·§Q3.5). 그래서 이 잡은 인용을 고치는 쪽이
+# 아니라 **대상 파일을 만지는 PR**에 말을 건다: PR head 트리의 `packages/`에서 ㉠ 계열 인용을
+# 뽑아, 그 인용의 대상 파일이 이 PR의 diff에 들었으면 코멘트 하나를 남긴다(있으면 갱신).
+#
+# **advisory다.** 실패로 표시하지 않고 required check로도 만들지 않는다 — 경고를 받은 PR이
+# 그 인용을 고치는 것은 선택이고, 판정은 사람이 한다 (§Q4). 별도 워크플로이므로 이 잡이
+# 빨강이어도 `build-and-test`의 결론에는 관여하지 않는다.
+#
+# 추출·판정 로직은 .github/scripts/citation-extract.mjs와 citation-advisory-report.sh에 있고
+# citation-extract.test.sh가 검증한다 (`pnpm test:ci-scripts`).
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+concurrency:
+  group: citation-advisory-${{ github.ref }}
+  cancel-in-progress: true
+
+# 기본값에 기대지 않고 최소 권한을 명시한다 (recheck-open-prs.yml과 같은 규율).
+permissions:
+  contents: read
+
+jobs:
+  advise:
+    name: Cross-file line citations
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      # 스크립트는 **기본 브랜치**에서 가져온다. PR head에서 가져오면 PR이 추출기를 고쳐
+      # 자기 자신에 대한 경고를 지울 수 있다 — advisory라 게이트는 아니지만, 검사 대상이
+      # 검사기를 들고 있는 구조는 만들지 않는다 (recheck-open-prs.yml의 같은 선례).
+      - name: Checkout scripts from the default branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          sparse-checkout: .github/scripts
+          path: trusted
+
+      # 기본 브랜치에 스크립트가 아직 없으면(이 워크플로를 처음 들여오는 PR이 그 상태다)
+      # 조용히 넘어가지 않고 이유만 밝히고 죽는다. 이 잡은 게이트가 아니므로 죽어도 아무
+      # PR을 막지 않지만, 침묵은 "인용이 없다"와 구분되지 않는다.
+      - name: Verify the trusted extractor exists
+        env:
+          TRUSTED_REF: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          for f in citation-extract.mjs citation-advisory-report.sh; do
+            if [ ! -f "trusted/.github/scripts/$f" ]; then
+              echo "::error::신뢰 ref(${TRUSTED_REF})에 .github/scripts/${f}가 없습니다. 이 워크플로를 들여오는 PR이 아직 머지되지 않았다면 정상이며, 머지되면 이 경로가 성립합니다."
+              exit 1
+            fi
+          done
+
+      # 인용은 **PR head 트리**에서 뽑는다. base에서 뽑으면 인용과 그 인용을 낡게 만든 편집이
+      # 같은 PR에 들어 있는 형태를 못 본다 — 실측으로 탐지가 10/11에서 8/11로 떨어진다
+      # (§Q3.5-a의 `e1dcba3`). pull_request 이벤트의 기본 ref는 머지 커밋이라 head와 다르므로
+      # head.sha로 못 박는다. 이 트리는 데이터로만 읽는다 (아무것도 실행하지 않는다).
+      - name: Checkout the PR head tree
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: head
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.1
+
+      - name: Collect the PR's changed files
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          # `previous_filename`까지 뽑는 것이 요점이다: 리네임된 파일에 GitHub은
+          # status="renamed" · filename=**새 경로** · previous_filename=**옛 경로**를 주므로,
+          # filename만 받으면 옛 경로가 목록에 아예 안 들어온다. 인용은 옛 경로를 가리키고
+          # 있으니 대조할 상대가 없어 두 겹으로 놓친다 (PR #351 owner 수정요청 1).
+          # 삭제된 파일은 filename이 곧 사라진 경로라 그대로 들어온다.
+          gh api --paginate "repos/${REPO}/pulls/${PR}/files?per_page=100" \
+            --jq '.[] | .filename, (.previous_filename // empty)' >changed.txt
+          count=$(wc -l <changed.txt)
+          echo "변경 파일 ${count}건"
+          # 파일 0건인 PR은 없다. 0이면 조회가 잘못된 것이고, 그대로 두면 "경고 0건"과
+          # 구분되지 않는다 — 침묵 대신 죽는다.
+          if [ "$count" -eq 0 ]; then
+            echo "::error::PR의 변경 파일 목록이 비었습니다 — 조회 실패로 보고 중단합니다 (침묵하면 경고 0건과 구분되지 않습니다)."
+            exit 1
+          fi
+
+      - name: Extract citations and intersect with the diff
+        id: extract
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          extract() { node trusted/.github/scripts/citation-extract.mjs --root head --changed changed.txt "$@"; }
+          extract --format json --out result.json
+          extract --format markdown --head-sha "$HEAD_SHA" --out body.md
+          extract --format text --out summary.txt
+          count=$(jq '.warnings | length' result.json)
+          echo "count=${count}" >>"$GITHUB_OUTPUT"
+          # 전수·미해결·경고를 전부 잡 요약에 남긴다. 코멘트는 경고만 싣지만, "대상을 풀지
+          # 못한 인용"은 곧 조용히 놓치는 인용이므로 어딘가에는 반드시 보여야 한다.
+          {
+            echo "### 줄 인용 advisory"
+            echo
+            echo '```'
+            cat summary.txt
+            echo '```'
+          } >>"$GITHUB_STEP_SUMMARY"
+
+      - name: Report
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          WARN_COUNT: ${{ steps.extract.outputs.count }}
+          BODY_FILE: body.md
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: bash trusted/.github/scripts/citation-advisory-report.sh
