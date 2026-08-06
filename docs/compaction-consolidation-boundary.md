@@ -454,7 +454,7 @@ $ grep -n "UNSAFE" packages/kernel/src/storage/project-lock.ts
   `SqliteMemoryKernel.transformContext`는 주입 성공 후 `memory.injected`를 **프로젝트
   락·체인 밖에서** append한다(`sqlite-memory-kernel.ts:612-623`). `appendEvents(...,
 { expectedHead })`는 경계가 head를 읽은 뒤 로그가 움직이면 그 배치를 거부하므로
-  (`consolidate-service.ts:2141, 2466`), 세션이 살아 있는 동안의 라이브 주입 append가
+  (`consolidate-service.ts:2239, 2693`), 세션이 살아 있는 동안의 라이브 주입 append가
   백그라운드 post-compact 경계의 CAS를 조용해지거나 세션이 끝날 때까지 반복 실패시킬
   수 있다. C1–C4는 **경계끼리의** 겹침만 직렬화하므로 이 경로는 막지 않는다 — 방향은
   창을 **늘리는** 쪽이고, §2.1이 이미 `t2`를 "완주하는 캡처·경계가 오는 한"으로 한정한
