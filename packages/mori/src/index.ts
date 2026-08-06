@@ -13,9 +13,22 @@ import {
   supportedProviderIds,
   unknownProviderMessage,
 } from "./agent/provider-selection.js";
+import { createMoriSession } from "./session.js";
+import type {
+  CreateMoriSessionResult,
+  ExplicitConsolidateOutcome,
+  MoriSession,
+  MoriSessionTurn,
+} from "./session.js";
 
-export { unauthenticatedMessage };
-export type { RunCliDeps };
+export { unauthenticatedMessage, createMoriSession };
+export type {
+  RunCliDeps,
+  CreateMoriSessionResult,
+  ExplicitConsolidateOutcome,
+  MoriSession,
+  MoriSessionTurn,
+};
 
 export async function runCli(
   argv: string[],
