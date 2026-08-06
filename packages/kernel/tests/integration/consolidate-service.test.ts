@@ -2195,7 +2195,14 @@ describe("consolidate — atomic boundary cursor commit (#139)", () => {
 // of them was computed used to lose it from the failed attempt row, exactly
 // when the signal matters most (memories/segments already durable, and the
 // record that should explain that state carries only `error`).
-describe("consolidate — run()'s side telemetry survives a failure past the point it was computed (#232)", () => {
+//
+// #331 extends the same fix to `consolidated`: it used to reach the attempt
+// row only on the `outcome === "ok"` success path, so a boundary that
+// appended N memories and then failed in the tail (rebuild/embeddings/cursor
+// commit) recorded a failed attempt with `consolidated` absent —
+// indistinguishable from "extracted nothing" to a reader of
+// `getConsolidationStatus`.
+describe("consolidate — run()'s side telemetry survives a failure past the point it was computed (#232, #331)", () => {
   it("records extractionTruncated on the failed attempt when the boundary fails after appendEvents", async () => {
     await seedObservation("decided x");
     const oversized = "x".repeat(PER_ITEM_MAX_CHARS + 100);
@@ -2263,7 +2270,42 @@ describe("consolidate — run()'s side telemetry survives a failure past the poi
     db.exec("DROP TRIGGER mori_test_boom_232b");
   });
 
-  it("leaves both fields absent when the failure precedes either being computed", async () => {
+  it("records consolidated on the failed attempt when the boundary fails after appendEvents lands", async () => {
+    await seedObservation("decided x");
+    // Two items (not one) so the assertion below can only pass if the real
+    // count survived the failure — a boolean-shaped bug (e.g. mirroring
+    // `extracted.length > 0` instead of the count) would still read `true`ish
+    // but fail an `.toBe(2)` check.
+    const llm = fakeLlm([
+      JSON.stringify([
+        { kind: "decision", text: "first decision", salience: 5 },
+        { kind: "decision", text: "second decision", salience: 5 },
+      ]),
+    ]);
+
+    // Same injection technique as the extractionTruncated test above: forces
+    // the cursor commit (after appendEvents/rebuildProjectProjection) to
+    // fail, so the `memory.consolidated` append has already landed by the
+    // time run() throws.
+    const db = getDb(projectId);
+    db.exec(
+      "CREATE TRIGGER mori_test_boom_331 BEFORE INSERT ON meta " +
+        "WHEN NEW.key = 'cls_consolidate_watermark' " +
+        "BEGIN SELECT RAISE(ABORT, 'injected #331 test failure'); END;",
+    );
+
+    await expect(consolidate({ projectId, actor: "test", llm })).rejects.toThrow(
+      /injected #331 test failure/,
+    );
+
+    const attempt = readLastConsolidateAttempt(projectId);
+    expect(attempt?.outcome).toBe("error");
+    expect(attempt?.consolidated).toBe(2);
+
+    db.exec("DROP TRIGGER mori_test_boom_331");
+  });
+
+  it("leaves all three fields absent when the failure precedes any of them being computed", async () => {
     await seedObservation("decided x");
     const consolidator: Consolidator = {
       async extract() {
@@ -2279,6 +2321,7 @@ describe("consolidate — run()'s side telemetry survives a failure past the poi
     expect(attempt?.outcome).toBe("error");
     expect(attempt?.extractionTruncated).toBeUndefined();
     expect(attempt?.conversationSliceHeld).toBeUndefined();
+    expect(attempt?.consolidated).toBeUndefined();
   });
 });
 
