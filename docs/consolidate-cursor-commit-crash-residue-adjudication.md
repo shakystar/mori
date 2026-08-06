@@ -8,11 +8,16 @@ owner가 인터리브를 실물로 재확인했다. 이 문서는 그 잔여의 
 **이 문서는 산정이다.** `packages/` 아래 변경은 **0줄**이고 실행되는 코드도 0줄이다.
 결론은 §Q5의 후속 조각 목록으로 나간다.
 
-**기준선**: `main` = `c58d5c2`
+**기준선**: 라운드마다 갈리므로 **부록별로 적는다.** 부록 A·A-1은 `main` = `c58d5c2`
 (`docs(kernel): 낡힌 bare 줄번호 인용 전수 판정 — conflict-service.ts 14건 갱신 (#309 후속) (#312) (#323)`,
-`2026-08-06T11:10:10+09:00`).
-이 문서의 모든 `파일:줄` 인용은 **그 커밋에서 파일을 직접 열어 대조한 것**이다 — 이슈 본문,
-#310 문서, #189·#103 본문의 줄번호를 옮겨 적은 것은 하나도 없다. 대조표는
+`2026-08-06T11:10:10+09:00`), 부록 A-2는 `main` = `23d9716`, 부록 A-3은 `main` = `37a449d`
+(4라운드 착수 시점).
+이 문서의 각 `파일:줄` 인용은 **그것을 연 부록의 기준 커밋에서 파일을 직접 열어 대조한 것**이다
+— 이슈 본문, #310 문서, #189·#103 본문의 줄번호를 옮겨 적은 것은 하나도 없다.
+**선언을 「한 커밋에 대한 전칭」에서 「부록별 기준 커밋」으로 좁힌 것이 4라운드의 변경이다** —
+라운드마다 새 부록을 잇는 것이 이 문서의 관례이므로 전칭은 다음 라운드가 열리는 순간
+거짓이 되고, 실제로 부록 A-2가 이미 `c58d5c2`가 아닌 커밋에서 열렸다. 기준 커밋 선언 관례를
+리포 전역으로 확정하는 것은 #324의 몫이라 여기서는 이 문서 안에서만 좁혔다. 대조표는
 [부록 A](#부록-a--인용-대조표)에 전부 있다. 이 리포는 크로스파일 인용이 여섯 번 낡았고
 (#274·#276, #299, #300·#302, #306, #309, #312), 이 문서는 후속 판단의 입력이 되므로 틀린 인용이
 그대로 전파된다.
@@ -1322,6 +1327,57 @@ conversationOffsetHeld`(`:2931`)를 읽는 자리가 재배치 뒤에도 결과�
 (2) **`writeAll` 안에서 `reindexSearch`가 게이트하는 자리는 둘뿐이다** — `:467`(FTS 와이프)과
 `:480`(`indexEntity`의 삽입). `:447-448`의 DELETE 루프와 그 아래 재적재는 게이트 밖이다.
 이것이 (나-1)과 (나-2)의 상한이 갈리는 근거다.
+
+### 부록 A-3 — 4라운드에서 새로 인용한 자리
+
+§Q3 후보1 실패 모드 1에 **b6(커밋 뒤에 던지는 갈래)**과 (마) 축을 넣고 §Q3 후보3 「닫는 것」·
+§Q4 「차선」의 가드 hold 크레딧을 정정하면서 새로 연 자리다. 기준은 **4라운드 착수 시점
+`main` = `37a449d`**(`docs(kernel): 후보2·3 각하 근거를 코드 옆에 남긴다 … (#314) (#338)`)이고,
+맞은 것도 "맞음"으로 적는다. 부록 A·A-1·A-2는 이번 라운드에서 손대지 않았다.
+
+| 인용                               | 그 줄에 실제로 있는 것                                                                 | 대조 |
+| ---------------------------------- | -------------------------------------------------------------------------------------- | ---- |
+| `projection-store.ts:217`          | `function latestImportedRules(rules: Record<string, Rule>): Rule[] {`                  | 맞음 |
+| `projection-store.ts:389`          | `const importedRules = latestImportedRules(state.rules);`                              | 맞음 |
+| `projection-store.ts:394`          | `mustReadTopics: importedRules.map((rule) => ({`                                       | 맞음 |
+| `projection-store.ts:397`          | `path: getTopicFile(projectId, rule.id),`                                              | 맞음 |
+| `projection-store.ts:726`          | `if (reindexSearch) {` (바로 아래 `:727`이 마커 DELETE)                                | 맞음 |
+| `projection-store.ts:735`          | `if (!committed) return false;`                                                        | 맞음 |
+| `projection-store.ts:737-739`      | _"These are content artifacts on disk, not a projection table."_ 주석                  | 맞음 |
+| `projection-store.ts:740`          | `await Promise.all(`                                                                   | 맞음 |
+| `projection-store.ts:741`          | `Object.values(state.rules)`                                                           | 맞음 |
+| `projection-store.ts:742`          | `.filter((rule) => rule.source === "imported")`                                        | 맞음 |
+| `projection-store.ts:743`          | `.map((rule) =>`                                                                       | 맞음 |
+| `projection-store.ts:744`          | `writeJson(getTopicFile(projectId, rule.id), {`                                        | 맞음 |
+| `projection-store.ts:750`          | `);` — `Promise.all(...)`의 닫는 괄호 (즉 `:740-750`이 그 한 표현식)                   | 맞음 |
+| `storage/path-resolver.ts:84`      | `export function getTopicFile(projectId: string, topicId: string): string {`           | 맞음 |
+| `storage/fs-utils.ts:4`            | `import writeFileAtomic from "write-file-atomic";`                                     | 맞음 |
+| `storage/fs-utils.ts:82`           | `export async function writeJson(filePath: string, value: unknown): Promise<void> {`   | 맞음 |
+| `storage/fs-utils.ts:84`           | `await writeFileAtomic(filePath, ` … `, "utf8");`                                      | 맞음 |
+| `consolidate-service.ts:2755-2769` | #136 불변식 _"shown or stored, or else not consumed"_ 와 세 갈래를 적은 주석           | 맞음 |
+| `consolidate-service.ts:2777-2783` | #255 — `sliceFullyStored` 단독 정당화 갈래에만 가드를 단다는 주석                      | 맞음 |
+| `consolidate-service.ts:2788-2793` | _"no fallback offset to fall back to if the guard fails"_ — 되돌아갈 shown 접두가 없다 | 맞음 |
+| `consolidate-service.ts:2878`      | `await rebuildProjectProjection(params.projectId, { reindexSearch: true });`           | 맞음 |
+| `consolidate-service.ts:2885`      | `await ensureEmbeddings(params.projectId, params.embedder);`                           | 맞음 |
+| `consolidate-service.ts:2894`      | `await detectContradictions({`                                                         | 맞음 |
+| `consolidate-service.ts:2905`      | `await ensureSegmentEmbeddings(params.projectId, params.embedder);`                    | 맞음 |
+
+**직접 센 것 하나**: **토픽 `.md`를 쓰는 자리는 리포 전체에서 `projection-store.ts:744`
+하나다.** `grep -rn "getTopicFile" packages/*/src --include=*.ts`는 `src`에서 **4건**을 준다 —
+정의(`storage/path-resolver.ts:84`), import 문(`projection-store.ts:29`), 그리고 호출 둘:
+`:397`은 `mustReadTopics[].path`에 **경로 문자열만** 담고, `:413`은 `readJson`으로 **읽는다**.
+쓰는 것은 `:744` 하나다. 즉 (마)의 「다시 채우는 쓰기 자리」는 그 하나다.
+
+**발견(이 PR의 범위 밖) — 이 문서의 bare `:NNNN` 인용이 #314의 +20 이동을 안 받았다.**
+#314(`37a449d`)가 `consolidate-service.ts`에 주석 두 문단을 넣어 옛 `2536` 아래를 +20 밀었고,
+그 커밋이 `(consolidate-service|memory-import-service)\.ts:[0-9]+` **형태만** 갱신했다. 이
+문서에서 파일명을 붙인 인용(§Q1.1 표, 부록 A-1·A-2)은 그래서 새 값이지만, 파일명 없는 bare
+`:NNNN` 표기는 옛 값 그대로다 — 삽입점(옛 `2536`) 아래를 가리키는 낡은 bare 인용이 **42개 고유
+값·128건**이고(4라운드가 새로 쓴 `:2878`·`:2894`·`:2905`는 뺀 수다), 같은
+넷(`:2858`·`:2865`·`:2874`·`:2885`)이 파일명 붙은 표기(`:2878`·`:2885`·`:2894`·`:2905`)와
+문서 안에서 어긋난다. 4라운드는 **새로 쓴 자리에만** 새 값을 쓰고 파일명을 붙여 갈랐다.
+전수 갱신은 이 이슈의 완료 조건이 아니고, 그중 어느 것이 이력값이라 동결해야 하는지의 판별은
+#324가 계열로 다루는 자리이므로 여기서 관례를 앞질러 정하지 않는다.
 
 ## 부록 B — better-sqlite3 실측
 
