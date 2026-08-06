@@ -1537,7 +1537,14 @@ export interface ConsolidateAttempt {
    *  -1 when the attempt failed before the count was taken. */
   pendingObservations: number;
   durationMs: number;
-  /** memory.consolidated events appended (success only). */
+  /** memory.consolidated events THIS boundary appended. Set on a successful
+   *  ("ok") attempt, and — #331 — also on a FAILED attempt once the append
+   *  had already landed before the failure (e.g. the projection rebuild or
+   *  cursor commit throws afterward): `run()` mirrors the count the instant
+   *  the append succeeds, same mechanism as `conversationSliceHeld`/
+   *  `extractionTruncated` below. Absent means "unknown — the failure
+   *  preceded the append", not "zero"; 0 is itself a valid recorded count
+   *  (e.g. a conversation-only boundary that extracted nothing). */
   consolidated?: number;
   /** #113: set only when this boundary held its conversation cursor — see
    *  `ConsolidateResult.conversationSliceHeld`. Absent means "did not
@@ -2144,6 +2151,16 @@ export async function consolidate(params: ConsolidateParams): Promise<Consolidat
   // happen" — see `ConsolidateAttempt`'s "absent means did not happen" doc.
   let capturedConversationSliceHeld: boolean | undefined;
   let capturedExtractionTruncated: boolean | undefined;
+  // #331: same rationale as the two cells above, for `consolidated`. Unlike
+  // them this field is a COUNT, not a flag, so `undefined` is the only value
+  // that can mean "not yet known" — 0 is a legitimate known count (e.g. a
+  // conversation-only boundary whose extractor found nothing) and must not
+  // collapse into the same "absent" bucket the way `false` does for the two
+  // flags. It also cannot mirror as early as they do (right where `run()`
+  // computes it, before the append): "N memories consolidated" only becomes
+  // true once the `memory.consolidated` append below actually lands, so this
+  // is set there instead — see the assignment after `appendEvents`.
+  let capturedConsolidated: number | undefined;
 
   // #51: record how EVERY attempt ended — success AND failure — so a store
   // with 0 memories can answer "why" instead of looking like "never ran".
@@ -2544,7 +2561,7 @@ export async function consolidate(params: ConsolidateParams): Promise<Consolidat
     //     a conversation-only boundary also yields `[]` here, so every second
     //     import and every second conversation-only boundary would collide too.
     //   - The window's real identity lives in `meta`, not the log:
-    //     `WATERMARK_META_KEY` (:90) and `conversationOffsetKey` (:1286).
+    //     `WATERMARK_META_KEY` (line 90) and `conversationOffsetKey` (line 1286).
     //     Neither rides on an event, so a log-only constraint cannot see them.
     //   - So a unique index here would block ordinary multi-memory/import/
     //     conversation-only operation, not double distillation.
@@ -2712,6 +2729,17 @@ export async function consolidate(params: ConsolidateParams): Promise<Consolidat
       // nothing downstream learns a new outcome.
       await appendEvents(params.projectId, inputs, { expectedHead });
     }
+    // #331: mirror immediately — this is the instant `extracted.length`
+    // memory.consolidated events became durable (the append above either ran
+    // and succeeded, when `inputs.length > 0`, or there was nothing to append
+    // because `extracted.length` was already 0 — the two are equivalent since
+    // every item in `extracted` pushes exactly one `memory.consolidated`
+    // input). Everything from here to the `return` below (retention, the
+    // projection rebuild, embeddings, contradiction detection, and the cursor
+    // commit) can still throw, and unlike `capturedExtractionTruncated` above
+    // this value cannot be captured any earlier: before the append lands, "N
+    // memories consolidated" is not yet a true statement about durable state.
+    capturedConsolidated = extracted.length;
 
     // Retention BEFORE the reindex: pruneSegments (#116) deletes its own
     // matching segments/embeddings/search_fts rows, so this ordering is no
@@ -2986,6 +3014,10 @@ export async function consolidate(params: ConsolidateParams): Promise<Consolidat
       // reader that has never heard of #232 still sees a valid row.
       ...(capturedConversationSliceHeld ? { conversationSliceHeld: true } : {}),
       ...(capturedExtractionTruncated ? { extractionTruncated: true } : {}),
+      // #331: same rationale, but keyed on `!== undefined` rather than
+      // truthiness — 0 is a real known count and must still be recorded,
+      // unlike the two flags above where `false` and "absent" coincide.
+      ...(capturedConsolidated !== undefined ? { consolidated: capturedConsolidated } : {}),
     });
     throw error;
   }

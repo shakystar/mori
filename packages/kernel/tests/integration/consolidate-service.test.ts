@@ -1110,7 +1110,7 @@ describe("boundExtractionInput / buildExtractionUserContent — input budget (#1
     expect(bounded.transcriptTailCoverage).toBe("dropped");
   });
 
-  // Owner adjudication on PR #136 (Codex P2 `:377`): the postcondition is
+  // Owner adjudication on PR #136 (Codex P2, PR #136 diff line 377): the postcondition is
   // "the returned input ALWAYS renders within maxChars", with no exception —
   // and clipping only `summary` left one: the renderer puts `toolName` on the
   // same line as a separate field, and nothing upstream clips it.
@@ -1134,7 +1134,7 @@ describe("boundExtractionInput / buildExtractionUserContent — input budget (#1
     expect(bounded.observations[0]!.toolName!.length).toBeLessThan(observation.toolName!.length);
   });
 
-  // Owner adjudication on PR #136 (Codex P1 `:393`): with the raw buffer off
+  // Owner adjudication on PR #136 (Codex P1, PR #136 diff line 393): with the raw buffer off
   // the tail is the conversation's only copy, so it must be RESERVED ahead of
   // the (recoverable) existing-memory section rather than fed the leftovers.
   it("reserves the whole tail ahead of existing memories when the raw buffer is off", () => {
@@ -1501,7 +1501,7 @@ describe("consolidate — never consumes a conversation slice it neither showed 
     await rebuildProjectProjection(projectId, { reindexSearch: false });
   }
 
-  // Owner adjudication on PR #136 (Codex P1 `:393`): letting existing memories
+  // Owner adjudication on PR #136 (Codex P1, PR #136 diff line 393): letting existing memories
   // take the budget greedily and the tail have the leftovers starved the tail
   // FOREVER once the memory history outgrew the budget — the leftover is by
   // construction under one memory line, the next boundary allocates the same
@@ -1541,7 +1541,7 @@ describe("consolidate — never consumes a conversation slice it neither showed 
     expect(conversation.offsets).toEqual([0, 512]);
   });
 
-  // Owner adjudication on PR #136 (Codex P1 `:1350`): a CLIPPED tail was
+  // Owner adjudication on PR #136 (Codex P1, PR #136 diff line 1350): a CLIPPED tail was
   // treated as "shown", so the cursor advanced over a prefix the extractor
   // never saw — the same loss as dropping it, moved to a different branch.
   it("holds the cursor for a merely CLIPPED tail, and says so on the result and the attempt", async () => {
@@ -2195,7 +2195,14 @@ describe("consolidate — atomic boundary cursor commit (#139)", () => {
 // of them was computed used to lose it from the failed attempt row, exactly
 // when the signal matters most (memories/segments already durable, and the
 // record that should explain that state carries only `error`).
-describe("consolidate — run()'s side telemetry survives a failure past the point it was computed (#232)", () => {
+//
+// #331 extends the same fix to `consolidated`: it used to reach the attempt
+// row only on the `outcome === "ok"` success path, so a boundary that
+// appended N memories and then failed in the tail (rebuild/embeddings/cursor
+// commit) recorded a failed attempt with `consolidated` absent —
+// indistinguishable from "extracted nothing" to a reader of
+// `getConsolidationStatus`.
+describe("consolidate — run()'s side telemetry survives a failure past the point it was computed (#232, #331)", () => {
   it("records extractionTruncated on the failed attempt when the boundary fails after appendEvents", async () => {
     await seedObservation("decided x");
     const oversized = "x".repeat(PER_ITEM_MAX_CHARS + 100);
@@ -2263,7 +2270,42 @@ describe("consolidate — run()'s side telemetry survives a failure past the poi
     db.exec("DROP TRIGGER mori_test_boom_232b");
   });
 
-  it("leaves both fields absent when the failure precedes either being computed", async () => {
+  it("records consolidated on the failed attempt when the boundary fails after appendEvents lands", async () => {
+    await seedObservation("decided x");
+    // Two items (not one) so the assertion below can only pass if the real
+    // count survived the failure — a boolean-shaped bug (e.g. mirroring
+    // `extracted.length > 0` instead of the count) would still read `true`ish
+    // but fail an `.toBe(2)` check.
+    const llm = fakeLlm([
+      JSON.stringify([
+        { kind: "decision", text: "first decision", salience: 5 },
+        { kind: "decision", text: "second decision", salience: 5 },
+      ]),
+    ]);
+
+    // Same injection technique as the extractionTruncated test above: forces
+    // the cursor commit (after appendEvents/rebuildProjectProjection) to
+    // fail, so the `memory.consolidated` append has already landed by the
+    // time run() throws.
+    const db = getDb(projectId);
+    db.exec(
+      "CREATE TRIGGER mori_test_boom_331 BEFORE INSERT ON meta " +
+        "WHEN NEW.key = 'cls_consolidate_watermark' " +
+        "BEGIN SELECT RAISE(ABORT, 'injected #331 test failure'); END;",
+    );
+
+    await expect(consolidate({ projectId, actor: "test", llm })).rejects.toThrow(
+      /injected #331 test failure/,
+    );
+
+    const attempt = readLastConsolidateAttempt(projectId);
+    expect(attempt?.outcome).toBe("error");
+    expect(attempt?.consolidated).toBe(2);
+
+    db.exec("DROP TRIGGER mori_test_boom_331");
+  });
+
+  it("leaves all three fields absent when the failure precedes any of them being computed", async () => {
     await seedObservation("decided x");
     const consolidator: Consolidator = {
       async extract() {
@@ -2279,6 +2321,7 @@ describe("consolidate — run()'s side telemetry survives a failure past the poi
     expect(attempt?.outcome).toBe("error");
     expect(attempt?.extractionTruncated).toBeUndefined();
     expect(attempt?.conversationSliceHeld).toBeUndefined();
+    expect(attempt?.consolidated).toBeUndefined();
   });
 });
 
