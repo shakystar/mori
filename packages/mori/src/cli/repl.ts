@@ -1,7 +1,7 @@
 import type { Agent } from "@earendil-works/pi-agent-core";
 import type { ConsolidatorLlm } from "@mori/kernel";
 import type { MoriKernel } from "../agent/index.js";
-import { consolidateExplicit } from "./consolidation.js";
+import { consolidateExplicit, type ExplicitConsolidateOutcome } from "./consolidation.js";
 import {
   replBanner,
   replClearedMessage,
@@ -103,11 +103,26 @@ export async function runRepl(
         const controller = new AbortController();
         const stopConsolidateInterrupt = input.onInterrupt(() => controller.abort());
         try {
-          const outcome = await consolidateExplicit(
-            consolidation.kernel,
-            consolidation.llm,
-            controller.signal,
-          );
+          let outcome: ExplicitConsolidateOutcome;
+          try {
+            // `observe()` only enqueues (agent/index.ts) — without settling that queue
+            // first, the boundary below can read the store before the turn just typed
+            // has landed in it, miss that turn, and still report `{ kind: "ok" }`. The
+            // session-end trigger already drains before its boundary (runtime.ts); this
+            // makes the manual one do the same (#355).
+            await consolidation.kernel.drain();
+            outcome = await consolidateExplicit(
+              consolidation.kernel,
+              consolidation.llm,
+              controller.signal,
+            );
+          } catch (error) {
+            // `drain()` failing here is treated the same as the boundary itself
+            // failing — this handler's rule is that a failed `/consolidate` reports
+            // and keeps prompting rather than ending the session, and `drain()` is
+            // just an earlier stage of the same attempt (#355).
+            outcome = { kind: "failed", error };
+          }
           if (outcome.kind === "skipped") stdout(replConsolidateSkippedMessage());
           else if (outcome.kind === "ok") stdout(replConsolidateOkMessage());
           else if (outcome.kind === "cancelled") stderr(replConsolidateCancelledMessage());
