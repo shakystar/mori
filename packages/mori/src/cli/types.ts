@@ -37,9 +37,8 @@ export interface RunCliDeps {
    * this once — or reuses the instance injected here — and threads that SAME instance to
    * both, so a test that registers a fake provider on it (see
    * `agent/fake-provider-models.ts`'s `fakeProviderModels` helper) is guaranteed the gate
-   * and the turn see the identical
-   * registration, which is the invariant `cli/runtime.ts:56-57`'s comment requires ("both
-   * ask the same question of the same instance"). Unset — the default — means both build
+   * and the turn see the identical registration, which is the invariant `prepareAgent`'s
+   * "same question of the same instance" comment requires. Unset — the default — means both build
    * their own instance from `createMoriModels`, exactly as before this seam existed. See
    * `loginModels` above for the sibling seam scoped to `mori login`/`mori logout`.
    */

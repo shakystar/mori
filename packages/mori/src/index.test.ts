@@ -247,7 +247,7 @@ describe("runCli", () => {
   });
 
   it("has the auth gate and the turn resolve through the one injected Models instance (#336)", async () => {
-    // `cli/runtime.ts:56-57` requires the auth gate and the real turn to "ask the same
+    // `prepareAgent`'s comment requires the auth gate and the real turn to "ask the same
     // question of the same instance" — otherwise "gate passes, turn fails" becomes
     // reachable. Before #336 each built its own `Models` from the same inputs, so they
     // agreed by construction. Now `prepareAgent` threads one instance to both, and that
