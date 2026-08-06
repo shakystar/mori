@@ -52,6 +52,10 @@ export interface CreateMoriAgentOptions {
    * here so the auth gate and the turn always see the same instance — see `cli/types.ts`'s
    * `models` doc for why that identity matters. Unset — the default at every non-test call
    * site — builds a fresh instance exactly as before this seam existed.
+   *
+   * Setting it leaves the `credentialStore` argument unused by this function: the injected
+   * instance already carries whichever store it was built from. Build it from that same
+   * store, or the agent resolves auth against one store while its caller believes another.
    */
   models?: MutableModels;
 }
