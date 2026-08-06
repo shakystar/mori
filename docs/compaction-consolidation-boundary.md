@@ -354,7 +354,7 @@ append된 **뒤에만** 전진하고, 커서 커밋은 `run()`의 가장 마지�
 ```
 $ grep -n "UNSAFE" packages/kernel/src/storage/project-lock.ts
 172: *   than a rebuild that did not happen. Still UNSAFE for the READER, and
-181: * - `detectContradictions` — UNSAFE: runs after `ensureEmbeddings` (reads its
+183: * - `detectContradictions` — UNSAFE: runs after `ensureEmbeddings` (reads its
 ```
 
 두 건이 전부다. 각각이 compaction 경로(백그라운드 증류 ↔ 라이브 세션)에 걸리는지 판정한다.
