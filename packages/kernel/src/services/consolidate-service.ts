@@ -2533,6 +2533,26 @@ export async function consolidate(params: ConsolidateParams): Promise<Consolidat
     // Matches the system prompt's own rule: "an id explicitly listed in
     // existing valid memories".
     const validIds = new Set(bounded.existingMemories.map((m) => m.id));
+    // #314 (#310 §Q6, docs/log-unique-constraint-b-residue-adjudication.md):
+    // this array is a stand-in for the distillation window's identity, not the
+    // identity itself — a unique index above it would not dedupe windows.
+    //   - A single boundary that extracts multiple memories pushes one
+    //     `memory.consolidated` per item (`for (const item of extracted)`
+    //     below) and all of them carry this SAME array, so a normal
+    //     multi-memory boundary collides with its own second row here.
+    //   - Import always writes it empty (memory-import-service.ts:654-656) and
+    //     a conversation-only boundary also yields `[]` here, so every second
+    //     import and every second conversation-only boundary would collide too.
+    //   - The window's real identity lives in `meta`, not the log:
+    //     `WATERMARK_META_KEY` (:90) and `conversationOffsetKey` (:1286).
+    //     Neither rides on an event, so a log-only constraint cannot see them.
+    //   - So a unique index here would block ordinary multi-memory/import/
+    //     conversation-only operation, not double distillation.
+    //
+    // TRIGGER: re-measure candidate 2 if the watermark or conversation offset
+    // ever leaves `meta` for the event payload, or if a boundary starts
+    // appending an event that represents the boundary itself (not just its
+    // output memories).
     const sourceObservationIds = bounded.observations.map((o) => o.id);
     const inputs: AppendEventInput<ConsolidatedMemory | MemorySupersededPayload>[] = [];
     let supersededCount = 0;

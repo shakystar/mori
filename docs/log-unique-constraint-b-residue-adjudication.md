@@ -76,8 +76,8 @@ $ grep -rnE "\bappendEvents?[[:space:]]*(<[^()]*>)?\(" packages/ --include='*.ts
     --exclude-dir=dist --exclude-dir=node_modules | grep -v tests/
 packages/kernel/src/kernel/sqlite-memory-kernel.ts:613
 packages/kernel/src/kernel/sqlite-memory-kernel.ts:878
-packages/kernel/src/services/consolidate-service.ts:2693
-packages/kernel/src/services/memory-import-service.ts:810
+packages/kernel/src/services/consolidate-service.ts:2713
+packages/kernel/src/services/memory-import-service.ts:834
 packages/kernel/src/services/capture-service.ts:293
 packages/kernel/src/services/conflict-service.ts:97
 packages/kernel/src/services/contradiction-service.ts:287
@@ -105,8 +105,8 @@ packages/kernel/src/storage/event-store.ts:173 # appendEvents 자신
 | 3   | `capture-service.ts:293`           | `observation.captured`                            | 없음                               | 아니다         |
 | 4   | `conflict-service.ts:97`           | `conflict.resolved`                               | 없음 (#305가 트리거 문장을 남김)   | 아니다         |
 | 5   | `contradiction-service.ts:287`     | `memory.superseded` + `conflict.detected`         | **있음**                           | 아니다         |
-| 6   | **`consolidate-service.ts:2693`**  | **`memory.consolidated`** (+ `memory.superseded`) | **있음**                           | **그렇다**     |
-| 7   | **`memory-import-service.ts:810`** | **`memory.consolidated`** (+ `memory.superseded`) | **있음**                           | **그렇다**     |
+| 6   | **`consolidate-service.ts:2713`**  | **`memory.consolidated`** (+ `memory.superseded`) | **있음**                           | **그렇다**     |
+| 7   | **`memory-import-service.ts:834`** | **`memory.consolidated`** (+ `memory.superseded`) | **있음**                           | **그렇다**     |
 
 **`memory.consolidated`를 찍는 프로덕션 자리는 6·7 둘뿐이고, 둘 다 CAS를 싣는다.**
 "`expectedHead`를 안 싣는 호출자가 새로 생기는 경우"는 오늘 0건이다 — 그리고 그 위험은
@@ -123,9 +123,9 @@ packages/kernel/src/storage/event-store.ts:173 # appendEvents 자신
 | `consolidate-service.ts:2331`      | `readEvents` — 창·`consumed`·`existing`이 전부 여기서 나온다 (#298)         |
 | `consolidate-service.ts:2380`      | `consumed` — `memory.consolidated` 페이로드의 `sourceObservationIds` 합집합 |
 | `consolidate-service.ts:2428`      | `existing` — `!invalidAt && self-lane`                                      |
-| `consolidate-service.ts:2536`      | `sourceObservationIds = bounded.observations.map((o) => o.id)`              |
-| `consolidate-service.ts:2693`      | `appendEvents(..., { expectedHead })` — **CAS**                             |
-| `consolidate-service.ts:2920`      | `commitBoundaryCursors` — 워터마크·오프셋 커밋 (append **뒤**)              |
+| `consolidate-service.ts:2556`      | `sourceObservationIds = bounded.observations.map((o) => o.id)`              |
+| `consolidate-service.ts:2713`      | `appendEvents(..., { expectedHead })` — **CAS**                             |
+| `consolidate-service.ts:2940`      | `commitBoundaryCursors` — 워터마크·오프셋 커밋 (append **뒤**)              |
 
 세 시나리오를 각각 본다. **누가 먼저 읽고 누가 나중에 쓰는지**를 명시한다.
 
@@ -163,15 +163,15 @@ B의 스탬프 이후로 안 움직였고, 그게 CAS가 말하는 전부이기 
 
 ### Q1.2 7번(`memory-import-service`)에서 CAS가 덮는 것
 
-`memory-import-service.ts:627`의 `readValidMemoriesFromLog`가 **dedup 스냅샷과 그 스냅샷을
-증명하는 head를 한 배열에서** 뽑고(`memory-import-service.ts:210-230`), `:810`이 그 head로
+`memory-import-service.ts:651`의 `readValidMemoriesFromLog`가 **dedup 스냅샷과 그 스냅샷을
+증명하는 head를 한 배열에서** 뽑고(`memory-import-service.ts:234-254`), `:810`이 그 head로
 CAS를 건다. import는 **크로스프로세스 락을 아예 안 잡는다** — 모듈 doc이 그렇게 적었고,
 `:803-809` 주석이 "이것이 동시 라이터와 중복 import 사이에 서 있는 유일한 것"이라고
 스스로 말한다. 즉 여기서 CAS는 규율이 아니라 **유일한 수단**이고, 그만큼 확실히 실려 있다.
 
 import 쪽의 이중 기록은 후보2가 아니라 **후보3의 영역**이다(§Q3). 여기서 후보2에 관해
 중요한 사실은 하나다: **import도 `memory.consolidated`를 찍고, 그 페이로드의
-`sourceObservationIds`는 항상 비어 있다** (`memory-import-service.ts:630-632` 주석:
+`sourceObservationIds`는 항상 비어 있다** (`memory-import-service.ts:654-656` 주석:
 _"imported memories have EMPTY sourceObservationIds"_). 이 사실이 §Q2에서 후보2를 죽인다.
 
 ### Q1.3 후보2의 인덱스가 R1을 덮는가 — 덮지 못한다
@@ -235,7 +235,7 @@ project_id, scope_type, scope_id, actor, payload`
 | ------------------------ | ---------------------------------------------------------- | ------------------------------------------------------- |
 | 증류 워터마크(이벤트 id) | **`meta` 테이블**, 키 `cls_consolidate_watermark`          | `consolidate-service.ts:90`, 접근자 `:1261`/`:1273`     |
 | 대화 오프셋              | **`meta` 테이블**, 키 `cls_conversation_offset:<sourceId>` | `consolidate-service.ts:1286`                           |
-| boundary 식별자          | **없다** — 경계는 이벤트로 기록되지 않는다                 | `consolidate-service.ts:2693`이 찍는 것은 결과 메모리뿐 |
+| boundary 식별자          | **없다** — 경계는 이벤트로 기록되지 않는다                 | `consolidate-service.ts:2713`이 찍는 것은 결과 메모리뿐 |
 
 `:2205-2216`의 주석이 이것을 설계 의도로 못박아 뒀다: _"the watermark stays a `meta` cursor
 and is NOT bound to the log. The log cannot express it"_ — noop 경로가 커서를 로그에 흔적
@@ -245,7 +245,7 @@ and is NOT bound to the log. The log cannot express it"_ — noop 경로가 커�
 **결론: 후보2가 #189에서 이름 붙인 정체성(_워터마크 이벤트 id + boundary_)은 로그에 없다.**
 유니크 제약은 로그 안의 값만 볼 수 있으므로, 그 정체성으로는 인덱스를 만들 수 없다.
 남는 것은 대용값 하나 — `payload` JSON 안의 `sourceObservationIds`
-(`domain/entities/memory.ts:101`, 채워지는 자리는 `consolidate-service.ts:2536`)뿐이다.
+(`domain/entities/memory.ts:101`, 채워지는 자리는 `consolidate-service.ts:2556`)뿐이다.
 
 ### Q2.2 `payload` JSON에 partial unique index를 걸 수 있는가 — 걸린다 (실측)
 
@@ -275,7 +275,7 @@ CREATE UNIQUE INDEX ix1
 형태 그대로다). **이 인덱스는 이중 증류가 아니라 다중 메모리 경계를 막는다.**
 
 **② 빈 배열이 전부 충돌한다.**
-import는 `sourceObservationIds`를 항상 비워 찍고(`memory-import-service.ts:630-632`),
+import는 `sourceObservationIds`를 항상 비워 찍고(`memory-import-service.ts:654-656`),
 대화 전용 경계도 `:2536`에서 `[]`를 낸다. 실측 D: 두 번째 `[]` 행이
 `UNIQUE constraint failed`. → **모든 두 번째 import, 모든 두 번째 대화 전용 경계가
 스토어에 못 들어간다.**
@@ -301,9 +301,9 @@ NULL은 서로 구별되기 때문이다. 레거시 행이나 스키마가 다�
 ### Q3.1 같은 `(kind, 정규화 텍스트)`가 합법적으로 두 번 들어오는 경로 — 3개
 
 오늘 import의 dedup은 `runImport` 안에서 돈다:
-`memory-import-service.ts:627`이 `readValidMemoriesFromLog`로 스냅샷을 잡고,
+`memory-import-service.ts:651`이 `readValidMemoriesFromLog`로 스냅샷을 잡고,
 `:641`이 그 스냅샷을, `:658`이 입력 항목을 각각 `textKey`(`:181`)로 눌러 비교한다.
-스냅샷의 필터는 `memory-import-service.ts:222`다:
+스냅샷의 필터는 `memory-import-service.ts:246`다:
 
 ```ts
 (memory) => !memory.invalidAt && (memory.sourceProjectId ?? SELF_LANE) === SELF_LANE,
@@ -328,7 +328,7 @@ NULL은 서로 구별되기 때문이다. 레거시 행이나 스키마가 다�
 (v11 이전 행은 `source_project_id`가 NULL이라 self로 읽힌다)를 다시 안게 된다.
 
 **경로 3 — 증류와 import의 교차.**
-`consolidate-service.ts:2693`이 찍는 `memory.consolidated`는 `textKey`를 **전혀 거치지
+`consolidate-service.ts:2713`이 찍는 `memory.consolidated`는 `textKey`를 **전혀 거치지
 않는다.** 증류 경로에 텍스트 dedup은 없다. 그래서 추출기가 뽑은 메모리와 사람이 import한
 메모리가 같은 `(kind, 텍스트)`를 갖는 것은 오늘 흔하고 합법이다. 후보3의 인덱스는
 `type = 'memory.consolidated'` 위에 걸릴 수밖에 없으므로(두 경로가 같은 타입을 쓴다)
@@ -341,7 +341,7 @@ NULL은 서로 구별되기 때문이다. 레거시 행이나 스키마가 다�
 
 ### Q3.2 "정규화 텍스트"는 저장값인가 — 아니다, 매번 계산된다
 
-`memory-import-service.ts:181`:
+`memory-import-service.ts:205`:
 
 ```ts
 function textKey(kind: string, text: string): string {
@@ -389,7 +389,7 @@ SQLite의 내장 `lower`는 **ASCII 전용**이고(ICU 확장 없이는 비-ASCI
 ### Q3.3 오늘 dedup과 #253 CAS의 맞물림
 
 후보3을 넣지 않을 때 무엇이 남는지 적어 둔다. `readValidMemoriesFromLog`
-(`memory-import-service.ts:210`)는 스냅샷과 head를 **한 `readEvents` 배열에서** 뽑고
+(`memory-import-service.ts:234`)는 스냅샷과 head를 **한 `readEvents` 배열에서** 뽑고
 (`:224-229` 주석: _"the head OF THIS VERY READ"_), `:810`이 그 head로 CAS를 건다.
 그래서 "가드가 본 로그"와 "append가 검사하는 로그"가 같은 것이 **구조적으로** 보장된다 —
 후보3이 채우려던 자리를 #253이 이미 이 형태로 메웠다.
@@ -513,10 +513,10 @@ create-copy-swap)"_.
 다시 판단하게 만든다. 실제로 이 리포에서 #189 B는 **두 번째로** 이 판단을 하고 있다
 (#236이 후보2·3을 한 번 배제했고, 그 근거가 코드 옆에 없어 이 이슈가 다시 열렸다).
 
-- **후보2**: `consolidate-service.ts:2536`의 `sourceObservationIds` 옆.
+- **후보2**: `consolidate-service.ts:2556`의 `sourceObservationIds` 옆.
   이 값이 창의 식별자가 아니라는 것, 경계 하나가 여러 행에 같은 값을 찍는다는 것,
   그래서 유니크 키가 될 수 없다는 것.
-- **후보3**: `memory-import-service.ts:181`의 `textKey` 옆.
+- **후보3**: `memory-import-service.ts:205`의 `textKey` 옆.
   이 키가 `!invalidAt` + self-lane **위에서만** 성립하는 동적 성질이지 append 시점의
   정적 성질이 아니라는 것, 그래서 제약이 아니라 가드가 맞는 자리라는 것.
 
@@ -537,7 +537,7 @@ create-copy-swap)"_.
 - **완료 조건 초안**
   - [ ] 주석이 **이 값이 창의 식별자가 아니라는 것**을 적었다 — 경계 하나가 추출 항목마다
         행을 찍고 전부 이 배열을 공유한다(`:2540-2562`), import는 항상 비워 찍는다
-        (`memory-import-service.ts:630-632`), 대화 전용 경계도 `[]`다
+        (`memory-import-service.ts:654-656`), 대화 전용 경계도 `[]`다
   - [ ] 주석이 **창의 실제 식별자는 `meta`에 있다**고 가리켰다
         (`cls_consolidate_watermark` `:90`, `cls_conversation_offset` `:1286`)
   - [ ] 주석이 **재판단 트리거**를 적었다: 워터마크나 대화 오프셋이 `meta`를 떠나
@@ -589,8 +589,8 @@ R1은 `readEvents`가 아니라 **`commitBoundaryCursors`(`consolidate-service.t
   CAS도 덮지 않는다(두 번째 경계는 신선한 head를 스탬프하므로 통과한다).
   A 축·C 축은 닫혔으므로 재개하지 않고, 여기 적어 owner의 기획 패스로 넘긴다.
 
-- **(발견, 범위 밖) `packages/kernel/src/services/memory-import-service.ts:181` 대
-  `packages/kernel/src/services/consolidate-service.ts:2536` — 텍스트 dedup의 비대칭.**
+- **(발견, 범위 밖) `packages/kernel/src/services/memory-import-service.ts:205` 대
+  `packages/kernel/src/services/consolidate-service.ts:2556` — 텍스트 dedup의 비대칭.**
   import는 `textKey`로 접지만 증류는 텍스트 dedup을 전혀 하지 않는다. 이것이 §Q3.1 경로 3의
   원인이다. 오늘 결함은 아니다(추출기가 `existing`을 보고 supersede를 내는 것이 설계된
   경로다) — 다만 후보3을 다시 잴 사람이 이 비대칭부터 봐야 한다.
@@ -631,14 +631,14 @@ R1은 `readEvents`가 아니라 **`commitBoundaryCursors`(`consolidate-service.t
 | `consolidate-service.ts:2331`                          | `const events = await readEvents(params.projectId);`                                         | 맞음 |
 | `consolidate-service.ts:2380`                          | `const consumed = new Set<string>();`                                                        | 맞음 |
 | `consolidate-service.ts:2428`                          | `const existing = Object.values(state.memories).filter(`                                     | 맞음 |
-| `consolidate-service.ts:2536`                          | `const sourceObservationIds = bounded.observations.map((o) => o.id);`                        | 맞음 |
-| `consolidate-service.ts:2693`                          | `await appendEvents(params.projectId, inputs, { expectedHead });`                            | 맞음 |
-| `consolidate-service.ts:2920`                          | `const cursorCommit = commitBoundaryCursors(params.projectId, {`                             | 맞음 |
-| `memory-import-service.ts:181`                         | `function textKey(kind: string, text: string): string {`                                     | 맞음 |
-| `memory-import-service.ts:210`                         | `async function readValidMemoriesFromLog(`                                                   | 맞음 |
-| `memory-import-service.ts:222`                         | `(memory) => !memory.invalidAt && (memory.sourceProjectId ?? SELF_LANE) === SELF_LANE,`      | 맞음 |
-| `memory-import-service.ts:627`                         | `const { memories: existingMemories, head: expectedHead } = await readValidMemoriesFromLog(` | 맞음 |
-| `memory-import-service.ts:810`                         | `await appendEvents(params.projectId, inputs, { expectedHead });`                            | 맞음 |
+| `consolidate-service.ts:2556`                          | `const sourceObservationIds = bounded.observations.map((o) => o.id);`                        | 맞음 |
+| `consolidate-service.ts:2713`                          | `await appendEvents(params.projectId, inputs, { expectedHead });`                            | 맞음 |
+| `consolidate-service.ts:2940`                          | `const cursorCommit = commitBoundaryCursors(params.projectId, {`                             | 맞음 |
+| `memory-import-service.ts:205`                         | `function textKey(kind: string, text: string): string {`                                     | 맞음 |
+| `memory-import-service.ts:234`                         | `async function readValidMemoriesFromLog(`                                                   | 맞음 |
+| `memory-import-service.ts:246`                         | `(memory) => !memory.invalidAt && (memory.sourceProjectId ?? SELF_LANE) === SELF_LANE,`      | 맞음 |
+| `memory-import-service.ts:651`                         | `const { memories: existingMemories, head: expectedHead } = await readValidMemoriesFromLog(` | 맞음 |
+| `memory-import-service.ts:834`                         | `await appendEvents(params.projectId, inputs, { expectedHead });`                            | 맞음 |
 | `capture-service.ts:293`                               | `await appendEvent({` (타입 `observation.captured`)                                          | 맞음 |
 | `conflict-service.ts:97`                               | `await appendEvent({` (타입 `conflict.resolved`)                                             | 맞음 |
 | `contradiction-service.ts:287`                         | `appended = await appendEvents<MemorySupersededPayload \| Conflict>(`                        | 맞음 |
