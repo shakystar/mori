@@ -180,7 +180,7 @@ export interface ImportMemoriesParams {
 // #314 (#310 §Q6, docs/log-unique-constraint-b-residue-adjudication.md):
 // this key's uniqueness is a DYNAMIC property, not a static one fixed at
 // append time — it only holds above the `!invalidAt` + self-lane snapshot
-// (readValidMemoriesFromLog's filter, :246). Three paths legally re-append
+// (readValidMemoriesFromLog's filter, line 246). Three paths legally re-append
 // the same (kind, normalized text) below that snapshot, so a log-level
 // unique constraint on it would reject all three:
 //   - Re-import after supersede/invalidate: once a memory is invalidated its

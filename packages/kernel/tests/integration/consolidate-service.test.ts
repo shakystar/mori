@@ -1110,7 +1110,7 @@ describe("boundExtractionInput / buildExtractionUserContent — input budget (#1
     expect(bounded.transcriptTailCoverage).toBe("dropped");
   });
 
-  // Owner adjudication on PR #136 (Codex P2 `:377`): the postcondition is
+  // Owner adjudication on PR #136 (Codex P2, PR #136 diff line 377): the postcondition is
   // "the returned input ALWAYS renders within maxChars", with no exception —
   // and clipping only `summary` left one: the renderer puts `toolName` on the
   // same line as a separate field, and nothing upstream clips it.
@@ -1134,7 +1134,7 @@ describe("boundExtractionInput / buildExtractionUserContent — input budget (#1
     expect(bounded.observations[0]!.toolName!.length).toBeLessThan(observation.toolName!.length);
   });
 
-  // Owner adjudication on PR #136 (Codex P1 `:393`): with the raw buffer off
+  // Owner adjudication on PR #136 (Codex P1, PR #136 diff line 393): with the raw buffer off
   // the tail is the conversation's only copy, so it must be RESERVED ahead of
   // the (recoverable) existing-memory section rather than fed the leftovers.
   it("reserves the whole tail ahead of existing memories when the raw buffer is off", () => {
@@ -1501,7 +1501,7 @@ describe("consolidate — never consumes a conversation slice it neither showed 
     await rebuildProjectProjection(projectId, { reindexSearch: false });
   }
 
-  // Owner adjudication on PR #136 (Codex P1 `:393`): letting existing memories
+  // Owner adjudication on PR #136 (Codex P1, PR #136 diff line 393): letting existing memories
   // take the budget greedily and the tail have the leftovers starved the tail
   // FOREVER once the memory history outgrew the budget — the leftover is by
   // construction under one memory line, the next boundary allocates the same
@@ -1541,7 +1541,7 @@ describe("consolidate — never consumes a conversation slice it neither showed 
     expect(conversation.offsets).toEqual([0, 512]);
   });
 
-  // Owner adjudication on PR #136 (Codex P1 `:1350`): a CLIPPED tail was
+  // Owner adjudication on PR #136 (Codex P1, PR #136 diff line 1350): a CLIPPED tail was
   // treated as "shown", so the cursor advanced over a prefix the extractor
   // never saw — the same loss as dropping it, moved to a different branch.
   it("holds the cursor for a merely CLIPPED tail, and says so on the result and the attempt", async () => {

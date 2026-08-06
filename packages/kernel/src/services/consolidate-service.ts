@@ -2544,7 +2544,7 @@ export async function consolidate(params: ConsolidateParams): Promise<Consolidat
     //     a conversation-only boundary also yields `[]` here, so every second
     //     import and every second conversation-only boundary would collide too.
     //   - The window's real identity lives in `meta`, not the log:
-    //     `WATERMARK_META_KEY` (:90) and `conversationOffsetKey` (:1286).
+    //     `WATERMARK_META_KEY` (line 90) and `conversationOffsetKey` (line 1286).
     //     Neither rides on an event, so a log-only constraint cannot see them.
     //   - So a unique index here would block ordinary multi-memory/import/
     //     conversation-only operation, not double distillation.
