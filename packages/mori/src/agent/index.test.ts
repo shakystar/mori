@@ -1,7 +1,12 @@
 import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AgentEvent, AgentMessage, StreamFn } from "@earendil-works/pi-agent-core";
+import {
+  Agent,
+  type AgentEvent,
+  type AgentMessage,
+  type StreamFn,
+} from "@earendil-works/pi-agent-core";
 import type {
   AssistantMessage,
   AssistantMessageEvent,
@@ -14,6 +19,8 @@ import { BufferKernel } from "@mori/kernel";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createMoriAgent, createMoriModels } from "./index.js";
 import { EXPERIMENTAL_OPENAI_OAUTH_ENV, OPENAI_OAUTH_PROVIDER_ID } from "../auth/experimental.js";
+import { createBashTool } from "../tools/bash.js";
+import { createReadFileTool } from "../tools/read-file.js";
 
 const ONE_HOUR_MS = 60 * 60 * 1000;
 const GATE_ON = { [EXPERIMENTAL_OPENAI_OAUTH_ENV]: "1" } as const;
@@ -214,13 +221,15 @@ const USAGE = {
 };
 
 type FakeTurn =
-  { toolCall: { name: string; arguments: Record<string, unknown> } } | { text: string };
+  | { toolCall: { name: string; arguments: Record<string, unknown> } }
+  | { toolCalls: Array<{ name: string; arguments: Record<string, unknown> }> }
+  | { text: string };
 
 /**
- * Fake streamFn that plays back one scripted turn per call — a single tool call or a
- * final text response — reusing the last turn once the script runs out. This lets a
- * test drive a whole prompt -> tool_call -> tool_result -> final_text round trip
- * without a live model.
+ * Fake streamFn that plays back one scripted turn per call — one or more tool calls in
+ * a single assistant message, or a final text response — reusing the last turn once the
+ * script runs out. This lets a test drive a whole prompt -> tool_call -> tool_result ->
+ * final_text round trip without a live model.
  */
 function scriptedStreamFn(turns: FakeTurn[]): StreamFn {
   let call = 0;
@@ -246,6 +255,16 @@ function scriptedStreamFn(turns: FakeTurn[]): StreamFn {
         arguments: turn.toolCall.arguments,
       };
       const message: AssistantMessage = { ...base, content: [toolCall], stopReason: "toolUse" };
+      stream.push({ type: "start", partial: message } satisfies AssistantMessageEvent);
+      stream.push({ type: "done", reason: "toolUse", message } satisfies AssistantMessageEvent);
+    } else if ("toolCalls" in turn) {
+      const toolCalls: ToolCall[] = turn.toolCalls.map((tc, i) => ({
+        type: "toolCall",
+        id: `call-${call}-${i}`,
+        name: tc.name,
+        arguments: tc.arguments,
+      }));
+      const message: AssistantMessage = { ...base, content: toolCalls, stopReason: "toolUse" };
       stream.push({ type: "start", partial: message } satisfies AssistantMessageEvent);
       stream.push({ type: "done", reason: "toolUse", message } satisfies AssistantMessageEvent);
     } else {
@@ -457,5 +476,51 @@ describe("createMoriAgent toolset wiring", () => {
     expect(toolResultsOf(agent)).toHaveLength(0);
     const last = agent.state.messages.at(-1);
     expect(last).toMatchObject({ role: "assistant", stopReason: "stop" });
+  });
+});
+
+describe("bash/edit_file tool-level executionMode: sequential (#320)", () => {
+  it("runs bash + read_file from one assistant message sequentially even on a plain Agent that doesn't set toolExecution", async () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "mori-agent-execmode-")));
+    try {
+      writeFileSync(join(root, "hello.txt"), "hello from disk", "utf8");
+
+      const model = createMoriModels({}, store()).getModel("anthropic", "claude-sonnet-4-6");
+      if (!model) throw new Error("expected the default anthropic model to be registered");
+
+      const events: string[] = [];
+      const agent = new Agent({
+        initialState: {
+          systemPrompt: "test",
+          model,
+          tools: [createBashTool(root), createReadFileTool(root)],
+        },
+        streamFn: scriptedStreamFn([
+          {
+            toolCalls: [
+              { name: "bash", arguments: { command: "true" } },
+              { name: "read_file", arguments: { path: "hello.txt" } },
+            ],
+          },
+          { text: "done" },
+        ]),
+      });
+      agent.subscribe((event) => {
+        if (event.type === "tool_execution_start" || event.type === "tool_execution_end") {
+          events.push(
+            `${event.type === "tool_execution_start" ? "start" : "end"}:${event.toolName}`,
+          );
+        }
+      });
+
+      await agent.prompt("run bash then read the file");
+
+      // Parallel execution (pi's default with no toolExecution set) would start both
+      // calls before either finishes. bash's executionMode: "sequential" must force the
+      // whole batch sequential regardless, so read_file's start only follows bash's end.
+      expect(events).toEqual(["start:bash", "end:bash", "start:read_file", "end:read_file"]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
