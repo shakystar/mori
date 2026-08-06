@@ -43,6 +43,9 @@ idea ──owner 분해──▶ agent:todo ──developer 착수──▶ agen
 `agent:doing`은 어느 시점에도 **최대 1건**이다 (워커가 레포당 1대). 2건 이상이면 상태가 깨진 것이고
 secretary 감시자가 Slack으로 보고한다.
 
+라벨 전이는 각 에이전트의 하네스(run.sh)가 산출물(PR·판정 코멘트·마커 코멘트)을 관찰해 수행한다 —
+에이전트 세션(LLM)은 라벨을 직접 조작하지 않는다 (autopilot-agents#4 Phase 2).
+
 ## 이슈 쓰는 법
 
 New issue를 누르면 두 가지 템플릿이 뜬다. **크기로 고른다.**

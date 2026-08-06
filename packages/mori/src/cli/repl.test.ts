@@ -348,6 +348,37 @@ describe("runRepl", () => {
       expect(provider.contexts).toHaveLength(1);
     });
 
+    it("drains queued observations before the boundary reads the store (#355)", async () => {
+      const provider = recordingProvider([]);
+      const { agent, kernel } = testAgent(provider.streamFn);
+      const io = captureOutput();
+      const input = scriptedInput([{ type: "line", value: "/consolidate" }, { type: "eof" }]);
+      // A call-order spy, not a call-count one — the bug this guards against is drain()
+      // and consolidate() both happening once each, just in the wrong order.
+      const calls: string[] = [];
+      const orderedKernel: MoriKernel = {
+        transformContext: (messages) => kernel.transformContext(messages),
+        observe: (event) => kernel.observe(event),
+        drain: async () => {
+          calls.push("drain");
+          await kernel.drain();
+        },
+        resetConversation: () => kernel.resetConversation(),
+        consolidate: async (llm, opts) => {
+          calls.push("consolidate");
+          await kernel.consolidate(llm, opts);
+        },
+      };
+
+      const exitCode = await runRepl(agent, input.source, io, {
+        kernel: orderedKernel,
+        llm: stubLlm(),
+      });
+
+      expect(exitCode).toBe(0);
+      expect(calls).toEqual(["drain", "consolidate"]);
+    });
+
     it("reports a failed consolidation without ending the session", async () => {
       const provider = recordingProvider([]);
       const { agent, kernel } = testAgent(provider.streamFn);
