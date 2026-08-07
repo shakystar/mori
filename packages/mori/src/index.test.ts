@@ -17,7 +17,6 @@ import type { MoriKernel } from "./agent/index.js";
 import { EXPERIMENTAL_OPENAI_OAUTH_ENV, OPENAI_OAUTH_PROVIDER_ID } from "./auth/experimental.js";
 import type { ReplInputSource, ReplLine } from "./cli/repl-input.js";
 import { runCli, unauthenticatedMessage } from "./index.js";
-import { defaultCredentialsPath, FileCredentialStore } from "./auth/credential-store.js";
 import { fakeProviderModels } from "./agent/fake-provider-models.js";
 import { createMoriModels } from "./agent/model-wiring.js";
 
@@ -891,15 +890,19 @@ describe("runCli", () => {
 
       const io = captureOutput();
       const env = { XDG_CONFIG_HOME: configDir, ANTHROPIC_API_KEY: "sk-ant-test" };
-      // No `deps.credentialStore` injected — the point of this test is the real, on-disk
-      // `FileCredentialStore` mori builds by default (cli/runtime.ts). Building `models`
-      // against that same real store (rather than an in-memory one) is what keeps this
-      // seam swap from accidentally routing auth resolution away from the corrupt file.
-      const credentialStore = new FileCredentialStore(defaultCredentialsPath(env), io.stderr);
+      // Neither `deps.credentialStore` nor `deps.models` is injected — the point of this
+      // test is the real, on-disk `FileCredentialStore` mori builds by default
+      // (cli/runtime.ts's `prepareAgent`) and the `Models` it wires from that store
+      // (agent/index.ts's `createMoriAgent`). Injecting `deps.models` instead (as this test
+      // used to) would build its own `FileCredentialStore` and hand `prepareAgent` a `Models`
+      // that already resolves auth against it, so `prepareAgent`'s own default-store
+      // construction and wiring would never be exercised — a regression there would still
+      // pass here. `deps.streamFn` alone fakes only the turn's network call, after auth has
+      // resolved through the real default store.
       const exitCode = await runCli(["hi"], env, {
         stdout: io.stdout,
         stderr: io.stderr,
-        models: fakeProviderModels(env, credentialStore, fakeStreamFn("hello from mori")),
+        streamFn: fakeStreamFn("hello from mori"),
         root: cliRoot,
       });
 

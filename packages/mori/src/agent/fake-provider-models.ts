@@ -42,6 +42,11 @@ function adaptStreamFn(streamFn: StreamFn) {
       for await (const event of inner) {
         stream.push(event);
       }
+      // A double that ends via `end(message)` rather than pushing a terminal `done`/`error`
+      // event (pi-ai's own `forwardStream`, api/lazy.js, has the same requirement) leaves
+      // `stream` at `done: false` forever if this isn't forwarded — `.result()`/`for await`
+      // on the outer stream then hangs instead of failing loudly.
+      stream.end(await inner.result());
     })().catch((error: unknown) => {
       const aborted = options?.signal?.aborted ?? false;
       const message: AssistantMessage = {
