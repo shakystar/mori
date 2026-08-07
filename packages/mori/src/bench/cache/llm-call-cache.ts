@@ -185,7 +185,10 @@ export interface LlmCallCacheHooks {
  * a bench runner is the first real caller to wire counters/loggers into these hooks, so a bug
  * in a hook must not be able to corrupt the terminal message it's merely observing).
  */
-function callHook<Args extends unknown[]>(hook: ((...args: Args) => void) | undefined, ...args: Args): void {
+function callHook<Args extends unknown[]>(
+  hook: ((...args: Args) => void) | undefined,
+  ...args: Args
+): void {
   try {
     hook?.(...args);
   } catch {
