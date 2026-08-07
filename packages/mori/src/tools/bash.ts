@@ -80,9 +80,10 @@ export function createBashTool(
     parameters: bashParameters,
     // Not a sandbox (arbitrary reads/writes anywhere the host user can reach) — running it
     // concurrently with another tool call risks racing on the same files with no isolation
-    // to fall back on. This is the tool-level equivalent of the agent-level
-    // `toolExecution: "sequential"` in agent/index.ts; the two overlap by OR (pi forces the
-    // whole batch sequential if either says so), so this alone does not change behavior yet.
+    // to fall back on. This started (#320) as the tool-level twin of the agent-level
+    // `toolExecution: "sequential"` agent/index.ts used to pass, the two overlapping by OR.
+    // Since #381 it is the only one left: `AgentHarness` takes no `toolExecution`, so this
+    // flag is what still forces the whole batch sequential when bash is in it.
     executionMode: "sequential",
     execute: async (_toolCallId, params: Static<typeof bashParameters>, signal?: AbortSignal) => {
       // The model can ask for a shorter timeout, never a longer one — otherwise a
