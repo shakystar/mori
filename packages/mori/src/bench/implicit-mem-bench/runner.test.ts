@@ -115,20 +115,31 @@ function fakeKernel(options: { injects: boolean }): MoriKernel {
  * `createMoriSession`/`createMoriKernel` need auth + a real on-disk store, which is out of scope
  * for a wiring-only test of this file's own orchestration. `session.prompt()` still calls the
  * injected `deps.kernel.transformContext` the same way `AgentHarness` would, so
- * `withInjectionProbe`'s wrapping is exercised end to end. */
-function fakeHarness(kernels: { context?: MoriKernel; "follow-up"?: MoriKernel }): {
+ * `withInjectionProbe`'s wrapping is exercised end to end.
+ *
+ * `turnOverrides` lets a test make a given session id's `prompt()` return a specific turn (e.g. a
+ * `stopReason: "error"` failure) instead of the default success reply — and close counts are
+ * tracked per session id so a test can assert "context closed once, follow-up closed once"
+ * independently. */
+function fakeHarness(
+  kernels: { context?: MoriKernel; "follow-up"?: MoriKernel },
+  turnOverrides: Partial<Record<"context" | "follow-up", MoriSessionTurn>> = {},
+): {
   createSession: CreateSessionFn;
   createKernel: CreateKernelFn;
   prompts: string[];
   closeCount: () => number;
+  closeCountFor: (sessionId: "context" | "follow-up") => number;
   kernelCalls: { root: string; sessionId: string }[];
 } {
   const prompts: string[] = [];
   const kernelCalls: { root: string; sessionId: string }[] = [];
-  let closes = 0;
+  const closesBySessionId: Record<string, number> = {};
+  let lastSessionId: "context" | "follow-up" | undefined;
 
   const createKernel: CreateKernelFn = (root, sessionId) => {
     kernelCalls.push({ root, sessionId });
+    lastSessionId = sessionId as "context" | "follow-up";
     const kernel = kernels[sessionId as "context" | "follow-up"];
     if (!kernel) throw new Error(`fakeHarness: no kernel double registered for "${sessionId}"`);
     return kernel;
@@ -137,24 +148,42 @@ function fakeHarness(kernels: { context?: MoriKernel; "follow-up"?: MoriKernel }
   const createSession: CreateSessionFn = (
     _env: NodeJS.ProcessEnv,
     deps: RunCliDeps,
-  ): Promise<CreateMoriSessionResult> =>
-    Promise.resolve({
+  ): Promise<CreateMoriSessionResult> => {
+    // `createKernel` for this session id always runs immediately before `createSession` in
+    // `runImplicitMemBenchScenario`, so the last id it saw is this session's id.
+    const sessionId = lastSessionId;
+    if (!sessionId) throw new Error("fakeHarness: createSession called before createKernel");
+    return Promise.resolve({
       ok: true,
       session: {
         async prompt(text: string): Promise<MoriSessionTurn> {
           prompts.push(text);
           await deps.kernel?.transformContext([{ role: "user", content: text, timestamp: 0 }]);
-          return { text: `reply:${text}`, stopReason: "stop", usage: usage() };
+          return (
+            turnOverrides[sessionId] ?? {
+              text: `reply:${text}`,
+              stopReason: "stop",
+              usage: usage(),
+            }
+          );
         },
         consolidate: () => Promise.resolve({ kind: "ok" as const }),
         close(): Promise<void> {
-          closes += 1;
+          closesBySessionId[sessionId] = (closesBySessionId[sessionId] ?? 0) + 1;
           return Promise.resolve();
         },
       },
     });
+  };
 
-  return { createSession, createKernel, prompts, closeCount: () => closes, kernelCalls };
+  return {
+    createSession,
+    createKernel,
+    prompts,
+    closeCount: () => Object.values(closesBySessionId).reduce((sum, n) => sum + n, 0),
+    closeCountFor: (sessionId) => closesBySessionId[sessionId] ?? 0,
+    kernelCalls,
+  };
 }
 
 describe("runImplicitMemBenchScenario (#387)", () => {
@@ -240,6 +269,66 @@ describe("runImplicitMemBenchScenario (#387)", () => {
     const report = costLedger.report();
     expect(report.byAxis[BENCH_AXES.reQuestionRate]).toBeDefined();
     expect(report.byAxis[BENCH_AXES.reQuestionRate]?.totalTokens).toBe(0);
+  });
+
+  it('a failed turn (stopReason !== "stop") rejects instead of scoring the empty output', async () => {
+    const harness = fakeHarness(
+      { context: fakeKernel({ injects: false }), "follow-up": fakeKernel({ injects: true }) },
+      { "follow-up": { text: "", stopReason: "error", usage: usage() } },
+    );
+    const costLedger = createCostLedger();
+
+    await expect(
+      runImplicitMemBenchScenario({
+        scenario: fixtureScenario("s3"),
+        condition: "memory-on",
+        root: "/tmp/fixture-root-fail",
+        env: {},
+        streamFn: async () => {
+          throw new Error("unused");
+        },
+        costLedger,
+        // If the failed turn's empty text ever reached these judges, they'd resolve and the
+        // scenario would (wrongly) produce a score — fail loudly instead so a regression here
+        // can't pass silently.
+        scoringJudge: {
+          judge: () => Promise.reject(new Error("scoringJudge must not run on a failed turn")),
+        },
+        reQuestionJudge: {
+          judge: () => Promise.reject(new Error("reQuestionJudge must not run on a failed turn")),
+        },
+        createSession: harness.createSession,
+        createKernel: harness.createKernel,
+      }),
+    ).rejects.toThrow(/후속 턴이 실패했다.*stopReason: error/);
+  });
+
+  it("closes both the context and follow-up sessions exactly once even when the follow-up turn fails", async () => {
+    const harness = fakeHarness(
+      { context: fakeKernel({ injects: false }), "follow-up": fakeKernel({ injects: true }) },
+      { "follow-up": { text: "", stopReason: "error", usage: usage() } },
+    );
+    const costLedger = createCostLedger();
+
+    await expect(
+      runImplicitMemBenchScenario({
+        scenario: fixtureScenario("s4"),
+        condition: "memory-on",
+        root: "/tmp/fixture-root-fail-close",
+        env: {},
+        streamFn: async () => {
+          throw new Error("unused");
+        },
+        costLedger,
+        scoringJudge: { judge: () => Promise.resolve(true) },
+        reQuestionJudge: { judge: () => Promise.resolve(true) },
+        createSession: harness.createSession,
+        createKernel: harness.createKernel,
+      }),
+    ).rejects.toThrow();
+
+    expect(harness.closeCountFor("context")).toBe(1);
+    expect(harness.closeCountFor("follow-up")).toBe(1);
   });
 });
 

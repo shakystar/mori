@@ -5,7 +5,12 @@ import type { StreamFn } from "@earendil-works/pi-agent-core";
 import type { MoriKernel } from "../../agent/index.js";
 import type { RunCliDeps } from "../../cli/types.js";
 import { createMoriKernel } from "../../kernel/index.js";
-import { createMoriSession, sumUsage, type CreateMoriSessionResult } from "../../session.js";
+import {
+  createMoriSession,
+  sumUsage,
+  type CreateMoriSessionResult,
+  type MoriSessionTurn,
+} from "../../session.js";
 import { BENCH_AXES } from "../axes.js";
 import { FileLlmCallCacheStore } from "../cache/file-cache-store.js";
 import type { CostLedger, CostReport } from "../cost-ledger.js";
@@ -37,6 +42,19 @@ const RE_QUESTION_META_QUESTION =
  * letter follows" does the same "don't match part of a longer word" job without that gap. */
 function parseJudgeVerdict(text: string): boolean {
   return /^\s*(예|yes|y)(?![A-Za-z가-힣])/i.test(text.trim());
+}
+
+/** Provider 실패는 throw가 아니라 `stopReason: "error"`/`"aborted"`로 온다(session.ts:43-46,
+ * cli/repl.ts의 매 턴 후 체크와 같은 컨벤션) — 확인 없이 넘어가면 실패 턴의 빈 `text`가
+ * "메모리가 주입됐는데도 행동 적응에 실패했다"와 구분 안 되는 노이즈로 스코어러·axisRates에
+ * 섞여 들어간다. */
+function assertTurnOk(turn: MoriSessionTurn, scenarioId: string, where: string): void {
+  if (turn.stopReason !== "stop") {
+    throw new Error(
+      `mori bench: 시나리오 "${scenarioId}"의 ${where} 턴이 실패했다 ` +
+        `(stopReason: ${String(turn.stopReason)}) — 실패한 턴의 빈 출력이 점수·계기판에 섞이면 안 된다`,
+    );
+  }
 }
 
 /** `scorer.ts`의 `LlmJudge`를 #374의 `Reader` 위에 얹는 어댑터 — judge 모델 호출은 캐시·비용
@@ -145,14 +163,22 @@ export async function runImplicitMemBenchScenario(
           `(exitCode ${String(contextResult.exitCode)})`,
       );
     }
-    for (const turn of options.scenario.contextTurns) {
-      const result = await contextResult.session.prompt(turn);
-      options.costLedger.record(BENCH_AXES.cost, result.usage);
+    // try/finally: close()가 drain + session-end consolidation의 유일한 트리거이므로, 맥락
+    // 턴 중 실패해도(assertTurnOk의 throw 포함) 이 세션의 관찰 기록이 응고되지 않은 채 남으면
+    // 안 된다.
+    try {
+      for (const turn of options.scenario.contextTurns) {
+        const result = await contextResult.session.prompt(turn);
+        // record를 단언보다 먼저 둔다 — 실패한 턴도 토큰을 태웠다면 비용에는 잡혀야 정확하다.
+        options.costLedger.record(BENCH_AXES.cost, result.usage);
+        assertTurnOk(result, options.scenario.id, "맥락");
+      }
+    } finally {
+      // close()의 drain + session-end consolidation이 "세션 사망"이다 — 이 아래에서 여는 후속
+      // 세션은 항상 이 시점 이후에 생성되므로, 스토어 전용 읽기만 보고 raw 세션 원문을
+      // 재노출받지 않는다(memorize#176 leniency 함정).
+      await contextResult.session.close();
     }
-    // close()의 drain + session-end consolidation이 "세션 사망"이다 — 이 아래에서 여는 후속
-    // 세션은 항상 이 시점 이후에 생성되므로, 스토어 전용 읽기만 보고 raw 세션 원문을
-    // 재노출받지 않는다(memorize#176 leniency 함정).
-    await contextResult.session.close();
   }
 
   let injected = false;
@@ -169,9 +195,14 @@ export async function runImplicitMemBenchScenario(
         `(exitCode ${String(followUpResult.exitCode)})`,
     );
   }
-  const turn = await followUpResult.session.prompt(options.scenario.followUpPrompt);
-  options.costLedger.record(BENCH_AXES.cost, turn.usage);
-  await followUpResult.session.close();
+  let turn!: MoriSessionTurn;
+  try {
+    turn = await followUpResult.session.prompt(options.scenario.followUpPrompt);
+    options.costLedger.record(BENCH_AXES.cost, turn.usage);
+    assertTurnOk(turn, options.scenario.id, "후속");
+  } finally {
+    await followUpResult.session.close();
+  }
 
   const score = await scoreBehavioralAdaptation(options.scenario, turn.text, options.scoringJudge);
 
