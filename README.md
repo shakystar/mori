@@ -137,9 +137,12 @@ home, not under the working root.
 a committed `.mori/project.json`'s `id` field takes precedence when the file
 is present and valid; otherwise it falls back to a hash of the working root
 (`packages/mori/src/kernel/index.ts:273-276`). The first time a checkout runs
-without a usable identity file, mori writes one with the path-hash id it just
-resolved, so every later run — and every other checkout of the same repo —
-adopts the same id instead of re-deriving it.
+with **no** `.mori/project.json`, mori writes one with the path-hash id it
+just resolved; once that file is committed and pushed, every other checkout
+that pulls it adopts the same id instead of re-deriving its own. If the file
+exists but can't be used (unparseable, or an id that doesn't match the
+expected shape), mori warns and falls back to the path hash but **never
+overwrites it** — a committed file is a human's to fix, not mori's.
 
 `.mori/project.json` is meant to be **committed to the repo**, not
 gitignored — that's what lets a fresh clone and every worktree of the same
