@@ -343,6 +343,39 @@ describe("createMoriAgent", () => {
       agentWith(kernel(), { MORI_MODEL: "openai/not-a-real-model" }, fakeStreamFn()),
     ).toThrow(/openai/);
   });
+
+  it("doesn't hang when a double ends its stream via `.end(message)` instead of pushing a terminal event (#367)", async () => {
+    const streamFn: StreamFn = (model) => {
+      const inner = createAssistantMessageEventStream();
+      const message: AssistantMessage = {
+        role: "assistant",
+        content: [{ type: "text", text: "ok" }],
+        api: model.api,
+        provider: model.provider,
+        model: model.id,
+        usage: USAGE,
+        stopReason: "stop",
+        timestamp: 0,
+      };
+      inner.push({ type: "start", partial: message } satisfies AssistantMessageEvent);
+      // Ends via `.end(message)` rather than pushing a terminal `done`/`error` event —
+      // `adaptStreamFn` (fake-provider-models.ts) must forward this past its outer stream,
+      // or the outer stream never resolves and `agent.prompt()` hangs (Codex P2, #367).
+      inner.end(message);
+      return inner;
+    };
+
+    // Raced against a short timer rather than relying on the suite's own test timeout to
+    // catch a hang — a hang here should fail with a clear assertion, not a slow, generic
+    // "Test timed out" report.
+    const outcome = await Promise.race([
+      agentWith(kernel(), {}, streamFn)
+        .prompt("hi")
+        .then(() => "resolved" as const),
+      new Promise<"timed-out">((resolve) => setTimeout(() => resolve("timed-out"), 500)),
+    ]);
+    expect(outcome).toBe("resolved");
+  });
 });
 
 describe("createMoriAgent toolset wiring", () => {
