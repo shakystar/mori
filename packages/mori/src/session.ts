@@ -43,23 +43,38 @@ export interface MoriSession {
    * Runs one turn to completion and reports its outcome. Never throws for a provider-side
    * failure — that surfaces as `stopReason: "error"` or `"aborted"`, the same contract
    * `agent.prompt` itself follows (see cli/repl.ts's equivalent check after every turn).
+   *
+   * Queues behind whatever `prompt()`/`consolidate()`/`close()` call on this session is already
+   * in flight (#371) — this call's kernel work only starts once that one has settled, so it
+   * cannot land observations out of order with it.
    */
   prompt(text: string): Promise<MoriSessionTurn>;
   /**
    * Runs a manual consolidation boundary now — the SDK equivalent of the REPL's `/consolidate`
    * (cli/repl.ts). Throws once `close()` has been called, same table as `prompt()`.
+   *
+   * Queues behind whatever call is already in flight, same ordering guarantee as `prompt()`
+   * above (#371).
    */
   consolidate(signal?: AbortSignal): Promise<ExplicitConsolidateOutcome>;
   /**
    * Settles queued observations and runs the session-end consolidation trigger. Call once, at
    * episode end, in place of the process exit that does this for the CLI (cli/runtime.ts's
-   * `runPrompt`, index.ts's REPL exit path).
+   * `runPrompt`, index.ts's REPL exit path) — that "once, at the end" phrasing is a usage
+   * convention this type does not enforce: nothing rejects an early or overlapping call, because
+   * every ordering is made safe instead (see below).
    *
    * Idempotent under concurrency, not just in sequence: every call — first or Nth, awaited
    * back-to-back or fired off in parallel — shares the same underlying settle and returns once
    * `drain()` and the session-end boundary have actually finished, never before. If that settle
    * throws, every caller (past and future) sees the same rejection; a cleanup failure never
    * quietly reads as "closed".
+   *
+   * That settle itself never starts ahead of a `prompt()`/`consolidate()` call already in flight
+   * on this session (#371): every kernel-touching call queues on one shared order, so a `close()`
+   * that arrives mid-turn (the caller never awaited `prompt()` before calling it — an episode
+   * timeout/abort path, not a bug) waits behind that turn instead of draining around it. A turn's
+   * late-arriving observation is never silently unsettled at episode end.
    */
   close(): Promise<void>;
 }
@@ -108,37 +123,61 @@ export async function createMoriSession(
     }
   }
 
+  // Every kernel-touching call — `prompt()`, `consolidate()`, `close()` — runs its work chained
+  // onto this single tail instead of firing it off the moment it's called (#371). That is what
+  // stops `close()`'s drain from starting ahead of a `prompt()`/`consolidate()` the caller never
+  // awaited: whichever of those enqueued first still has `tail` pointing at its own settle when
+  // `close()` enqueues, so `close()`'s work can only start after it. `enqueue` is synchronous up
+  // to its `tail` reassignment (no `await` before it runs), so two calls made back-to-back with
+  // no intervening `await` — e.g. `prompt()` then immediately `close()` — can never both read the
+  // same stale `tail` and race each other in.
+  let tail: Promise<void> = Promise.resolve();
+
+  function enqueue<T>(work: () => Promise<T>): Promise<T> {
+    const run = tail.then(work, work);
+    tail = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }
+
   return {
     ok: true,
     session: {
       async prompt(text: string): Promise<MoriSessionTurn> {
         assertOpen("prompt");
 
-        const before = agent.state.messages.length;
-        await agent.prompt(text);
-        const replies = agent.state.messages
-          .slice(before)
-          .filter((message): message is AssistantMessage => message.role === "assistant");
-        const last = replies.at(-1);
+        return enqueue(async () => {
+          const before = agent.state.messages.length;
+          await agent.prompt(text);
+          const replies = agent.state.messages
+            .slice(before)
+            .filter((message): message is AssistantMessage => message.role === "assistant");
+          const last = replies.at(-1);
 
-        return {
-          text: last ? contentText(last.content) : "",
-          stopReason: last?.stopReason ?? "error",
-          usage: sumUsage(replies.map((reply) => reply.usage)),
-        };
+          return {
+            text: last ? contentText(last.content) : "",
+            stopReason: last?.stopReason ?? "error",
+            usage: sumUsage(replies.map((reply) => reply.usage)),
+          };
+        });
       },
 
       async consolidate(signal?: AbortSignal): Promise<ExplicitConsolidateOutcome> {
         // `async` (not a bare passthrough) so `assertOpen`'s throw rejects the returned
         // promise instead of escaping synchronously — the same failure shape `prompt()` gives.
         assertOpen("consolidate");
-        // `observe` is fire-and-forget (agent/index.ts), so the turn that just finished may
-        // still have an unpersisted observation queued when this boundary starts. Drain first,
-        // same ordering as runPrompt's finally (cli/runtime.ts), so the boundary's window
-        // includes everything up to this call rather than missing it until the next one
-        // (Codex review, PR #350).
-        await kernel.drain();
-        return consolidateExplicit(kernel, llm, signal);
+
+        return enqueue(async () => {
+          // `observe` is fire-and-forget (agent/index.ts), so the turn that just finished may
+          // still have an unpersisted observation queued when this boundary starts. Drain first,
+          // same ordering as runPrompt's finally (cli/runtime.ts), so the boundary's window
+          // includes everything up to this call rather than missing it until the next one
+          // (Codex review, PR #350).
+          await kernel.drain();
+          return consolidateExplicit(kernel, llm, signal);
+        });
       },
 
       close(): Promise<void> {
@@ -148,12 +187,16 @@ export async function createMoriSession(
         // start their own drain()) and returns that exact promise. A rejection stays cached
         // as-is rather than being retried or swallowed — surfacing the same cleanup failure to
         // every caller is what stops "closed" from lying about the state of the world.
-        closePromise ??= (async () => {
+        //
+        // `enqueue` (not a bare async IIFE) is what makes this wait for an in-flight
+        // `prompt()`/`consolidate()` instead of draining around it (#371) — see `enqueue`'s own
+        // comment above for why this can't race an unawaited call to either.
+        closePromise ??= enqueue(async () => {
           // Same ordering as runPrompt's finally (cli/runtime.ts): drain queued observations
           // before the session-end trigger, so the boundary sees everything this episode did.
           await kernel.drain();
           await consolidateOnSessionEnd(kernel, sessionEndLlm(llm, projectId), stderr);
-        })();
+        });
         return closePromise;
       },
     },
