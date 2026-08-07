@@ -54,8 +54,11 @@ export async function prepareAgent(
 
   // Gate through the exact same Models/provider/store configuration the real turn below
   // uses (see agent.ts's createMoriModels) — the only way "gate passes, turn fails" can't
-  // happen is for both to ask the same question of the same instance.
-  const models = createMoriModels(env, credentialStore);
+  // happen is for both to ask the same question of the same instance. `deps.models` (test
+  // seam, cli/types.ts) lets a test substitute this instance; production always builds a
+  // fresh one here and threads it down to `createMoriAgent` below rather than letting that
+  // build a second, independently-constructed one.
+  const models = deps.models ?? createMoriModels(env, credentialStore);
   const authCheck = await models.checkAuth(providerId);
   if (!authCheck) {
     stderr(unauthenticatedMessage(providerId));
@@ -88,6 +91,7 @@ export async function prepareAgent(
   try {
     agent = createMoriAgent(kernel, credentialStore, env, deps.streamFn, {
       ...(deps.root ? { root: deps.root } : {}),
+      models,
     });
   } catch (err) {
     // Unknown-model errors from createMoriAgent are already a plain, user-facing message

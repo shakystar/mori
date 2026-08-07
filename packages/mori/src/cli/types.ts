@@ -25,10 +25,24 @@ export interface RunCliDeps {
    * drive, in place of `createMoriModels(env, credentialStore)`. Substituting a provider
    * whose `auth.oauth.login` returns a canned credential is what lets the login flow be
    * tested end to end — credential persistence and auth resolution included — without a
-   * real OAuth round trip. The prompt path builds its own `Models` (cli/runtime.ts,
-   * agent.ts) and is unaffected by this.
+   * real OAuth round trip. The prompt path builds its own `Models` and is unaffected by
+   * this — see `models` below for its own, separate seam.
    */
   loginModels?: MutableModels;
+  /**
+   * Test seam for the prompt path only (`mori "…"`, `mori` with no args): the pi-ai
+   * `Models` `cli/runtime.ts`'s auth gate and the real turn (`agent/index.ts`'s
+   * `createMoriAgent`) both resolve providers/models/streaming through, in place of each
+   * independently calling `createMoriModels(env, credentialStore)`. `prepareAgent` builds
+   * this once — or reuses the instance injected here — and threads that SAME instance to
+   * both, so a test that registers a fake provider on it (see
+   * `agent/fake-provider-models.ts`'s `fakeProviderModels` helper) is guaranteed the gate
+   * and the turn see the identical registration, which is the invariant `prepareAgent`'s
+   * "same question of the same instance" comment requires. Unset — the default — means both build
+   * their own instance from `createMoriModels`, exactly as before this seam existed. See
+   * `loginModels` above for the sibling seam scoped to `mori login`/`mori logout`.
+   */
+  models?: MutableModels;
   /**
    * Opens the REPL's line source, or returns `undefined` when there is nobody to prompt —
    * which is what makes `mori` with no arguments print usage instead of looping when stdin
