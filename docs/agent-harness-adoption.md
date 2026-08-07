@@ -1,20 +1,24 @@
 # pi `AgentHarness` 채택 비용 산정 (#287, #7 사람 결정 1안)
 
+> **판정 기록 · 동결됨 (커밋 `dbfc7ab` 시점).** 이 문서는 그 시점의 기록이며 오늘의 코드를
+> 보증하지 않는다. **갱신하지 않는다** — 낡으면 새 문서가 대체(supersede)한다. 인용이 코드와
+> 어긋나 보이면 이 문서가 아니라 코드를 따른다.
+
 로드맵 [#7](https://github.com/shakystar/mori/issues/7)의 압축 경계 seam이
 [2026-08-05 08:59 사람 결정](https://github.com/shakystar/mori/issues/7#issuecomment-5189884614)으로
 **1안(pi `AgentHarness` 채택)** 으로 닫혔다. 이 문서는 그 방향을 실물에 적용해서
 **이주가 무엇을 얻고 무엇을 잃는지, 그리고 몇 조각으로 잘리는지**를 적는다.
 
 `docs/compaction-consolidation-boundary.md`·`docs/storage-boundary-secrets.md`와 같은
-규율을 따른다: **코드가 정본이고 이 문서는 그 지도다.** 아래의 모든 인용은 §0의 기준선
-시점 실물이며, 코드와 어긋나면 코드를 따르고 이 문서를 고친다.
+규율을 따른다: **코드가 정본이고 이 문서는 그 지도다.** 인용의 동결 시점은 위 헤더를
+따른다.
 
 이 문서는 **구현하지 않는다.** `packages/` 아래 실행 줄을 한 줄도 바꾸지 않았다.
 `AgentHarness` 배선은 §7이 자르는 조각의 몫이다.
 
 ## 0. 기준선
 
-- 기준 커밋: `dbfc7ab` (PR #288 머지 직후). 인용한 줄 번호는 이 시점의 것이다.
+- 기준 커밋: `dbfc7ab` (PR #288 머지 직후) — 위 동결 헤더와 같다.
 - 대상 버전: `packages/mori/package.json`이 고정한 `@earendil-works/pi-agent-core`
   **0.82.1**, `@earendil-works/pi-ai` **0.82.1**.
 - pi 쪽 인용의 경로 접두사는 모두
