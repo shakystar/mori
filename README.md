@@ -168,6 +168,30 @@ store that was never created (a session that only read files) is skipped rather 
 the thing that creates it, so the "no trace on disk" guarantee above holds whether or not
 consolidation is configured.
 
+### Programmatic use
+
+`@shakystar/mori` exports `createMoriSession` for driving a multi-turn session from code —
+no terminal required, which is what a harness (a test, a benchmark runner) needs:
+
+```ts
+import { createMoriSession } from "@shakystar/mori";
+
+const result = await createMoriSession(process.env);
+if (!result.ok) process.exit(result.exitCode);
+
+const { session } = result;
+const first = await session.prompt("what does packages/kernel do?");
+console.log(first.text, first.usage);
+
+await session.consolidate(); // the /consolidate REPL command, callable mid-session
+await session.close(); // settles observations + runs the session-end consolidation trigger
+```
+
+Each `prompt()` call reports the turn's reply text, its `stopReason`, and its token/cost
+`usage` (summed across every provider round-trip the turn made, in case of a tool-call
+loop). `consolidate()` and `close()` are the same two triggers described above, reachable
+without a REPL session around them.
+
 ## Tools
 
 ### `bash` — not a sandbox
