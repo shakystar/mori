@@ -67,6 +67,31 @@ function adaptStreamFn(streamFn: StreamFn) {
 }
 
 /**
+ * Replaces `providerId`'s `stream`/`streamSimple` on `models` with `streamFn`.
+ *
+ * The single place a `StreamFn` double is bound to a `Models`. Two callers: this module's
+ * `fakeProviderModels` below, and `createMoriAgent`'s `streamFn` argument — which has to
+ * come through here since #381, because `AgentHarness` streams through `models.streamSimple`
+ * and takes no `streamFn` of its own (docs/agent-harness-adoption.md §Q2).
+ *
+ * Mutates `models` rather than returning a copy: `Models` is an interface with no clone, and
+ * the identity of the instance is load-bearing (`cli/types.ts`'s `models` doc — the auth gate
+ * and the turn must resolve through the same one).
+ */
+export function overrideProviderStream(
+  models: MutableModels,
+  providerId: string,
+  streamFn: StreamFn,
+): void {
+  const provider = models.getProvider(providerId);
+  if (!provider) {
+    throw new Error(`overrideProviderStream: unknown provider "${providerId}"`);
+  }
+  const adapted = adaptStreamFn(streamFn);
+  models.setProvider({ ...provider, stream: adapted, streamSimple: adapted });
+}
+
+/**
  * Test helper (#336): a `Models` wired exactly like production (`createMoriModels`) — same
  * registered providers, same auth/model-catalog resolution — except `providerId`'s provider
  * has its `stream`/`streamSimple` replaced by `streamFn` (via `adaptStreamFn` above).
@@ -88,11 +113,6 @@ export function fakeProviderModels(
   providerId = "anthropic",
 ): MutableModels {
   const models = createMoriModels(env, credentialStore);
-  const provider = models.getProvider(providerId);
-  if (!provider) {
-    throw new Error(`fakeProviderModels: unknown provider "${providerId}"`);
-  }
-  const adapted = adaptStreamFn(streamFn);
-  models.setProvider({ ...provider, stream: adapted, streamSimple: adapted });
+  overrideProviderStream(models, providerId, streamFn);
   return models;
 }

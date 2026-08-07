@@ -1,6 +1,10 @@
-import type { Agent } from "@earendil-works/pi-agent-core";
 import type { ConsolidatorLlm } from "@mori/kernel";
-import { createMoriAgent, createMoriModels, type MoriKernel } from "../agent/index.js";
+import {
+  createMoriAgent,
+  createMoriModels,
+  type MoriAgent,
+  type MoriKernel,
+} from "../agent/index.js";
 import { defaultCredentialsPath, FileCredentialStore } from "../auth/credential-store.js";
 import { getConsolidatorLlm, resolveConsolidatorConfig } from "../external/consolidator/index.js";
 import { createMoriKernel, moriStoreExistsForId } from "../kernel/index.js";
@@ -20,7 +24,7 @@ export interface RunPromptIO {
 export type PreparedAgent =
   | {
       ok: true;
-      agent: Agent;
+      agent: MoriAgent;
       kernel: MoriKernel;
       llm: ConsolidatorLlm | undefined;
       /**
@@ -87,7 +91,7 @@ export async function prepareAgent(
     kernel = created;
     projectId = created.projectId;
   }
-  let agent: Agent;
+  let agent: MoriAgent;
   try {
     agent = createMoriAgent(kernel, credentialStore, env, deps.streamFn, {
       ...(deps.root ? { root: deps.root } : {}),
