@@ -132,7 +132,7 @@ export function listEmbeddings(projectId: string, kind?: string, model?: string)
  *
  * `kind === "memory"` joins to `memories` and applies the SAME liveness
  * filter `listValidMemories` reads through (`invalid_at IS NULL` + self-lane
- * `laneWhere`, projection-store.ts:1024) — mori#257: a memory's row in
+ * `laneWhere`, packages/kernel/src/services/projection-store.ts:1024) — mori#257: a memory's row in
  * `embeddings` outlives invalidation (`deleteEmbedding` has no caller in this
  * repo), so without this join a project whose memories are all invalidated
  * would probe `true` forever and `buildMemoryContext` would keep paying for a
