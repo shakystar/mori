@@ -1,4 +1,4 @@
-import type { Agent, AgentEvent, AgentMessage, StreamFn } from "@earendil-works/pi-agent-core";
+import type { AgentEvent, AgentMessage, StreamFn } from "@earendil-works/pi-agent-core";
 import type {
   AssistantMessage,
   AssistantMessageEvent,
@@ -8,7 +8,7 @@ import type {
 import { createAssistantMessageEventStream, InMemoryCredentialStore } from "@earendil-works/pi-ai";
 import { BufferKernel, type ConsolidatorLlm } from "@mori/kernel";
 import { describe, expect, it, vi } from "vitest";
-import { createMoriAgent, type MoriKernel } from "../agent/index.js";
+import { createMoriAgent, type MoriAgent, type MoriKernel } from "../agent/index.js";
 import { fakeProviderModels } from "../agent/fake-provider-models.js";
 import type { ReplInputSource, ReplLine } from "./repl-input.js";
 import { runRepl, type ReplConsolidation } from "./repl.js";
@@ -27,7 +27,7 @@ const ENV = { ANTHROPIC_API_KEY: "sk-ant-test" } as const;
  * consolidation pass `noConsolidation` (no `MORI_CONSOLIDATE_MODEL`, so `/consolidate` is a
  * no-op skip and `BufferKernel.consolidate()` is never reached anyway).
  */
-function testAgent(streamFn: StreamFn): { agent: Agent; kernel: MoriKernel } {
+function testAgent(streamFn: StreamFn): { agent: MoriAgent; kernel: MoriKernel } {
   const kernel = new BufferKernel<AgentMessage, AgentEvent>();
   const credentialStore = new InMemoryCredentialStore();
   const models = fakeProviderModels(ENV, credentialStore, streamFn);
