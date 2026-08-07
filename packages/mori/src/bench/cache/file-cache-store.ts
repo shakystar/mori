@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { LlmCallCacheStore } from "./llm-call-cache.js";
@@ -53,4 +53,31 @@ export class FileLlmCallCacheStore implements LlmCallCacheStore {
     await writeFile(tmpPath, JSON.stringify(message, null, 2), "utf8");
     await rename(tmpPath, path);
   }
+}
+
+/** Matches the `.tmp-<uuid>` suffix `FileLlmCallCacheStore.set` appends before its atomic
+ * `rename` — the only files under `dir` this name pattern can belong to. */
+const ORPHAN_TMP_SUFFIX = /\.tmp-[0-9a-f-]+$/i;
+
+/**
+ * Removes `<key>.json.tmp-<uuid>` files left behind when a process died between `writeFile`
+ * and `rename` in `FileLlmCallCacheStore.set` — nothing else ever deletes them (owner review,
+ * #374). `dir` has no background TTL sweep or per-write cleanup of prior runs' orphans: the
+ * cache directory's lifetime is the bench runner's to own, so the runner (`runner.ts`) calls
+ * this once at startup, before any `get`/`set` — a bounded, synchronous-at-call-time sweep
+ * beats a timer because a bench run is a single foreground process with a clear "before I read
+ * this cache dir" moment, and nothing else touches these files between runs. Missing `dir`
+ * (never written to yet) is not an error — there is nothing to sweep.
+ */
+export async function sweepOrphanCacheTmpFiles(dir: string): Promise<number> {
+  let entries: string[];
+  try {
+    entries = await readdir(dir);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return 0;
+    throw error;
+  }
+  const orphans = entries.filter((entry) => ORPHAN_TMP_SUFFIX.test(entry));
+  await Promise.all(orphans.map((entry) => unlink(join(dir, entry))));
+  return orphans.length;
 }

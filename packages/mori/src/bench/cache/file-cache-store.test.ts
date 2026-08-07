@@ -1,9 +1,9 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { FileLlmCallCacheStore } from "./file-cache-store.js";
+import { FileLlmCallCacheStore, sweepOrphanCacheTmpFiles } from "./file-cache-store.js";
 
 const MESSAGE: AssistantMessage = {
   role: "assistant",
@@ -56,5 +56,47 @@ describe("FileLlmCallCacheStore", () => {
     const store = new FileLlmCallCacheStore(dir);
     await expect(store.set("../../../etc/passwd", MESSAGE)).rejects.toThrow(/invalid key/);
     await expect(store.get("../../../etc/passwd")).rejects.toThrow(/invalid key/);
+  });
+});
+
+describe("sweepOrphanCacheTmpFiles", () => {
+  let dir: string;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), "mori-llm-cache-sweep-"));
+  });
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("removes .tmp-<uuid> orphans left by a set() that died between write and rename", async () => {
+    await writeFile(join(dir, "abc123.json.tmp-9f2c1e4a-1111-4a11-8a11-000000000001"), "{}");
+    await writeFile(join(dir, "abc123.json"), JSON.stringify(MESSAGE));
+
+    const removed = await sweepOrphanCacheTmpFiles(dir);
+
+    expect(removed).toBe(1);
+    const remaining = await readdir(dir);
+    expect(remaining).toEqual(["abc123.json"]);
+  });
+
+  it("is a no-op when dir has no orphans", async () => {
+    await writeFile(join(dir, "abc123.json"), JSON.stringify(MESSAGE));
+    expect(await sweepOrphanCacheTmpFiles(dir)).toBe(0);
+  });
+
+  it("does not error when dir does not exist yet", async () => {
+    const missing = join(dir, "never-created");
+    expect(await sweepOrphanCacheTmpFiles(missing)).toBe(0);
+  });
+
+  it("cleans up multiple orphans left by concurrent writers to different keys", async () => {
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, "a.json.tmp-11111111-1111-4a11-8a11-000000000001"), "{}");
+    await writeFile(join(dir, "b.json.tmp-22222222-1111-4a11-8a11-000000000002"), "{}");
+
+    expect(await sweepOrphanCacheTmpFiles(dir)).toBe(2);
+    expect(await readdir(dir)).toEqual([]);
   });
 });
