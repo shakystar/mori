@@ -1,7 +1,7 @@
 import { spawn as nodeSpawn } from "node:child_process";
 import { access, mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { contentText, type Api, type Context, type Model } from "@earendil-works/pi-ai";
 import type { StreamFn } from "@earendil-works/pi-agent-core";
 import { BENCH_AXES, type BenchAxis } from "./axes.js";
@@ -24,7 +24,9 @@ const READER_PATH_ENV = "MORI_BENCH_READER_PATH";
 /** Reads `MORI_BENCH_READER_PATH` ("api" | "claude-cli"); unset defaults to "api" (unchanged
  * product-path billing until a bench opts in). Any other value fails loudly rather than
  * silently falling back — a typo'd env value should not quietly bill the wrong path. */
-export function resolveReaderExecutionPath(env: NodeJS.ProcessEnv = process.env): ReaderExecutionPath {
+export function resolveReaderExecutionPath(
+  env: NodeJS.ProcessEnv = process.env,
+): ReaderExecutionPath {
   const raw = env[READER_PATH_ENV];
   if (raw === undefined || raw === "api") return "api";
   if (raw === "claude-cli") return "claude-cli";
@@ -47,19 +49,28 @@ async function pathExists(path: string): Promise<boolean> {
  * completion conditions require. Defaults to a fresh directory under the OS temp dir, never
  * the repo root: a repo-root cwd's `CLAUDE.md` gets read by `claude -p` as developer-agent
  * instructions, and it refuses to hold a bench conversation (memorize#176's cwd-contamination
- * lesson). An explicit `cwd` is honored only if it has no `CLAUDE.md` of its own — pointing
- * this at a contaminated directory fails loudly here instead of silently producing a refusal
- * partway through a bench run.
+ * lesson). An explicit `cwd` is honored only if neither it nor any of its ancestors up to the
+ * filesystem root has a `CLAUDE.md` — `claude -p` resolves project instructions by walking
+ * ancestors the same way this session's own harness does, so a cwd nested under a
+ * `CLAUDE.md`-bearing directory (e.g. a scratch subdirectory of the repo) is just as
+ * contaminated as the repo root itself. Pointing this at a contaminated directory fails loudly
+ * here instead of silently producing a refusal partway through a bench run.
  */
 export async function resolveReaderCwd(explicitCwd?: string): Promise<string> {
   const cwd = explicitCwd ?? (await mkdtemp(join(tmpdir(), "mori-bench-reader-")));
-  if (await pathExists(join(cwd, "CLAUDE.md"))) {
-    throw new Error(
-      `mori bench: reader cwd ${cwd}에 CLAUDE.md가 있다 — claude -p가 이를 개발 에이전트 지시로 읽어 ` +
-        `벤치 대화를 거부한다(memorize#176). 리포 루트가 아닌 중립 디렉터리를 지정해라.`,
-    );
+  let dir = cwd;
+  for (;;) {
+    if (await pathExists(join(dir, "CLAUDE.md"))) {
+      throw new Error(
+        `mori bench: reader cwd ${cwd}의 조상 디렉터리 ${dir}에 CLAUDE.md가 있다 — claude -p가 조상까지 ` +
+          `훑어 이를 개발 에이전트 지시로 읽어 벤치 대화를 거부한다(memorize#176). 리포 루트 하위가 아닌, ` +
+          `완전히 중립적인 디렉터리를 지정해라.`,
+      );
+    }
+    const parent = dirname(dir);
+    if (parent === dir) return cwd;
+    dir = parent;
   }
-  return cwd;
 }
 
 export interface ReaderResult {
@@ -87,16 +98,32 @@ export interface ApiReaderConfig {
 }
 
 function createApiReader(config: ApiReaderConfig): Reader {
-  const cachedStream = withLlmCallCache(config.streamFn, config.cacheStore, config.cacheHooks);
   return {
     async read(prompt: string): Promise<ReaderResult> {
+      // Tracked per call (not hoisted to a shared closure) so concurrent `read()`s can't cross-
+      // signal each other's hit/miss outcome onto the wrong call's cost record.
+      let cacheHit = false;
+      const hooks: LlmCallCacheHooks = {
+        ...config.cacheHooks,
+        onHit: (key) => {
+          cacheHit = true;
+          config.cacheHooks?.onHit?.(key);
+        },
+      };
+      const cachedStream = withLlmCallCache(config.streamFn, config.cacheStore, hooks);
       const context: Context = {
         ...(config.systemPrompt === undefined ? {} : { systemPrompt: config.systemPrompt }),
         messages: [{ role: "user", content: prompt, timestamp: 0 }],
       };
       const stream = await cachedStream(config.model, context, undefined);
       const message = await stream.result();
-      config.costLedger?.record(config.costAxis ?? BENCH_AXES.cost, message.usage);
+      // A cache hit replays a stored `AssistantMessage` byte-for-byte, including its original
+      // `usage`/`cost` — recording that again would make the cost report keep growing on every
+      // replay even though the replayed call makes zero real provider calls. "재실행 비용 ~$0"
+      // (owner review, #374 이월 2) is a report-level guarantee, not just a billing one.
+      if (!cacheHit) {
+        config.costLedger?.record(config.costAxis ?? BENCH_AXES.cost, message.usage);
+      }
       return { text: contentText(message.content) };
     },
   };

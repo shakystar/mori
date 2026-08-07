@@ -1,6 +1,6 @@
 import type { ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Api, AssistantMessage, Context, Model } from "@earendil-works/pi-ai";
@@ -78,7 +78,10 @@ interface FakeSpawnCall {
   options: Record<string, unknown>;
 }
 
-function fakeSpawn(result: { exitCode?: number; stdout?: string; stderr?: string }, calls: FakeSpawnCall[]) {
+function fakeSpawn(
+  result: { exitCode?: number; stdout?: string; stderr?: string },
+  calls: FakeSpawnCall[],
+) {
   return ((command: string, args: readonly string[], options: Record<string, unknown>) => {
     calls.push({ command, args: [...args], options });
     const child = new EventEmitter() as unknown as ChildProcess;
@@ -105,7 +108,9 @@ describe("resolveReaderExecutionPath", () => {
   });
 
   it("throws loudly on an unknown value instead of silently falling back", () => {
-    expect(() => resolveReaderExecutionPath({ MORI_BENCH_READER_PATH: "batch" })).toThrow(/알 수 없는/);
+    expect(() => resolveReaderExecutionPath({ MORI_BENCH_READER_PATH: "batch" })).toThrow(
+      /알 수 없는/,
+    );
   });
 });
 
@@ -133,6 +138,13 @@ describe("resolveReaderCwd", () => {
   it("refuses an explicit cwd with a CLAUDE.md instead of silently contaminating the run", async () => {
     await writeFile(join(dir, "CLAUDE.md"), "# instructions");
     await expect(resolveReaderCwd(dir)).rejects.toThrow(/CLAUDE\.md/);
+  });
+
+  it("refuses an explicit cwd nested under an ancestor's CLAUDE.md, not just its own", async () => {
+    await writeFile(join(dir, "CLAUDE.md"), "# instructions");
+    const nested = join(dir, "scratch", "deeper");
+    await mkdir(nested, { recursive: true });
+    await expect(resolveReaderCwd(nested)).rejects.toThrow(/CLAUDE\.md/);
   });
 });
 
@@ -215,7 +227,31 @@ describe("api reader cache + cost integration", () => {
 
     expect(streamFn.calls).toHaveLength(1);
     const report = costLedger.report();
-    expect(report.byAxis[BENCH_AXES.injectionHitRate]?.totalTokens).toBe(30);
+    // Only the first (miss) call is recorded — the second is a cache hit, replaying stored
+    // usage that must not be re-accumulated into the report (see the dedicated test below).
+    expect(report.byAxis[BENCH_AXES.injectionHitRate]?.totalTokens).toBe(15);
     expect(report.byAxis[BENCH_AXES.cost]).toBeUndefined();
+  });
+
+  it("does not re-record usage into the cost ledger on a cache hit (재실행 비용 ~$0 in the report)", async () => {
+    const streamFn = fakeStreamFn("api reply");
+    const store = new InMemoryStore();
+    const costLedger = createCostLedger();
+
+    const reader = await createReader({
+      path: "api",
+      api: { model: model(), streamFn, cacheStore: store, costLedger },
+    });
+
+    await reader.read("same prompt");
+    const afterMiss = costLedger.report();
+    expect(afterMiss.byAxis[BENCH_AXES.cost]?.cost.total).toBeGreaterThan(0);
+
+    await reader.read("same prompt");
+    const afterHit = costLedger.report();
+    expect(streamFn.calls).toHaveLength(1);
+    expect(afterHit.byAxis[BENCH_AXES.cost]?.cost.total).toBe(
+      afterMiss.byAxis[BENCH_AXES.cost]?.cost.total,
+    );
   });
 });

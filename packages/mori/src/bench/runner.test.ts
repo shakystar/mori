@@ -90,6 +90,10 @@ describe("createBenchRunner", () => {
     expect(firstMisses).toHaveLength(2);
     expect(firstHits).toHaveLength(0);
 
+    // Completion condition (owner 이월 2): the first run's report carries real cost...
+    const firstReport = runner1.costLedger.report();
+    expect(firstReport.byAxis[BENCH_AXES.cost]?.cost.total).toBeGreaterThan(0);
+
     // A second run against the same cache dir — as if the bench were replayed end to end.
     const secondStreamFn = fakeStreamFn();
     const secondHits: string[] = [];
@@ -111,6 +115,11 @@ describe("createBenchRunner", () => {
     expect(secondStreamFn.calls).toBe(0);
     expect(secondHits).toHaveLength(2);
     expect(secondMisses).toHaveLength(0);
+
+    // ...but the replayed second run's report does *not* re-accumulate that cost — "재실행
+    // 비용 ~$0" (owner 이월 2) is a report-level guarantee, not just a billing one.
+    const secondReport = runner2.costLedger.report();
+    expect(secondReport.byAxis[BENCH_AXES.cost]?.cost.total ?? 0).toBe(0);
   });
 
   it("records reader usage into the cost ledger and persists it via #373's writeCostReport", async () => {
@@ -143,7 +152,12 @@ describe("createBenchRunner", () => {
     const past = new Date(Date.now() - 120_000);
     await utimes(orphan, past, past);
 
-    await createBenchRunner({ cacheDir, model: model(), streamFn: fakeStreamFn(), readerPath: "api" });
+    await createBenchRunner({
+      cacheDir,
+      model: model(),
+      streamFn: fakeStreamFn(),
+      readerPath: "api",
+    });
 
     expect(await readdir(cacheDir)).toEqual([]);
   });
@@ -153,7 +167,11 @@ describe("createBenchRunner", () => {
     const spawnCalls: Array<{ command: string; args: string[]; cwd: unknown }> = [];
     const cliDir = await mkdtemp(join(tmpdir(), "mori-bench-runner-cli-"));
     try {
-      const fakeSpawn = ((command: string, args: readonly string[], options: Record<string, unknown>) => {
+      const fakeSpawn = ((
+        command: string,
+        args: readonly string[],
+        options: Record<string, unknown>,
+      ) => {
         spawnCalls.push({ command, args: [...args], cwd: options.cwd });
         const child = new EventEmitter() as unknown as ChildProcess;
         const stdout = new EventEmitter();
@@ -192,7 +210,11 @@ describe("createBenchRunner", () => {
     const cliDir = await mkdtemp(join(tmpdir(), "mori-bench-runner-env-"));
     try {
       const spawnCalls: unknown[] = [];
-      const fakeSpawn = ((command: string, args: readonly string[], options: Record<string, unknown>) => {
+      const fakeSpawn = ((
+        command: string,
+        args: readonly string[],
+        options: Record<string, unknown>,
+      ) => {
         spawnCalls.push({ command, args, options });
         const child = new EventEmitter() as unknown as ChildProcess;
         const stdout = new EventEmitter();
