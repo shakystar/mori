@@ -1,6 +1,6 @@
 import type { ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Api, AssistantMessage, Model } from "@earendil-works/pi-ai";
@@ -138,7 +138,10 @@ describe("createBenchRunner", () => {
   });
 
   it("sweeps orphan .tmp-<uuid> cache files at startup before the cache is used", async () => {
-    await writeFile(join(cacheDir, "stale.json.tmp-11111111-1111-4a11-8a11-000000000001"), "{}");
+    const orphan = join(cacheDir, "stale.json.tmp-11111111-1111-4a11-8a11-000000000001");
+    await writeFile(orphan, "{}");
+    const past = new Date(Date.now() - 120_000);
+    await utimes(orphan, past, past);
 
     await createBenchRunner({ cacheDir, model: model(), streamFn: fakeStreamFn(), readerPath: "api" });
 

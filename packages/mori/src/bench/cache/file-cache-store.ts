@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { LlmCallCacheStore } from "./llm-call-cache.js";
@@ -60,6 +60,17 @@ export class FileLlmCallCacheStore implements LlmCallCacheStore {
 const ORPHAN_TMP_SUFFIX = /\.tmp-[0-9a-f-]+$/i;
 
 /**
+ * A `.tmp-<uuid>` file younger than this is left alone — it may belong to a `set()` that is
+ * still between its `writeFile` and `rename` (see `set`'s own doc comment: a second
+ * `createBenchRunner` pointed at the same `dir` while a run is in flight is exactly the
+ * "concurrent bench calls that happen to share a cache key" scenario that comment already
+ * anticipates). A real orphan's write finished, at the latest, when the process that created it
+ * died — long before any live sweep could observe it — so this guard only ever delays cleanup
+ * of a genuine orphan by a few writes' worth of wall-clock; it never leaves one permanently.
+ */
+const MIN_ORPHAN_AGE_MS = 60_000;
+
+/**
  * Removes `<key>.json.tmp-<uuid>` files left behind when a process died between `writeFile`
  * and `rename` in `FileLlmCallCacheStore.set` — nothing else ever deletes them (owner review,
  * #374). `dir` has no background TTL sweep or per-write cleanup of prior runs' orphans: the
@@ -67,7 +78,9 @@ const ORPHAN_TMP_SUFFIX = /\.tmp-[0-9a-f-]+$/i;
  * this once at startup, before any `get`/`set` — a bounded, synchronous-at-call-time sweep
  * beats a timer because a bench run is a single foreground process with a clear "before I read
  * this cache dir" moment, and nothing else touches these files between runs. Missing `dir`
- * (never written to yet) is not an error — there is nothing to sweep.
+ * (never written to yet) is not an error — there is nothing to sweep. Candidates younger than
+ * `MIN_ORPHAN_AGE_MS` are skipped (see that constant's doc) instead of raced against a write
+ * still in flight.
  */
 export async function sweepOrphanCacheTmpFiles(dir: string): Promise<number> {
   let entries: string[];
@@ -77,7 +90,21 @@ export async function sweepOrphanCacheTmpFiles(dir: string): Promise<number> {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return 0;
     throw error;
   }
-  const orphans = entries.filter((entry) => ORPHAN_TMP_SUFFIX.test(entry));
-  await Promise.all(orphans.map((entry) => unlink(join(dir, entry))));
-  return orphans.length;
+  const candidates = entries.filter((entry) => ORPHAN_TMP_SUFFIX.test(entry));
+  const now = Date.now();
+  const removed = await Promise.all(
+    candidates.map(async (entry) => {
+      const path = join(dir, entry);
+      try {
+        const info = await stat(path);
+        if (now - info.mtimeMs < MIN_ORPHAN_AGE_MS) return false;
+        await unlink(path);
+        return true;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+        throw error;
+      }
+    }),
+  );
+  return removed.filter(Boolean).length;
 }
