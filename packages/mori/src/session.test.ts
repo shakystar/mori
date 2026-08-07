@@ -64,20 +64,29 @@ function scriptedProvider(replies: { text: string; usage?: Usage }[]) {
 /**
  * A `MoriKernel` whose `consolidate`/`drain` are spies — for asserting the manual and
  * session-end triggers (#107, #341) without a real store or consolidator LLM in the loop.
- * Mirrors `index.test.ts`'s `spyKernel`.
+ * Mirrors `index.test.ts`'s `spyKernel`. `calls` additionally records call order, so a test
+ * can assert `drain()` lands before `consolidate()` on each boundary, not just call counts
+ * (PR #350 owner review round 3).
  */
-function spyKernel(): MoriKernel & { consolidateCalls: number; drainCalls: number } {
+function spyKernel(): MoriKernel & {
+  consolidateCalls: number;
+  drainCalls: number;
+  calls: string[];
+} {
   const spy = {
     transformContext: async (messages: AgentMessage[]) => messages,
     observe: () => {},
     resetConversation: () => {},
     consolidateCalls: 0,
     drainCalls: 0,
+    calls: [] as string[],
     async drain() {
       spy.drainCalls++;
+      spy.calls.push("drain");
     },
     async consolidate() {
       spy.consolidateCalls++;
+      spy.calls.push("consolidate");
     },
   };
   return spy;
@@ -154,6 +163,9 @@ describe("createMoriSession (#341)", () => {
     // Once from consolidate() itself (settles the just-finished turn's queued observation
     // before the manual boundary runs, #341 PR #350 Codex review) and once from close().
     expect(kernel.drainCalls).toBe(2);
+    // Call order, not just counts: each boundary's drain() must land before its consolidate()
+    // so the boundary sees everything up to that call (PR #350 owner review round 3).
+    expect(kernel.calls).toEqual(["drain", "consolidate", "drain", "consolidate"]);
   });
 
   it("skips consolidate() as a no-op when MORI_CONSOLIDATE_MODEL is unset", async () => {
