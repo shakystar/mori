@@ -173,8 +173,12 @@ const ZERO_USAGE: Usage = {
  * `cacheWrite1h`/`reasoning` stay absent from the sum unless at least one summed call
  * reported one — matching `Usage`'s own "left undefined by providers that don't" contract
  * rather than coercing an unsupported provider's turn to a misleading `0`.
+ *
+ * Exported for bench/cost-ledger.ts (#373), which reduces the same `Usage[]` shape into a
+ * run's per-axis totals and needs the exact same optional-field handling this turn-summing
+ * already has — duplicating it would risk the two silently drifting apart.
  */
-function sumUsage(usages: Usage[]): Usage {
+export function sumUsage(usages: Usage[]): Usage {
   return usages.reduce(
     (total, usage) => ({
       input: total.input + usage.input,
