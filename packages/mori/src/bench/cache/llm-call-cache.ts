@@ -117,8 +117,9 @@ function replayStream(message: AssistantMessage): AssistantMessageEventStream {
  * turn a successful provider response into a synthetic error for the caller. The `.catch`
  * below is reserved for genuine failures of `inner`'s iteration/result, not for `onFinal`.
  *
- * Neither branch calls `outer.end()`: `EventStream#push` (pi-ai `dist/utils/event-stream.js`,
- * `push()`) already sets `done = true` and resolves `finalResultPromise` the moment a
+ * Neither branch calls `outer.end()`: `EventStream#push` (pi-ai
+ * `dist/utils/event-stream.js:17-32`, `@earendil-works/pi-ai@0.82.1`) already sets
+ * `done = true` and resolves `finalResultPromise` the moment a
  * `done`/`error` event is pushed — `end()` only matters for a stream that finishes without
  * ever pushing a terminal event, which never happens here (both branches always push exactly
  * one `done` or `error` event before returning). Calling it anyway would be a silent no-op
@@ -176,6 +177,26 @@ export interface LlmCallCacheHooks {
 }
 
 /**
+ * Invokes a hook and swallows anything it throws. `onHit`/`onMiss` run inline in the
+ * `StreamFn` this module returns, and `onStoreError` runs inside `tapStream`'s `onFinal`
+ * (whose own failures are caught and turned into a synthetic error terminal, see `tapStream`
+ * above) — a throwing hook in any of those three spots would otherwise propagate out and turn
+ * an already-successful provider response into that same synthetic error (owner review, #374:
+ * a bench runner is the first real caller to wire counters/loggers into these hooks, so a bug
+ * in a hook must not be able to corrupt the terminal message it's merely observing).
+ */
+function callHook<Args extends unknown[]>(
+  hook: ((...args: Args) => void) | undefined,
+  ...args: Args
+): void {
+  try {
+    hook?.(...args);
+  } catch {
+    // Deliberately swallowed — see doc comment above.
+  }
+}
+
+/**
  * Wraps a `StreamFn` with deterministic replay: same (model, prompt, params) key → the
  * previously stored response is replayed with zero calls into `streamFn` (#372 completion
  * condition — a fake-provider call counter in a test proves this). A cache miss calls
@@ -190,16 +211,16 @@ export function withLlmCallCache(
     const key = llmCallCacheKey(model, context, options);
     const cached = await store.get(key);
     if (cached) {
-      hooks?.onHit?.(key);
+      callHook(hooks?.onHit, key);
       return replayStream(cached);
     }
-    hooks?.onMiss?.(key);
+    callHook(hooks?.onMiss, key);
     const inner = await streamFn(model, context, options);
     return tapStream(inner, model, async (message) => {
       try {
         await store.set(key, message);
       } catch (error) {
-        hooks?.onStoreError?.(key, error);
+        callHook(hooks?.onStoreError, key, error);
       }
     });
   };

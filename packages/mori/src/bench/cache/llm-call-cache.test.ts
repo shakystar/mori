@@ -189,6 +189,61 @@ describe("withLlmCallCache", () => {
     expect(storeErrors).toHaveLength(1);
   });
 
+  it("still returns the provider's successful response when onHit throws", async () => {
+    const response = assistantMessage();
+    const inner = fakeStreamFn(response);
+    const cached = withLlmCallCache(inner, store, {
+      onHit: () => {
+        throw new Error("onHit boom");
+      },
+    });
+
+    await (await cached(model(), context(), undefined)).result();
+    const second = await (await cached(model(), context(), undefined)).result();
+
+    expect(second.content).toEqual(response.content);
+    expect(second.usage).toEqual(response.usage);
+    expect(second.stopReason).toBe("stop");
+  });
+
+  it("still returns the provider's successful response when onMiss throws", async () => {
+    const response = assistantMessage();
+    const inner = fakeStreamFn(response);
+    const cached = withLlmCallCache(inner, store, {
+      onMiss: () => {
+        throw new Error("onMiss boom");
+      },
+    });
+
+    const result = await (await cached(model(), context(), undefined)).result();
+
+    expect(result.content).toEqual(response.content);
+    expect(result.usage).toEqual(response.usage);
+    expect(result.stopReason).toBe("stop");
+  });
+
+  it("still returns the provider's successful response when onStoreError throws", async () => {
+    const response = assistantMessage();
+    const inner = fakeStreamFn(response);
+    const failingStore: LlmCallCacheStore = {
+      get: async () => undefined,
+      set: async () => {
+        throw new Error("disk full");
+      },
+    };
+    const cached = withLlmCallCache(inner, failingStore, {
+      onStoreError: () => {
+        throw new Error("onStoreError boom");
+      },
+    });
+
+    const result = await (await cached(model(), context(), undefined)).result();
+
+    expect(result.content).toEqual(response.content);
+    expect(result.usage).toEqual(response.usage);
+    expect(result.stopReason).toBe("stop");
+  });
+
   it("does not cache an error terminal — the next call retries the provider", async () => {
     const errorMessage = assistantMessage({ stopReason: "error", errorMessage: "boom" });
     const inner = fakeStreamFn(errorMessage, assistantMessage());
