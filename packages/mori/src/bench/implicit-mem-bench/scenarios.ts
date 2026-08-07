@@ -36,7 +36,12 @@ const TABS_INDENTATION_SCENARIO: ImplicitMemBenchScenario = {
     "고마워. 근데 방금 네가 예시로 보여준 스니펫 중 하나가 스페이스로 인덴트돼 있길래 내가 다시 고쳤어:\n\n```ts\nfunction subtract(a: number, b: number) {\n\treturn a - b;\n}\n```\n\n이 버전으로 계속 진행해줘.",
     "다음 것도 방금 스타일 그대로 만들어줘: 두 수 중 큰 값을 반환하는 함수.",
   ],
-  followUpPrompt: "두 문자열을 이어붙이는 concat 함수를 TypeScript로 하나 짜줘.",
+  // 이 과제는 반드시 블록 본문 + 분기를 포함하게 해서 들여쓴 줄이 최소 1줄 나오도록 고정한다.
+  // uses-tab-indentation은 "들여쓴 줄이 0개면 false"이므로, 여기서 증거를 강제하지 않으면
+  // 한 줄 화살표 함수 정답이 탭 선호와 무관하게 0점으로 채점된다.
+  followUpPrompt:
+    "두 문자열을 이어붙이는 concat 함수를 TypeScript로 짜줘. 둘 중 한쪽이 빈 문자열이면 " +
+    "다른 쪽을 그대로 반환하도록 분기도 넣고, 함수는 블록 본문으로 작성해줘.",
   impliedPreference: "코드 들여쓰기는 탭 문자를 쓴다",
   rubric: [
     {
@@ -101,9 +106,9 @@ const PNPM_WORKFLOW_SCENARIO: ImplicitMemBenchScenario = {
       id: "uses-pnpm-command",
       description: "설치 명령에 pnpm을 쓰고 npm/yarn 명령은 섞지 않는다",
       check: (output) => {
-        const usesPnpm = /\bpnpm\s+(add|install)\b/.test(output);
-        const usesNpm = /\bnpm\s+(install|i)\b/i.test(output);
-        const usesYarn = /\byarn\s+add\b/i.test(output);
+        const usesPnpm = /\bpnpm\s+(?:add|install)\b/i.test(output);
+        const usesNpm = /\bnpm\s+(?:ci|i|install|run|exec|x)\b/i.test(output);
+        const usesYarn = /\byarn\s+(?:add|install)\b/i.test(output);
         return usesPnpm && !usesNpm && !usesYarn;
       },
     },

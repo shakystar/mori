@@ -73,4 +73,14 @@ describe("IMPLICIT_MEM_BENCH_SCENARIOS (#386)", () => {
     expect(pnpmScore.score).toBe(1);
     expect(npmScore.score).toBeLessThan(1);
   });
+
+  it("pnpm-workflow: scores less than 1 when pnpm install is mixed with npm CI steps", async () => {
+    const scenario = IMPLICIT_MEM_BENCH_SCENARIOS.find((s) => s.id === "pnpm-workflow");
+    if (!scenario) throw new Error("pnpm-workflow scenario missing");
+
+    const mixedOutput = "pnpm add lodash\n\nCI: npm ci && npm run build";
+    const mixedScore = await scoreBehavioralAdaptation(scenario, mixedOutput, ALWAYS_TRUE_JUDGE);
+
+    expect(mixedScore.score).toBeLessThan(1);
+  });
 });
