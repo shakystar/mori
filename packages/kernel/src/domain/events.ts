@@ -82,11 +82,18 @@ export interface DomainEvent<TPayload = unknown> extends BaseEntity {
   scopeId: EntityId;
   actor: string;
   /**
-   * Per-event provenance (3.0.0 Phase 0). `writer` = the originating actor
-   * identity; `sourceProjectId` = the originating store id. OPTIONAL and
-   * currently UNCONSUMED — captured on append and preserved across sync so later
-   * phases can group, filter, and recover by origin. Absent on legacy/pre-3.0.0
-   * events (column NULL).
+   * Per-event provenance (3.0.0 Phase 0). OPTIONAL; absent on legacy/pre-3.0.0
+   * events (column NULL). Both fields are consumed today — captured on append
+   * and preserved across sync so downstream code can group, filter, and
+   * recover by origin:
+   *
+   * `writer` = the originating actor identity. Read by the `memory.retracted`
+   * handler to stamp `retractedBy` on the tombstoned record —
+   * packages/kernel/src/projections/projector.ts:601.
+   *
+   * `sourceProjectId` = the originating store id. Read by `laneOf` to decide
+   * self vs. foreign lane, the basis for cross-lane owner gating (SoT-040) —
+   * packages/kernel/src/projections/projector.ts:151.
    */
   writer?: string;
   sourceProjectId?: EntityId;
