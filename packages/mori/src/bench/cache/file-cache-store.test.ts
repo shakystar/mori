@@ -51,4 +51,10 @@ describe("FileLlmCallCacheStore", () => {
     await store.set("key", MESSAGE);
     expect(await store.get("key")).toEqual(MESSAGE);
   });
+
+  it("rejects a key that could escape dir instead of reading/writing outside it", async () => {
+    const store = new FileLlmCallCacheStore(dir);
+    await expect(store.set("../../../etc/passwd", MESSAGE)).rejects.toThrow(/invalid key/);
+    await expect(store.get("../../../etc/passwd")).rejects.toThrow(/invalid key/);
+  });
 });

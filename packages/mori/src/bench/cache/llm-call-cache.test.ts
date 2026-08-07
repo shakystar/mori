@@ -167,6 +167,28 @@ describe("withLlmCallCache", () => {
     expect(inner.calls).toBe(1);
   });
 
+  it("still returns the provider's successful response when the store write fails", async () => {
+    const response = assistantMessage();
+    const inner = fakeStreamFn(response);
+    const failingStore: LlmCallCacheStore = {
+      get: async () => undefined,
+      set: async () => {
+        throw new Error("disk full");
+      },
+    };
+    const storeErrors: Array<{ key: string; error: unknown }> = [];
+    const cached = withLlmCallCache(inner, failingStore, {
+      onStoreError: (key, error) => storeErrors.push({ key, error }),
+    });
+
+    const result = await (await cached(model(), context(), undefined)).result();
+
+    expect(result.content).toEqual(response.content);
+    expect(result.usage).toEqual(response.usage);
+    expect(result.stopReason).toBe("stop");
+    expect(storeErrors).toHaveLength(1);
+  });
+
   it("does not cache an error terminal — the next call retries the provider", async () => {
     const errorMessage = assistantMessage({ stopReason: "error", errorMessage: "boom" });
     const inner = fakeStreamFn(errorMessage, assistantMessage());

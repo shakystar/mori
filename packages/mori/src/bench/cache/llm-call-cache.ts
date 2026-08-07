@@ -110,9 +110,23 @@ function replayStream(message: AssistantMessage): AssistantMessageEventStream {
  * the instant a `done`/`error` event is pushed, without waiting for `end()` — a consumer that
  * awaits `.result()` and immediately issues the same call again would otherwise race the cache
  * write and can observe a second miss. Error/aborted terminals are not persisted: caching a
- * transient failure would make it replay forever. */
+ * transient failure would make it replay forever.
+ *
+ * `onFinal` is expected to swallow its own failures (see `withLlmCallCache`, which wraps
+ * `store.set` in a try/catch before passing it in here) — a cache *write* failure must not
+ * turn a successful provider response into a synthetic error for the caller. The `.catch`
+ * below is reserved for genuine failures of `inner`'s iteration/result, not for `onFinal`.
+ *
+ * Neither branch calls `outer.end()`: `EventStream#push` (pi-ai `dist/utils/event-stream.js`,
+ * `push()`) already sets `done = true` and resolves `finalResultPromise` the moment a
+ * `done`/`error` event is pushed — `end()` only matters for a stream that finishes without
+ * ever pushing a terminal event, which never happens here (both branches always push exactly
+ * one `done` or `error` event before returning). Calling it anyway would be a silent no-op
+ * for the second-or-later invocation (`resolveFinalResult` only fires once), so leaving it
+ * out keeps the two branches symmetric instead of one of them carrying a dead call. */
 function tapStream(
   inner: AssistantMessageEventStream,
+  model: Model<Api>,
   onFinal: (message: AssistantMessage) => Promise<void>,
 ): AssistantMessageEventStream {
   const outer = createAssistantMessageEventStream();
@@ -126,14 +140,14 @@ function tapStream(
       }
       outer.push(event);
     }
-    outer.end(await inner.result());
   })().catch((error: unknown) => {
+    const identity = modelIdentity(model);
     const message: AssistantMessage = {
       role: "assistant",
       content: [],
-      api: "pi-messages",
-      provider: "anthropic",
-      model: "unknown",
+      api: identity.api,
+      provider: identity.provider,
+      model: identity.id,
       usage: {
         input: 0,
         output: 0,
@@ -154,6 +168,11 @@ function tapStream(
 export interface LlmCallCacheHooks {
   onHit?: (key: string) => void;
   onMiss?: (key: string) => void;
+  /** Called when persisting a cache-eligible response fails (e.g. a full disk or a read-only
+   * cache dir). The response itself still reaches the caller unchanged — a cache *write*
+   * failure is equivalent to a cache miss for this call, not a reason to discard a successful,
+   * already-paid-for provider response. */
+  onStoreError?: (key: string, error: unknown) => void;
 }
 
 /**
@@ -176,6 +195,12 @@ export function withLlmCallCache(
     }
     hooks?.onMiss?.(key);
     const inner = await streamFn(model, context, options);
-    return tapStream(inner, (message) => store.set(key, message));
+    return tapStream(inner, model, async (message) => {
+      try {
+        await store.set(key, message);
+      } catch (error) {
+        hooks?.onStoreError?.(key, error);
+      }
+    });
   };
 }
