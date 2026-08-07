@@ -24,11 +24,7 @@
  * Do not run this tool against untrusted prompts. Real isolation (container, seccomp,
  * a permission system) is a separate concern and is not implemented here.
  */
-import type {
-  AgentTool,
-  BeforeToolCallContext,
-  BeforeToolCallResult,
-} from "@earendil-works/pi-agent-core";
+import type { AgentTool, BeforeToolCallResult } from "@earendil-works/pi-agent-core";
 import { Type, type Static } from "@earendil-works/pi-ai";
 import { blockedReason, findBlockedPattern } from "./bash-guard.js";
 import {
@@ -84,9 +80,10 @@ export function createBashTool(
     parameters: bashParameters,
     // Not a sandbox (arbitrary reads/writes anywhere the host user can reach) — running it
     // concurrently with another tool call risks racing on the same files with no isolation
-    // to fall back on. This is the tool-level equivalent of the agent-level
-    // `toolExecution: "sequential"` in agent/index.ts; the two overlap by OR (pi forces the
-    // whole batch sequential if either says so), so this alone does not change behavior yet.
+    // to fall back on. This started (#320) as the tool-level twin of the agent-level
+    // `toolExecution: "sequential"` agent/index.ts used to pass, the two overlapping by OR.
+    // Since #381 it is the only one left: `AgentHarness` takes no `toolExecution`, so this
+    // flag is what still forces the whole batch sequential when bash is in it.
     executionMode: "sequential",
     execute: async (_toolCallId, params: Static<typeof bashParameters>, signal?: AbortSignal) => {
       // The model can ask for a shorter timeout, never a longer one — otherwise a
@@ -110,7 +107,27 @@ export function createBashTool(
 }
 
 /**
- * Preflight hook for `Agent`'s `beforeToolCall`.
+ * The pending tool call as the guard below reads it: the tool's name and its validated
+ * arguments, nothing else.
+ *
+ * Deliberately narrower than pi's `BeforeToolCallContext`. The guard is now fed from two
+ * places that carry different amounts of context — the low-level `Agent`'s `beforeToolCall`
+ * (which passes a full `BeforeToolCallContext`) and `AgentHarness`'s `tool_call` hook
+ * (whose event has the tool name and input but neither the requesting assistant message
+ * nor the agent context, #381). Naming only the two fields the guard actually reads is what
+ * lets one function serve both: `BeforeToolCallContext` still satisfies this shape, so the
+ * `Agent` call site type-checks exactly as before.
+ */
+export interface BashGuardToolCall {
+  /** The tool call being prepared. Only its `name` decides whether the guard looks further. */
+  toolCall: { name: string };
+  /** Validated tool arguments for the target tool schema. */
+  args: unknown;
+}
+
+/**
+ * Preflight guard for a bash tool call — `Agent`'s `beforeToolCall` / the harness's
+ * `tool_call` hook.
  *
  * Returning `{ block: true, reason }` makes the agent loop skip execution and hand the
  * reason to the model as an error tool result — the model can then try something else.
@@ -120,10 +137,7 @@ export function createBashTool(
  */
 export function createBashBeforeToolCall(
   toolName: string = BASH_TOOL_NAME,
-): (
-  context: BeforeToolCallContext,
-  signal?: AbortSignal,
-) => Promise<BeforeToolCallResult | undefined> {
+): (context: BashGuardToolCall) => Promise<BeforeToolCallResult | undefined> {
   return async (context) => {
     if (context.toolCall.name !== toolName) return undefined;
 

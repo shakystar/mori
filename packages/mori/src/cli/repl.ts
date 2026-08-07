@@ -1,6 +1,5 @@
-import type { Agent } from "@earendil-works/pi-agent-core";
 import type { ConsolidatorLlm } from "@mori/kernel";
-import type { MoriKernel } from "../agent/index.js";
+import type { MoriAgent, MoriKernel } from "../agent/index.js";
 import { consolidateExplicit, type ExplicitConsolidateOutcome } from "./consolidation.js";
 import {
   replBanner,
@@ -48,7 +47,7 @@ const PROMPT = "› ";
  * for every way a user can leave the REPL (EOF, `/exit`, Ctrl-C while idle).
  */
 export async function runRepl(
-  agent: Agent,
+  agent: MoriAgent,
   input: ReplInputSource,
   io: ReplIO,
   consolidation: ReplConsolidation,

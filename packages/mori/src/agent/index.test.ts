@@ -2,7 +2,7 @@ import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  Agent,
+  AgentHarness,
   type AgentEvent,
   type AgentMessage,
   type StreamFn,
@@ -17,11 +17,14 @@ import type {
 import { createAssistantMessageEventStream, InMemoryCredentialStore } from "@earendil-works/pi-ai";
 import { BufferKernel } from "@mori/kernel";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { createMoriAgent, createMoriModels, type CreateMoriAgentOptions } from "./index.js";
+import {
+  createMoriAgent,
+  createMoriModels,
+  type CreateMoriAgentOptions,
+  type MoriAgent,
+} from "./index.js";
 import { fakeProviderModels } from "./fake-provider-models.js";
 import { EXPERIMENTAL_OPENAI_OAUTH_ENV, OPENAI_OAUTH_PROVIDER_ID } from "../auth/experimental.js";
-import { createBashTool } from "../tools/bash.js";
-import { createReadFileTool } from "../tools/read-file.js";
 
 const ONE_HOUR_MS = 60 * 60 * 1000;
 const GATE_ON = { [EXPERIMENTAL_OPENAI_OAUTH_ENV]: "1" } as const;
@@ -213,6 +216,24 @@ function kernel() {
   return new BufferKernel<AgentMessage, AgentEvent>();
 }
 
+/**
+ * A `BufferKernel` that also records what its retrieval hook was handed. Used by the
+ * harness-contract case below to see the `context` hook fire — and with which arguments,
+ * since the run's `AbortSignal` reaches it by a different route on the harness than it did
+ * on the low-level `Agent` (agent/index.ts's `runSignal`).
+ */
+class RecordingKernel extends BufferKernel<AgentMessage, AgentEvent> {
+  readonly contexts: Array<{ messages: AgentMessage[]; signal: AbortSignal | undefined }> = [];
+
+  override async transformContext(
+    messages: AgentMessage[],
+    signal?: AbortSignal,
+  ): Promise<AgentMessage[]> {
+    this.contexts.push({ messages, signal });
+    return messages;
+  }
+}
+
 const USAGE = {
   input: 0,
   output: 0,
@@ -304,7 +325,7 @@ function agentWith(
   env: NodeJS.ProcessEnv,
   streamFn: StreamFn,
   options: CreateMoriAgentOptions = {},
-): Agent {
+): MoriAgent {
   const credentialStore = store();
   const fullEnv = { ...ENV, ...env };
   return createMoriAgent(moriKernel, credentialStore, fullEnv, undefined, {
@@ -316,20 +337,20 @@ function agentWith(
 describe("createMoriAgent", () => {
   it("defaults to the anthropic provider and claude-sonnet-4-6 when MORI_MODEL is unset", () => {
     const agent = agentWith(kernel(), {}, fakeStreamFn());
-    expect(agent.state.model.provider).toBe("anthropic");
-    expect(agent.state.model.id).toBe("claude-sonnet-4-6");
+    expect(agent.getModel().provider).toBe("anthropic");
+    expect(agent.getModel().id).toBe("claude-sonnet-4-6");
   });
 
   it("reads a bare MORI_MODEL as an anthropic model id (pre-existing form)", () => {
     const agent = agentWith(kernel(), { MORI_MODEL: "claude-opus-5" }, fakeStreamFn());
-    expect(agent.state.model.provider).toBe("anthropic");
-    expect(agent.state.model.id).toBe("claude-opus-5");
+    expect(agent.getModel().provider).toBe("anthropic");
+    expect(agent.getModel().id).toBe("claude-opus-5");
   });
 
   it("selects the openai provider and model from 'openai/<model>'", () => {
     const agent = agentWith(kernel(), { MORI_MODEL: "openai/gpt-5.4" }, fakeStreamFn());
-    expect(agent.state.model.provider).toBe("openai");
-    expect(agent.state.model.id).toBe("gpt-5.4");
+    expect(agent.getModel().provider).toBe("openai");
+    expect(agent.getModel().id).toBe("gpt-5.4");
   });
 
   it("throws a plain, supported-list error for an unknown provider", () => {
@@ -375,6 +396,51 @@ describe("createMoriAgent", () => {
       new Promise<"timed-out">((resolve) => setTimeout(() => resolve("timed-out"), 500)),
     ]);
     expect(outcome).toBe("resolved");
+  });
+
+  it("returns an AgentHarness whose context / tool_call / subscribe wiring all fire (#381)", async () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "mori-agent-harness-")));
+    try {
+      const k = new RecordingKernel();
+      const agent = agentWith(
+        k,
+        {},
+        scriptedStreamFn([
+          { toolCall: { name: "bash", arguments: { command: "rm -rf /" } } },
+          { text: "understood, I won't run that" },
+        ]),
+        { root },
+      );
+
+      expect(agent).toBeInstanceOf(AgentHarness);
+
+      await agent.prompt("clean up the disk");
+
+      // `context` — the kernel's per-turn retrieval hook ran, on this turn's prompt. On the
+      // low-level `Agent` this was the `transformContext` option; on the harness it is the
+      // `context` hook, and nothing else in mori registers one.
+      expect(k.contexts).not.toHaveLength(0);
+      expect(JSON.stringify(k.contexts[0]?.messages)).toContain("clean up the disk");
+      // `ContextEvent` carries no signal, so this one arrives via `subscribe`'s second
+      // argument (`agent_start`) instead. Its absence is the regression that would make a
+      // cancelled turn spend a retrieval attempt anyway.
+      expect(k.contexts[0]?.signal).toBeInstanceOf(AbortSignal);
+
+      // `tool_call` — the bash guard is the only thing that turns `rm -rf /` into an error
+      // tool result instead of a shell command, so an error here means the hook fired.
+      const [toolResult] = toolResultsOf(agent);
+      expect(toolResult?.isError).toBe(true);
+      expect(toolResult?.content[0]).toMatchObject({
+        type: "text",
+        text: expect.stringContaining("rm-root"),
+      });
+
+      // `subscribe` — loop events reached the kernel's observer, narrowed back to
+      // `AgentEvent` from the wider `AgentHarnessEvent` the harness emits.
+      expect(k.events.map((event) => event.type)).toContain("agent_end");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 
@@ -510,7 +576,7 @@ describe("createMoriAgent toolset wiring", () => {
 
     await agent.prompt("hi");
 
-    expect(agent.state.tools).toEqual([]);
+    expect(agent.getTools()).toEqual([]);
     expect(toolResultsOf(agent)).toHaveLength(0);
     const last = agent.state.messages.at(-1);
     expect(last).toMatchObject({ role: "assistant", stopReason: "stop" });
@@ -518,16 +584,20 @@ describe("createMoriAgent toolset wiring", () => {
 });
 
 describe("bash/edit_file tool-level executionMode: sequential (#320)", () => {
-  it("runs bash + read_file from one assistant message sequentially even on a plain Agent that doesn't set toolExecution", async () => {
+  it("runs bash + read_file from one assistant message sequentially on the agent mori actually builds, which sets no toolExecution", async () => {
     const root = realpathSync(mkdtempSync(join(tmpdir(), "mori-agent-execmode-")));
     try {
       writeFileSync(join(root, "hello.txt"), "hello from disk", "utf8");
 
-      // Same `Models` the model is resolved from also carries the faked provider stream
-      // (#336) — nothing is threaded past it as a bare `streamFn`.
-      const models = fakeProviderModels(
-        ENV,
-        store(),
+      // The agent under test is the production one (`createMoriAgent`), not a hand-built
+      // `Agent`. That is the whole point since #381: `createMoriAgent` used to pass
+      // `toolExecution: "sequential"` and now cannot — `AgentHarness` does not take it — so
+      // this case is what says the migration did not quietly hand the batch back to pi's
+      // parallel default. It rides `executionMode: "sequential"` on the bash/edit_file tool
+      // definitions (#320) and nothing else.
+      const agent = agentWith(
+        kernel(),
+        {},
         scriptedStreamFn([
           {
             toolCalls: [
@@ -537,19 +607,10 @@ describe("bash/edit_file tool-level executionMode: sequential (#320)", () => {
           },
           { text: "done" },
         ]),
+        { root },
       );
-      const model = models.getModel("anthropic", "claude-sonnet-4-6");
-      if (!model) throw new Error("expected the default anthropic model to be registered");
 
       const events: string[] = [];
-      const agent = new Agent({
-        initialState: {
-          systemPrompt: "test",
-          model,
-          tools: [createBashTool(root), createReadFileTool(root)],
-        },
-        streamFn: models.streamSimple.bind(models),
-      });
       agent.subscribe((event) => {
         if (event.type === "tool_execution_start" || event.type === "tool_execution_end") {
           events.push(
