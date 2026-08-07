@@ -75,7 +75,7 @@ describe("PiConsolidatorLlm", () => {
   // RESERVED_OUTPUT_TOKENS unconditionally is itself a regression this PR
   // introduced — a model whose declared contextWindow is below that ceiling
   // would be asked for a physically impossible completion (Codex P1,
-  // pi-consolidator.ts:103). The adapter must clamp to the resolved model's
+  // packages/mori/src/external/consolidator/pi-consolidator.ts:103). The adapter must clamp to the resolved model's
   // own window via the same `reservedOutputTokensFor` the kernel's input
   // budget already uses, not the raw constant.
   it("clamps completeSimple's maxTokens to the resolved model's own narrow context window (#169 x #174)", async () => {
@@ -104,7 +104,7 @@ describe("PiConsolidatorLlm", () => {
   // shape is a 128k window with a 4k/8k max completion. reservedOutputTokensFor
   // only clamps against the context window, so it would still request more
   // than the provider's own declared maxTokens allows (Codex P1,
-  // pi-consolidator.ts:103).
+  // packages/mori/src/external/consolidator/pi-consolidator.ts:103).
   it("clamps completeSimple's maxTokens to the resolved model's own output ceiling even with a wide context window (#169 Codex follow-up)", async () => {
     const faux = fauxProvider({
       models: [{ id: "wide-window-low-ceiling", contextWindow: 128_000, maxTokens: 4_000 }],

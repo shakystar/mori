@@ -17,13 +17,15 @@ import type {
 import { createAssistantMessageEventStream, InMemoryCredentialStore } from "@earendil-works/pi-ai";
 import { BufferKernel } from "@mori/kernel";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { createMoriAgent, createMoriModels } from "./index.js";
+import { createMoriAgent, createMoriModels, type CreateMoriAgentOptions } from "./index.js";
+import { fakeProviderModels } from "./fake-provider-models.js";
 import { EXPERIMENTAL_OPENAI_OAUTH_ENV, OPENAI_OAUTH_PROVIDER_ID } from "../auth/experimental.js";
 import { createBashTool } from "../tools/bash.js";
 import { createReadFileTool } from "../tools/read-file.js";
 
 const ONE_HOUR_MS = 60 * 60 * 1000;
 const GATE_ON = { [EXPERIMENTAL_OPENAI_OAUTH_ENV]: "1" } as const;
+const ENV = { ANTHROPIC_API_KEY: "sk-ant-test" } as const;
 
 async function storeWith(
   credential: Credential,
@@ -287,45 +289,92 @@ function toolResultsOf(agent: { state: { messages: AgentMessage[] } }): ToolResu
   );
 }
 
+/**
+ * `createMoriAgent` with the provider stream faked by registering it on the `Models` the
+ * agent resolves through (#336's `fakeProviderModels`), rather than by handing the
+ * positional `streamFn` argument past `Models` entirely. Same production wiring otherwise.
+ *
+ * `fakeProviderModels` does not fake auth, so `ENV` carries a key exactly as a real request
+ * would need — `Models#streamSimple` resolves credentials before it ever reaches the double.
+ * The double rides the `anthropic` provider; the two cases below that select `openai` (or an
+ * unknown provider) never reach a stream, so which provider carries it is immaterial there.
+ */
+function agentWith(
+  moriKernel: ReturnType<typeof kernel>,
+  env: NodeJS.ProcessEnv,
+  streamFn: StreamFn,
+  options: CreateMoriAgentOptions = {},
+): Agent {
+  const credentialStore = store();
+  const fullEnv = { ...ENV, ...env };
+  return createMoriAgent(moriKernel, credentialStore, fullEnv, undefined, {
+    ...options,
+    models: fakeProviderModels(fullEnv, credentialStore, streamFn),
+  });
+}
+
 describe("createMoriAgent", () => {
   it("defaults to the anthropic provider and claude-sonnet-4-6 when MORI_MODEL is unset", () => {
-    const agent = createMoriAgent(kernel(), store(), {}, fakeStreamFn());
+    const agent = agentWith(kernel(), {}, fakeStreamFn());
     expect(agent.state.model.provider).toBe("anthropic");
     expect(agent.state.model.id).toBe("claude-sonnet-4-6");
   });
 
   it("reads a bare MORI_MODEL as an anthropic model id (pre-existing form)", () => {
-    const agent = createMoriAgent(
-      kernel(),
-      store(),
-      { MORI_MODEL: "claude-opus-5" },
-      fakeStreamFn(),
-    );
+    const agent = agentWith(kernel(), { MORI_MODEL: "claude-opus-5" }, fakeStreamFn());
     expect(agent.state.model.provider).toBe("anthropic");
     expect(agent.state.model.id).toBe("claude-opus-5");
   });
 
   it("selects the openai provider and model from 'openai/<model>'", () => {
-    const agent = createMoriAgent(
-      kernel(),
-      store(),
-      { MORI_MODEL: "openai/gpt-5.4" },
-      fakeStreamFn(),
-    );
+    const agent = agentWith(kernel(), { MORI_MODEL: "openai/gpt-5.4" }, fakeStreamFn());
     expect(agent.state.model.provider).toBe("openai");
     expect(agent.state.model.id).toBe("gpt-5.4");
   });
 
   it("throws a plain, supported-list error for an unknown provider", () => {
-    expect(() =>
-      createMoriAgent(kernel(), store(), { MORI_MODEL: "bogus/whatever" }, fakeStreamFn()),
-    ).toThrow(/지원하는 프로바이더.*anthropic.*openai/s);
+    expect(() => agentWith(kernel(), { MORI_MODEL: "bogus/whatever" }, fakeStreamFn())).toThrow(
+      /지원하는 프로바이더.*anthropic.*openai/s,
+    );
   });
 
   it("throws a plain, available-models error for an unknown model on a known provider", () => {
     expect(() =>
-      createMoriAgent(kernel(), store(), { MORI_MODEL: "openai/not-a-real-model" }, fakeStreamFn()),
+      agentWith(kernel(), { MORI_MODEL: "openai/not-a-real-model" }, fakeStreamFn()),
     ).toThrow(/openai/);
+  });
+
+  it("doesn't hang when a double ends its stream via `.end(message)` instead of pushing a terminal event (#367)", async () => {
+    const streamFn: StreamFn = (model) => {
+      const inner = createAssistantMessageEventStream();
+      const message: AssistantMessage = {
+        role: "assistant",
+        content: [{ type: "text", text: "ok" }],
+        api: model.api,
+        provider: model.provider,
+        model: model.id,
+        usage: USAGE,
+        stopReason: "stop",
+        timestamp: 0,
+      };
+      inner.push({ type: "start", partial: message } satisfies AssistantMessageEvent);
+      // Ends via `.end(message)` rather than pushing a terminal `done`/`error` event —
+      // `adaptStreamFn` (fake-provider-models.ts) must forward this past its outer stream,
+      // or the outer stream never resolves and `agent.prompt()` hangs (Codex P2, #367).
+      inner.end(message);
+      return inner;
+    };
+
+    // Raced against a short timer rather than relying on the suite's own test timeout to
+    // catch a hang — a hang here should fail with a clear assertion, not a slow, generic
+    // "Test timed out" report.
+    const outcome = await Promise.race([
+      agentWith(kernel(), {}, streamFn)
+        .prompt("hi")
+        .then(() => "resolved" as const),
+      new Promise<"timed-out">((resolve) => setTimeout(() => resolve("timed-out"), 500)),
+    ]);
+    expect(outcome).toBe("resolved");
   });
 });
 
@@ -342,9 +391,8 @@ describe("createMoriAgent toolset wiring", () => {
 
   it("runs a read_file tool_call end-to-end and returns the file content as the tool result", async () => {
     writeFileSync(join(root, "hello.txt"), "hello from disk", "utf8");
-    const agent = createMoriAgent(
+    const agent = agentWith(
       kernel(),
-      store(),
       {},
       scriptedStreamFn([
         { toolCall: { name: "read_file", arguments: { path: "hello.txt" } } },
@@ -368,9 +416,8 @@ describe("createMoriAgent toolset wiring", () => {
   });
 
   it("blocks a destructive bash command via beforeToolCall and keeps the agent alive", async () => {
-    const agent = createMoriAgent(
+    const agent = agentWith(
       kernel(),
-      store(),
       {},
       scriptedStreamFn([
         { toolCall: { name: "bash", arguments: { command: "rm -rf /" } } },
@@ -393,9 +440,8 @@ describe("createMoriAgent toolset wiring", () => {
   });
 
   it("doesn't kill the agent when a tool call fails internally (file not found)", async () => {
-    const agent = createMoriAgent(
+    const agent = agentWith(
       kernel(),
-      store(),
       {},
       scriptedStreamFn([
         { toolCall: { name: "read_file", arguments: { path: "does-not-exist.txt" } } },
@@ -417,9 +463,8 @@ describe("createMoriAgent toolset wiring", () => {
   });
 
   it("threads the injected root to both the path guard and bash's cwd", async () => {
-    const agent = createMoriAgent(
+    const agent = agentWith(
       kernel(),
-      store(),
       {},
       scriptedStreamFn([
         { toolCall: { name: "bash", arguments: { command: "pwd" } } },
@@ -440,9 +485,8 @@ describe("createMoriAgent toolset wiring", () => {
   it("surfaces tool_execution_start/tool_execution_end events to kernel.observe()", async () => {
     writeFileSync(join(root, "hello.txt"), "hi", "utf8");
     const k = kernel();
-    const agent = createMoriAgent(
+    const agent = agentWith(
       k,
-      store(),
       {},
       scriptedStreamFn([
         { toolCall: { name: "read_file", arguments: { path: "hello.txt" } } },
@@ -459,16 +503,10 @@ describe("createMoriAgent toolset wiring", () => {
   });
 
   it("registering an empty tool list preserves single-prompt behavior (regression)", async () => {
-    const agent = createMoriAgent(
-      kernel(),
-      store(),
-      {},
-      scriptedStreamFn([{ text: "just talking, no tools" }]),
-      {
-        root,
-        tools: [],
-      },
-    );
+    const agent = agentWith(kernel(), {}, scriptedStreamFn([{ text: "just talking, no tools" }]), {
+      root,
+      tools: [],
+    });
 
     await agent.prompt("hi");
 
@@ -485,7 +523,22 @@ describe("bash/edit_file tool-level executionMode: sequential (#320)", () => {
     try {
       writeFileSync(join(root, "hello.txt"), "hello from disk", "utf8");
 
-      const model = createMoriModels({}, store()).getModel("anthropic", "claude-sonnet-4-6");
+      // Same `Models` the model is resolved from also carries the faked provider stream
+      // (#336) — nothing is threaded past it as a bare `streamFn`.
+      const models = fakeProviderModels(
+        ENV,
+        store(),
+        scriptedStreamFn([
+          {
+            toolCalls: [
+              { name: "bash", arguments: { command: "true" } },
+              { name: "read_file", arguments: { path: "hello.txt" } },
+            ],
+          },
+          { text: "done" },
+        ]),
+      );
+      const model = models.getModel("anthropic", "claude-sonnet-4-6");
       if (!model) throw new Error("expected the default anthropic model to be registered");
 
       const events: string[] = [];
@@ -495,15 +548,7 @@ describe("bash/edit_file tool-level executionMode: sequential (#320)", () => {
           model,
           tools: [createBashTool(root), createReadFileTool(root)],
         },
-        streamFn: scriptedStreamFn([
-          {
-            toolCalls: [
-              { name: "bash", arguments: { command: "true" } },
-              { name: "read_file", arguments: { path: "hello.txt" } },
-            ],
-          },
-          { text: "done" },
-        ]),
+        streamFn: models.streamSimple.bind(models),
       });
       agent.subscribe((event) => {
         if (event.type === "tool_execution_start" || event.type === "tool_execution_end") {

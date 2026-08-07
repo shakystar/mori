@@ -129,26 +129,26 @@ grep -rnoE '\bL[0-9]{2,}\b' packages/ docs/ | wc -l                 # L1234 표�
 
 `packages/` 15건의 전수는 이렇다 (인용 위치 → 인용 대상):
 
-| 인용 위치                                                   | 인용                               | 대상 실물                                                          |
-| ----------------------------------------------------------- | ---------------------------------- | ------------------------------------------------------------------ |
-| `packages/kernel/src/services/projection-store.ts:146`      | `consolidate-service.ts:2878`      | `await rebuildProjectProjection(params.projectId, …)`              |
-| `packages/kernel/src/services/projection-store.ts:147`      | `(:2920)` (㉡a)                    | `const cursorCommit = commitBoundaryCursors(params.projectId`      |
-| `packages/kernel/src/services/projection-store.ts:150`      | `contradiction-service.ts:346`     | `await rebuildProjectProjection(projectId);`                       |
-| `packages/kernel/src/storage/project-lock.ts:115`           | `consolidate-service.ts:2877`      | `if (inputs.length > 0 \|\| segmentsWritten > 0) {`                |
-| `packages/kernel/src/storage/project-lock.ts:146`           | `consolidate-service.ts:2659-2663` | `pruneSegments` 앞 이른-반환 구간                                  |
-| `packages/kernel/src/services/consolidate-service.ts:2425`  | `memory-import-service.ts:234-254` | `readValidMemoriesFromLog` 본문                                    |
-| `packages/kernel/src/services/embeddings-store.ts:135`      | `projection-store.ts:1024`         | `` `WHERE memories.invalid_at IS NULL AND ${laneWhere(lane)}` ``   |
-| `pi-consolidator.test.ts:78`, `pi-consolidator.test.ts:107` | `pi-consolidator.ts:103` (2건)     | `maxTokens: Math.min(reservedOutputTokensFor(…), …)`               |
-| `consolidate-service.test.ts:1113` 외 3건                   | `` `:377` `` 등 (㉡a 4건)          | **파일이 아니다** — §Q1.3                                          |
-| `packages/kernel/src/storage/project-lock.ts:747`           | `README:139-141` (㉠c)             | `decision being recorded, the command text. Read-only tool calls…` |
-| `packages/kernel/tests/unit/project-lock.test.ts:120`       | `README:139-141` (㉠c)             | 같음                                                               |
+| 인용 위치                                                   | 인용                               | 대상 실물                                                                                                               |
+| ----------------------------------------------------------- | ---------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| `packages/kernel/src/services/projection-store.ts:146`      | `consolidate-service.ts:2906`      | `await rebuildProjectProjection(params.projectId, …)`                                                                   |
+| `packages/kernel/src/services/projection-store.ts:147`      | `consolidate-service.ts:2968`      | `const cursorCommit = commitBoundaryCursors(params.projectId`                                                           |
+| `packages/kernel/src/services/projection-store.ts:150`      | `contradiction-service.ts:346`     | `await rebuildProjectProjection(projectId);`                                                                            |
+| `packages/kernel/src/storage/project-lock.ts:115`           | `consolidate-service.ts:2905`      | `if (inputs.length > 0 \|\| segmentsWritten > 0) {`                                                                     |
+| `packages/kernel/src/storage/project-lock.ts:146`           | `consolidate-service.ts:2676-2680` | `pruneSegments` 앞 이른-반환 구간                                                                                       |
+| `packages/kernel/src/services/consolidate-service.ts:2442`  | `memory-import-service.ts:234-254` | `readValidMemoriesFromLog` 본문                                                                                         |
+| `packages/kernel/src/services/embeddings-store.ts:135`      | `projection-store.ts:1024`         | `` `WHERE memories.invalid_at IS NULL AND ${laneWhere(lane)}` ``                                                        |
+| `pi-consolidator.test.ts:78`, `pi-consolidator.test.ts:107` | `pi-consolidator.ts:103` (2건)     | `maxTokens: Math.min(reservedOutputTokensFor(…), …)`                                                                    |
+| `consolidate-service.test.ts:1113` 외 3건                   | `` `:377` `` 등 (㉡a 4건)          | **파일이 아니다** — §Q1.3                                                                                               |
+| `packages/kernel/src/storage/project-lock.ts:747`           | `README.md:140-142` (㉠b)          | `` `list_dir` / `grep`) and read-only shell commands are not recorded. Nothing is written until the first such call… `` |
+| `packages/kernel/tests/unit/project-lock.test.ts:120`       | `README.md:140-142` (㉠b)          | 같음                                                                                                                    |
 
 이 15건은 **오늘 전부 실물과 맞다.** ㉠ 계열 8건은 PR #302가 방금 정리했고(#303 본문의 전제와 일치),
-㉠c 2건은 `README.md:139-141`이 read-only 턴 보장을 적고 있는 자리 그대로다 — 위 표의 "대상 실물"
-열이 그 대조 결과다.
+㉠b로 재분류된 2건(구 ㉠c)은 `README.md:140-142`가 read-only 턴 보장을 적고 있는 자리 그대로다 —
+위 표의 "대상 실물" 열이 그 대조 결과다.
 
 **이 15가 §Q5 조각2 추출기의 대상 집합과 어떻게 맞물리는가.** 조각2가 경고를 만들 수 있는 것은
-대상 파일이 확정되는 **㉠ 계열 10건**(㉠a 6 + ㉠b 2 + ㉠c 2)이다. 나머지 **㉡a 5건**은 대상 파일을
+대상 파일이 확정되는 **㉠ 계열 10건**(㉠a 6 + ㉠b 4 + ㉠c 0)이다. 나머지 **㉡a 5건**은 대상 파일을
 정할 수 없어 조각2가 **조용히 아무 말도 하지 않는다** — 그래서 조각1이 먼저 그 5건을 닫는다.
 10 + 5 = 15이고, 조각1·2를 마치면 추출기의 대상 집합이 `packages/` 전수 15와 같아진다. **이 등식이
 성립하지 않는 차이가 곧 조용히 놓치는 인용이다.**
@@ -179,7 +179,7 @@ grep -rnoE '\bL[0-9]{2,}\b' packages/ docs/ | wc -l                 # L1234 표�
 정오가 인용 자체가 아니라 그 줄이 표 안이냐 산문이냐에 달려 있다는 뜻이다.
 
 44건이 규칙을 반증한다. 예: `docs/consolidate-evidence-binding-adjudication.md:302`의
-`` `:2142`, `:2143`, `:2167`, `:2214` `` 는 문맥상 전부 `consolidate-service.ts`(2986줄)를 가리키는데,
+`` `:2142`, `:2143`, `:2167`, `:2214` `` 는 문맥상 전부 `consolidate-service.ts`(3038줄)를 가리키는데,
 같은 줄 기준 가장 가까운 앞선 ㉠ 인용은 `event-store.ts`(481줄)다. 사람은 절 제목과 문단 주어로
 파일을 잇지만, 기계가 볼 수 있는 신호는 그 안에 없다.
 
@@ -309,7 +309,7 @@ console.log({총_인용:tot, 흘러감:drift, 유지:same, 판정불가:skip});'
 | #299 안   | `project-lock.ts:115` | `consolidate-service.ts:2775`      | **자기 자신** — §Q2.3                                                                                  |                                                                              |
 | #302 이전 | `packages/` 8건       | —                                  | #299의 재배선(+301/-74) + #299가 새로 넣은 주석                                                        | `git diff db80dfc 7bc2490`                                                   |
 
-세 줄 다 같은 파일이 원인이다. `consolidate-service.ts`는 오늘 2986줄로 리포에서 가장 크고,
+세 줄 다 같은 파일이 원인이다. `consolidate-service.ts`는 오늘 3038줄로 리포에서 가장 크고,
 **㉠ 계열 291건 중 53건(18%)이 이 파일을 이름으로 가리킨다** — `grep -rhoE '…\.(ts|…):[0-9]+(-[0-9]+)?(,[[:space:]]*[0-9]+(-[0-9]+)?)*' packages/ docs/ | grep -c 'consolidate-service\.ts'`
 가 51 토큰이고, 그중 쉼표 이어쓰기 2건을 펼치면 53 스팬이다. ㉡ 계열 154건은 대상 파일이 확정되지
 않아 이 수에 넣지 않았으나 §Q1.2가 보인 대로 그 다수의 문맥이 이 파일이므로 **실제 집중도는 더
