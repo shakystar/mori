@@ -1,0 +1,124 @@
+import type { RubricCriterion } from "./scorer.js";
+
+/**
+ * ImplicitMemBench(arXiv 2604.08064) 시나리오 정의 — discussion #327의 "선호는 kind 선언이
+ * 아니라 세션 횡단 재생에서 결과론적으로 석출된다" 명제를 검증하기 위한 최소 시나리오 세트
+ * (#343 조각 1/4). 이 파일은 순수 데이터 + 타입만 담당한다 — 이 턴들을 실제 mori 세션에
+ * 흘리고 consolidation을 거쳐 후속 세션을 실행하는 배선은 러너(#387)의 몫이고, 실측 실행은
+ * #388의 몫이다.
+ *
+ * 프로토콜 (원 이슈 #343 본문 반영):
+ * - `contextTurns`는 맥락 세션의 사용자 발화다. `impliedPreference`를 선언하는 문장(예: "나는
+ *   탭을 선호해")은 금지 — 오직 상황·행동으로만 드러나야 leniency 함정(#340 기준 3)을 피한다.
+ * - `followUpPrompt`는 별도 세션(맥락 세션은 죽고 mori 스토어의 증류물+retrieval만 남은 상태)
+ *   에서 실행되는 과제다. `impliedPreference`를 직접 묻지 않는다 — 명시 질의 없이 행동에
+ *   반영돼야 측정 대상(무의식적 행동 적응)이 된다.
+ * - `impliedPreference`는 채점에만 쓰이는 정답 라벨이다. 어떤 세션의 컨텍스트에도 주입되지
+ *   않는다 — 러너(#387)는 이 필드를 세션 프롬프트 조립에 절대 쓰지 않아야 한다.
+ */
+export interface ImplicitMemBenchScenario {
+  id: string;
+  title: string;
+  /** 맥락 세션의 사용자 발화 순서. 마지막 턴 이후 세션은 consolidation을 거쳐 죽는다. */
+  contextTurns: readonly string[];
+  /** 후속 세션(맥락 세션과 분리된 새 세션)에서 실행되는 과제. */
+  followUpPrompt: string;
+  /** 채점용 정답 라벨 — 세션 컨텍스트에는 절대 노출되지 않는다. */
+  impliedPreference: string;
+  rubric: readonly RubricCriterion[];
+}
+
+const TABS_INDENTATION_SCENARIO: ImplicitMemBenchScenario = {
+  id: "tabs-indentation",
+  title: "탭 들여쓰기 되돌림",
+  contextTurns: [
+    "이 함수 리뷰해줘:\n\n```ts\nfunction add(a: number, b: number) {\n\treturn a + b;\n}\n```",
+    "고마워. 근데 방금 네가 예시로 보여준 스니펫 중 하나가 스페이스로 인덴트돼 있길래 내가 다시 고쳤어:\n\n```ts\nfunction subtract(a: number, b: number) {\n\treturn a - b;\n}\n```\n\n이 버전으로 계속 진행해줘.",
+    "다음 것도 방금 스타일 그대로 만들어줘: 두 수 중 큰 값을 반환하는 함수.",
+  ],
+  followUpPrompt: "두 문자열을 이어붙이는 concat 함수를 TypeScript로 하나 짜줘.",
+  impliedPreference: "코드 들여쓰기는 탭 문자를 쓴다",
+  rubric: [
+    {
+      kind: "deterministic",
+      id: "uses-tab-indentation",
+      description: "들여쓰기가 있는 모든 줄이 탭 문자로 시작한다 (스페이스 인덴트 없음)",
+      check: (output) => {
+        const indentedLines = output.split("\n").filter((line) => /^[\t ]+\S/.test(line));
+        return indentedLines.length > 0 && indentedLines.every((line) => line.startsWith("\t"));
+      },
+    },
+    {
+      kind: "llm-judge",
+      id: "matches-formatting-habits",
+      description: "전반적 포맷팅이 이전 세션에서 관찰된 사용자 습관과 일치하는가",
+      question:
+        "다음 코드 스니펫의 들여쓰기 스타일이, 항상 탭으로 인덴트하고 스페이스 인덴트를 볼 때마다 되돌려 온 개발자의 습관과 일치하는가?",
+    },
+  ],
+};
+
+const CONCISE_RESPONSES_SCENARIO: ImplicitMemBenchScenario = {
+  id: "concise-responses",
+  title: "군더더기 없는 답변 선호",
+  contextTurns: [
+    "이 에러가 왜 나는지 설명해줘: TypeError: Cannot read properties of undefined (reading 'map')",
+    "고마워, 근데 결론만 다시 한두 문장으로 줄여줄래.",
+    "이번엔 이 워닝은 뭐야: React Hook useEffect has a missing dependency",
+    "역시 길다, 짧게.",
+  ],
+  followUpPrompt: "TypeScript에서 유니언 타입과 인터섹션 타입의 차이가 뭐야?",
+  impliedPreference: "설명은 서두 없이 짧고 핵심만 담아야 한다",
+  rubric: [
+    {
+      kind: "deterministic",
+      id: "short-response",
+      description: "응답이 200자 이하다",
+      check: (output) => output.trim().length <= 200,
+    },
+    {
+      kind: "llm-judge",
+      id: "no-preamble",
+      description: "서두 사설 없이 바로 핵심 결론부터 시작하는가",
+      question: '이 응답이 서두 사설("좋은 질문이에요" 류) 없이 바로 핵심 결론부터 시작하는가?',
+    },
+  ],
+};
+
+const PNPM_WORKFLOW_SCENARIO: ImplicitMemBenchScenario = {
+  id: "pnpm-workflow",
+  title: "패키지 매니저 pnpm 습관",
+  contextTurns: [
+    "이 프로젝트 세팅 좀 도와줘. `pnpm install` 돌렸는데 `pnpm-lock.yaml`에 충돌이 나.",
+    '빌드는 `pnpm build`로 하고 있어. 이 스크립트도 지금 쓰는 방식 기준으로 다시 써줘:\n\n```json\n{"scripts": {"start": "npm run build && node dist/index.js"}}\n```',
+    "고마워.",
+  ],
+  followUpPrompt: "새 패키지 lodash를 추가하고 싶은데, 설치 명령이랑 CI 스텝 예시를 하나 만들어줘.",
+  impliedPreference: "패키지 설치/실행 명령은 pnpm을 쓴다",
+  rubric: [
+    {
+      kind: "deterministic",
+      id: "uses-pnpm-command",
+      description: "설치 명령에 pnpm을 쓰고 npm/yarn 명령은 섞지 않는다",
+      check: (output) => {
+        const usesPnpm = /\bpnpm\s+(add|install)\b/.test(output);
+        const usesNpm = /\bnpm\s+(install|i)\b/i.test(output);
+        const usesYarn = /\byarn\s+add\b/i.test(output);
+        return usesPnpm && !usesNpm && !usesYarn;
+      },
+    },
+    {
+      kind: "llm-judge",
+      id: "ci-step-pnpm-native",
+      description: "CI 스텝 예시가 pnpm 워크플로우 관례를 따르는가",
+      question:
+        "이 CI 스텝 예시가 pnpm 기반 워크플로우 관례(예: corepack 활성화, pnpm 캐시)를 따르고 npm 관례를 섞어 쓰지 않는가?",
+    },
+  ],
+};
+
+export const IMPLICIT_MEM_BENCH_SCENARIOS: readonly ImplicitMemBenchScenario[] = [
+  TABS_INDENTATION_SCENARIO,
+  CONCISE_RESPONSES_SCENARIO,
+  PNPM_WORKFLOW_SCENARIO,
+];
