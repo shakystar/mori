@@ -203,6 +203,13 @@ describe("createMoriKernel — project identity file (#217)", () => {
     expect(moriProjectId(root)).toBe(beforeFile);
   });
 
+  it("writes only the id — never a hub address or credential (0001 §2.5)", () => {
+    createMoriKernel({ root, env: {} });
+
+    const persisted = JSON.parse(readFileSync(identityFile(), "utf8"));
+    expect(Object.keys(persisted)).toEqual(["id"]);
+  });
+
   it("adopts a committed id from a project.json with a leading UTF-8 BOM, and leaves the file untouched (#241)", () => {
     mkdirSync(join(root, ".mori"));
     const withBom = "\uFEFF" + JSON.stringify({ id: "proj_committed0000000" });

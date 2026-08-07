@@ -130,8 +130,31 @@ apply to it.
 mori's memory kernel keeps its on-disk state under `~/.mori` (override with
 `MEMORIZE_ROOT`) — no per-account nesting, since mori has no CLI account
 concept. Each project's `better-sqlite3` database lives at
-`~/.mori/projects/<projectId>/mori.db`, where `projectId` is derived from the
-working root, so one checkout keeps one store across runs.
+`~/.mori/projects/<projectId>/mori.db`; the db itself stays in this global
+home, not under the working root.
+
+`projectId` resolves in this order (`packages/mori/src/kernel/index.ts:283-288`):
+a committed `.mori/project.json`'s `id` field takes precedence when the file
+is present and valid; otherwise it falls back to a hash of the working root
+(`packages/mori/src/kernel/index.ts:273-276`). The first time a checkout runs
+with **no** `.mori/project.json`, mori writes one with the path-hash id it
+just resolved; once that file is committed and pushed, every other checkout
+that pulls it adopts the same id instead of re-deriving its own. If the file
+exists but can't be used (unparseable, or an id that doesn't match the
+expected shape), mori warns and falls back to the path hash but **never
+overwrites it** — a committed file is a human's to fix, not mori's.
+
+`.mori/project.json` is meant to be **committed to the repo**, not
+gitignored — that's what lets a fresh clone and every worktree of the same
+repo (each at a different absolute path, so each would otherwise hash to a
+different id) resolve to the same id and share one store.
+
+The file holds **only the project id** — never a hub address or credential.
+A committed file is reachable by anyone who can open a pull request against
+the repo, including a malicious fork; if it could steer where memory is sent,
+that would be enough to exfiltrate it to an attacker-controlled hub (see
+mori-nest `docs/design/0001-protocol-requirements.md:79-81`, §2.5). The hub a
+session talks to is decided outside this file, by whatever launched it.
 
 What lands there: for every **successful** `edit_file` call, the file path (not
 the file contents); for every successful `bash` call whose command text looks
