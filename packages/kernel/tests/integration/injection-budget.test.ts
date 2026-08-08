@@ -136,7 +136,7 @@ describe("injection budget", () => {
   it("keeps the rendered block within the canonical ceiling when every channel overflows", async () => {
     await seedOverBudgetCorpus();
 
-    const context = await buildMemoryContext(projectId, { taskTitle: TASK });
+    const { context } = await buildMemoryContext(projectId, { taskTitle: TASK });
 
     // Measured on the rendered string — header, section titles, item prefixes
     // and segment fences included — not on the sum of the stored texts under it.
@@ -152,7 +152,7 @@ describe("injection budget", () => {
 
     const baselinePool = retrieveMemoryContext(projectId, { taskTitle: TASK });
     const baselineSegments = await retrieveSegments(projectId, { taskTitle: TASK });
-    const context = await buildMemoryContext(projectId, { taskTitle: TASK });
+    const { context, dropped } = await buildMemoryContext(projectId, { taskTitle: TASK });
 
     // Segments — verbatim transcript, usually already distilled into a memory —
     // are where the overflow is taken from.
@@ -165,6 +165,12 @@ describe("injection budget", () => {
     expect(context.consolidatedMemories?.map((m) => m.id)).toContain(
       baselinePool.memories[0]!.memory.id,
     );
+    // #242 1/2 — the same priority shows up in the recorded drop order: every
+    // dropped segment was cut before any dropped pool entry.
+    const segmentDrops = dropped.filter((d) => d.channel === "segment");
+    const poolDrops = dropped.filter((d) => d.channel !== "segment");
+    expect(segmentDrops.length).toBeGreaterThan(0);
+    expect(poolDrops).toHaveLength(0);
   });
 
   it("injects all three channels untouched when the corpus fits", async () => {
@@ -173,12 +179,13 @@ describe("injection budget", () => {
     insertSegment("seg_fit", `USER: why zephyr?\n\nAGENT: ${filler(60)}`);
     await rebuildProjectProjection(projectId, { reindexSearch: true });
 
-    const context = await buildMemoryContext(projectId, { taskTitle: TASK });
+    const { context, dropped } = await buildMemoryContext(projectId, { taskTitle: TASK });
 
     // Trimming must be the exception, not a standing tax that quietly shrinks
     // every injection.
     expect(context.consolidatedMemories?.map((m) => m.id)).toEqual(["mem_fit"]);
     expect(context.recentObservations?.map((o) => o.summary)).toHaveLength(1);
     expect(context.rawSegments?.map((s) => s.id)).toEqual(["seg_fit"]);
+    expect(dropped).toEqual([]);
   });
 });

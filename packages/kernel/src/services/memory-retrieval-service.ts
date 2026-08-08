@@ -62,10 +62,16 @@ export interface RankedMemory {
  * first regardless of channel, so the selection order is carried out of here
  * instead of being re-derived — re-deriving it would mean a second copy of the
  * ranking, which this issue explicitly must not change.
+ *
+ * The observation variant carries `score` explicitly (#242 1/2) because,
+ * unlike the memory variant, it has nowhere else to keep it — `RankedMemory`
+ * already bundles its score with the record, but `Observation` is the bare
+ * domain entity. The trim (`injection-budget.ts`) needs this to record what
+ * an entry it drops was actually ranked at.
  */
 export type RankedPoolEntry =
   | { channel: "memory"; memory: RankedMemory }
-  | { channel: "observation"; observation: Observation };
+  | { channel: "observation"; observation: Observation; score: number };
 
 export interface RetrievedMemoryContext {
   /**
@@ -170,7 +176,7 @@ export function retrieveMemoryContext(
     spent += entry.chars;
     if (entry.memory) ranked.push({ channel: "memory", memory: entry.memory });
     else if (entry.observation)
-      ranked.push({ channel: "observation", observation: entry.observation });
+      ranked.push({ channel: "observation", observation: entry.observation, score: entry.score });
   }
 
   // The channel arrays are VIEWS of `ranked`, built here rather than filled in
@@ -199,6 +205,14 @@ export const SEGMENT_POOL_BUDGET_CHARS = 2000;
 export interface RetrievedSegment {
   id: string;
   text: string;
+  /**
+   * The hybrid-search hit's own score at retrieval time (RRF, or bm25 when
+   * embeddings are unconfigured — see `hybridSearchSegments`), kept so the
+   * injection-budget trim (#242 1/2) can record what a dropped segment was
+   * ranked at. Not part of what gets injected: `injection-budget.ts`'s
+   * `assemble` strips this back off before it reaches `MemoryContext.rawSegments`.
+   */
+  score: number;
 }
 
 /**
@@ -234,7 +248,7 @@ export async function retrieveSegments(
     if (!text) continue;
     if (spent + text.length > budget) continue;
     spent += text.length;
-    out.push({ id: hit.entityId, text });
+    out.push({ id: hit.entityId, text, score: hit.score });
   }
   return out;
 }

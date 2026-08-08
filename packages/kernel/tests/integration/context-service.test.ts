@@ -122,7 +122,9 @@ function seedEmbedding(entityId: string, kind: string, model: string): void {
 describe("buildMemoryContext", () => {
   it("returns {} when the project has no memories, observations, or segments", async () => {
     await rebuildProjectProjection(projectId);
-    expect(await buildMemoryContext(projectId)).toEqual({});
+    const { context, dropped } = await buildMemoryContext(projectId);
+    expect(context).toEqual({});
+    expect(dropped).toEqual([]);
   });
 
   it("assembles consolidatedMemories ranked by the retrieval pool", async () => {
@@ -130,7 +132,7 @@ describe("buildMemoryContext", () => {
     await seedMemory("mem_cold", "old low-salience memory", 1, "2020-01-01T00:00:00.000Z");
     await rebuildProjectProjection(projectId);
 
-    const ctx = await buildMemoryContext(projectId, { taskTitle: "zephyr deploy" });
+    const { context: ctx } = await buildMemoryContext(projectId, { taskTitle: "zephyr deploy" });
     expect(ctx.consolidatedMemories?.map((m) => m.id)).toEqual(["mem_hot", "mem_cold"]);
 
     // mori#176: buildMemoryContext is retrieval-only now — it does not stamp
@@ -146,7 +148,7 @@ describe("buildMemoryContext", () => {
     await seedObservation("obs_recent", "recent observation", nowIso());
     await rebuildProjectProjection(projectId);
 
-    const ctx = await buildMemoryContext(projectId);
+    const { context: ctx } = await buildMemoryContext(projectId);
     expect(ctx.recentObservations?.map((o) => o.summary)).toContain("recent observation");
   });
 
@@ -154,7 +156,9 @@ describe("buildMemoryContext", () => {
     insertSegment("seg_a", "the navy blazer dry cleaning pickup", "2026-01-01T00:00:00.000Z");
     await rebuildProjectProjection(projectId, { reindexSearch: true });
 
-    const ctx = await buildMemoryContext(projectId, { taskTitle: "blazer dry cleaning" });
+    const { context: ctx } = await buildMemoryContext(projectId, {
+      taskTitle: "blazer dry cleaning",
+    });
     expect(ctx.rawSegments?.map((s) => s.id)).toContain("seg_a");
   });
 
@@ -162,7 +166,7 @@ describe("buildMemoryContext", () => {
     insertSegment("seg_b", "some segment text", "2026-01-01T00:00:00.000Z");
     await rebuildProjectProjection(projectId, { reindexSearch: true });
 
-    const ctx = await buildMemoryContext(projectId);
+    const { context: ctx } = await buildMemoryContext(projectId);
     expect(ctx.rawSegments).toBeUndefined();
   });
 

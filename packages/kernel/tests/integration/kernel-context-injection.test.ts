@@ -459,7 +459,7 @@ describe("turn-level retrieval (#5 2/3-b)", () => {
       // again (the memory pool is ranked by the query, never filtered by it),
       // so the assertions below are about the injection policy and not about a
       // retrieval that happened to come back empty.
-      const retrieved = await buildMemoryContext(projectId, { taskTitle: "gamma" });
+      const { context: retrieved } = await buildMemoryContext(projectId, { taskTitle: "gamma" });
       expect(retrieved.consolidatedMemories?.map((memory) => memory.id)).toEqual(["mem_a"]);
 
       // …so the second turn shows it again. The first turn's block lived in
