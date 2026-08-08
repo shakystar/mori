@@ -1,0 +1,28 @@
+{
+  "role": "assistant",
+  "content": [
+    {
+      "type": "text",
+      "text": "예 — mori bench PR 스모크 고정 응답 (#405)."
+    }
+  ],
+  "api": "anthropic-messages",
+  "provider": "anthropic",
+  "model": "claude-sonnet-4-6",
+  "usage": {
+    "input": 1,
+    "output": 1,
+    "cacheRead": 0,
+    "cacheWrite": 0,
+    "totalTokens": 2,
+    "cost": {
+      "input": 0,
+      "output": 0,
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "total": 0
+    }
+  },
+  "stopReason": "stop",
+  "timestamp": 0
+}
