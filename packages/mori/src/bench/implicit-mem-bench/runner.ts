@@ -326,6 +326,31 @@ export interface ImplicitMemBenchReport extends CostReport {
 }
 
 /**
+ * `results`(여러 시나리오·조건 실행 결과)에서 discussion #327의 계기판 3축을 계산한다.
+ * `runImplicitMemBench`가 단일 실행에 쓰고, #406의 나이틀리/주간 슬라이스가 여러 반복의
+ * 결과를 합친 뒤 같은 계산을 재사용한다 — 비율 계산 로직이 두 곳에서 갈라지지 않게 하는 것이
+ * 분리의 유일한 목적이다.
+ */
+export function computeAxisRates(
+  results: readonly ScenarioRunResult[],
+): ImplicitMemBenchReport["axisRates"] {
+  const onConditionResults = results.filter((r) => r.condition === "memory-on");
+  const rate = (hits: number, total: number): number => (total === 0 ? 0 : hits / total);
+
+  return {
+    injectionHitRate: rate(
+      onConditionResults.filter((r) => r.injected).length,
+      onConditionResults.length,
+    ),
+    reDistillationRate: 0,
+    reQuestionRate: rate(
+      onConditionResults.filter((r) => r.reQuestioned === true).length,
+      onConditionResults.length,
+    ),
+  };
+}
+
+/**
  * `IMPLICIT_MEM_BENCH_SCENARIOS`(기본) 전체를 조건별로 실행하고 계기판 리포트를 낸다.
  * `#374`의 `createBenchRunner` 위에 얹는다 — 오케스트레이션 전체가 이 파일의 유일한 신규
  * 집계 지점이고, `writeCostReport`(cost-ledger.ts)를 그대로 재사용해 JSON으로 낼 수 있다
@@ -399,23 +424,11 @@ export async function runImplicitMemBench(
     }
 
     const report = runner.costLedger.report();
-    const onConditionResults = results.filter((r) => r.condition === "memory-on");
-    const rate = (hits: number, total: number): number => (total === 0 ? 0 : hits / total);
 
     return {
       ...report,
       scenarios: results,
-      axisRates: {
-        injectionHitRate: rate(
-          onConditionResults.filter((r) => r.injected).length,
-          onConditionResults.length,
-        ),
-        reDistillationRate: 0,
-        reQuestionRate: rate(
-          onConditionResults.filter((r) => r.reQuestioned === true).length,
-          onConditionResults.length,
-        ),
-      },
+      axisRates: computeAxisRates(results),
     };
   } finally {
     if (previousMemorizeRoot === undefined) delete process.env.MEMORIZE_ROOT;
