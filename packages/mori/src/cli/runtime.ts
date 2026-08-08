@@ -9,6 +9,7 @@ import {
 import { defaultCredentialsPath, FileCredentialStore } from "../auth/credential-store.js";
 import { getConsolidatorLlm, resolveConsolidatorConfig } from "../external/consolidator/index.js";
 import { createMoriKernel, moriStoreExistsForId } from "../kernel/index.js";
+import { subscribePostCompactConsolidation } from "./compaction.js";
 import { consolidateOnSessionEnd } from "./consolidation.js";
 import { unauthenticatedMessage } from "./messages.js";
 import type { RunCliDeps } from "./types.js";
@@ -111,6 +112,16 @@ export async function prepareAgent(
     }
   });
 
+  // The post-compaction consolidation boundary (#409). Registered here, once per prepared
+  // agent, so it covers every front end that drives one — the REPL (index.ts), the one-shot
+  // (`runPrompt` below), and the programmatic session (session.ts) — rather than each of them
+  // remembering to wire it. Nothing fires it until something calls `compactIfContextFull`,
+  // which is what makes registering it for the one-shot harmless.
+  //
+  // `sessionEndLlm` is passed as a getter for a reason its own doc explains: it answers
+  // "does this session's store exist yet", and that answer flips mid-session.
+  subscribePostCompactConsolidation(agent, kernel, () => sessionEndLlm(llm, projectId), stderr);
+
   return { ok: true, agent, kernel, llm, projectId };
 }
 
@@ -121,6 +132,14 @@ export async function prepareAgent(
  * anything passes the capture filter, so "no store" here means nothing did — running a
  * boundary anyway would be the first write of a session that only read files (README's
  * "no trace on disk" guarantee, #107 review).
+ *
+ * #409's post-compact boundary reads the same answer, for the same reason and not by
+ * analogy: "nothing has passed the capture filter yet" is a property of the session, not of
+ * which boundary is asking. A session that only read files can still grow a context large
+ * enough to compact, and that must not be what puts mori's first bytes on disk. The name
+ * stays `sessionEndLlm` because session end is where the check was first needed; the caller
+ * that reads it per-compaction passes it as a getter, since the answer changes the moment
+ * something IS captured.
  *
  * `projectId` is `prepareAgent`'s kernel-construction-time id (#230), never re-derived here:
  * before this fix the check re-read `.mori/project.json` from `root` at session-end time,

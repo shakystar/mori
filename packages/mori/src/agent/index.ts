@@ -38,10 +38,19 @@ export { createMoriModels };
  *   `agent.state.messages` after the low-level `Agent` (session.ts's turn-usage summing,
  *   which needs every reply a tool-call loop produced, not just the last) reads the same
  *   append-only entry log this way instead.
+ * - `contextMessages` — `Session.buildContext().messages`, the message list the NEXT turn
+ *   would be built from. The compaction decision (`cli/compaction.ts`, #409) needs exactly
+ *   this list and `getEntries` is not a substitute: the entry log is the raw append-only
+ *   record, while `buildContext` is what `AgentHarness.createTurnState` itself feeds the
+ *   provider — it walks the branch and applies the compaction transform, so after a
+ *   compaction it yields summary + `retainedTail` rather than the history that was cut.
+ *   Deciding off the entry log would therefore keep measuring context that no longer
+ *   exists and re-fire compaction every turn.
  */
 export type MoriAgent = AgentHarness & {
   resetSession(): Promise<void>;
   getEntries(options?: SessionEntryCursorOptions): Promise<SessionTreeEntry[]>;
+  contextMessages(): Promise<AgentMessage[]>;
 };
 
 /**
@@ -172,6 +181,7 @@ export function createMoriAgent(
   const agent = Object.assign(harness, {
     resetSession: () => session.moveTo(null).then(() => undefined),
     getEntries: session.getEntries.bind(session),
+    contextMessages: () => session.buildContext().then((context) => context.messages),
   }) as MoriAgent;
 
   /**

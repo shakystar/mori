@@ -5,6 +5,7 @@ import {
   supportedProviderIds,
   unknownProviderMessage,
 } from "./agent/provider-selection.js";
+import { compactIfContextFull } from "./cli/compaction.js";
 import {
   consolidateExplicit,
   consolidateOnSessionEnd,
@@ -163,6 +164,16 @@ export async function createMoriSession(
             .map((entry) => entry.message)
             .filter((message): message is AssistantMessage => message.role === "assistant");
           const last = replies.at(-1);
+
+          // Between-turns compaction (#409), the same trigger the REPL runs after a turn
+          // (cli/repl.ts) — an episode long enough to overflow the context window has to
+          // survive it here too, or a benchmark run would simply fail at the provider once
+          // the window fills. Inside `enqueue`, so it settles before the next `prompt()` or
+          // `close()` starts and `compact()` sees the idle harness it requires. Skipped on
+          // a cancelled or failed turn for the reasons repl.ts records.
+          if (last && last.stopReason !== "aborted" && last.stopReason !== "error") {
+            await compactIfContextFull(agent, stderr);
+          }
 
           return {
             text: last ? contentText(last.content) : "",
