@@ -2,7 +2,11 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { ConsolidateCallOptions, ConsolidatorLlm } from "@mori/kernel";
 import { describe, expect, it } from "vitest";
 import type { MoriKernel } from "../agent/index.js";
-import { consolidateExplicit, consolidateOnSessionEnd } from "./consolidation.js";
+import {
+  consolidateAfterCompact,
+  consolidateExplicit,
+  consolidateOnSessionEnd,
+} from "./consolidation.js";
 
 function stubLlm(): ConsolidatorLlm {
   return { complete: async () => "[]" };
@@ -184,5 +188,50 @@ describe("overlapping triggers (#107)", () => {
     await Promise.all([explicit, sessionEnd]);
 
     expect(events).toEqual(["start-1", "end-1", "start-2", "end-2"]);
+  });
+
+  it("serializes a post-compact call behind a session-end call on the same kernel (#409)", async () => {
+    // The overlap #409 makes ordinary: the post-compact boundary fires off nothing but
+    // context size at the end of a turn, so it can land while another boundary is still
+    // inside its extraction call. `consolidate-service`'s watermark does not cover this —
+    // both would read the same window and both append. Only the per-kernel chain does.
+    const events: string[] = [];
+    let releaseFirst: () => void = () => {};
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let calls = 0;
+
+    const kernel = spyKernel(async () => {
+      const mine = ++calls;
+      events.push(`start-${mine}`);
+      if (mine === 1) await firstGate;
+      events.push(`end-${mine}`);
+    });
+    const llm = stubLlm();
+
+    const sessionEnd = consolidateOnSessionEnd(kernel, llm, () => {});
+    const postCompact = consolidateAfterCompact(kernel, llm);
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(events).toEqual(["start-1"]);
+
+    releaseFirst();
+    await Promise.all([sessionEnd, postCompact]);
+
+    expect(events).toEqual(["start-1", "end-1", "start-2", "end-2"]);
+  });
+
+  it("labels the post-compact boundary and skips silently without an llm (#409)", async () => {
+    const opts: (ConsolidateCallOptions | undefined)[] = [];
+    const kernel = spyKernel(async (_llm, o) => {
+      opts.push(o);
+    });
+
+    await consolidateAfterCompact(kernel, stubLlm());
+    await consolidateAfterCompact(kernel, undefined);
+
+    expect(opts).toEqual([{ boundary: "post-compact" }]);
   });
 });
