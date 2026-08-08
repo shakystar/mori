@@ -37,10 +37,10 @@ const PROMPT = "› ";
  * The REPL loop: read a line, run it as a turn on `agent`, repeat.
  *
  * `agent` is taken as a parameter rather than built here, and that is the whole design.
- * A turn's context is `agent.state.messages`, and the kernel wiring hangs off the instance
- * (`transformContext`, see agent.ts), so rebuilding the agent per turn would silently drop
- * both. Because this function has no way to construct one, multi-turn continuity holds by
- * construction instead of by discipline.
+ * A turn's context is the harness's own session, and the kernel wiring hangs off the
+ * instance (`transformContext`, see agent/index.ts), so rebuilding the agent per turn would
+ * silently drop both. Because this function has no way to construct one, multi-turn
+ * continuity holds by construction instead of by discipline.
  *
  * Returns the process exit code. Unlike `runPrompt`, a failed turn does not end the
  * session — the error is reported and the loop asks for the next line — so this returns 0
@@ -58,7 +58,15 @@ export async function runRepl(
   // AbortSignal down to the provider stream and the tool calls, and reports the outcome as
   // an assistant message with stopReason "aborted" rather than by throwing — so the loop
   // below simply continues to the next prompt.
-  const stopListening = input.onInterrupt(() => agent.abort());
+  //
+  // `onInterrupt` takes a void-returning handler, but the harness's `abort()` returns
+  // `Promise<AbortResult>` — fire-and-forget here needs an explicit rejection sink or a
+  // failing abort takes the process down as an unhandled rejection. Swallowed rather than
+  // reported: the only way it rejects is a subscriber throwing on the harness's own `abort`
+  // event, and mori registers no such subscriber.
+  const stopListening = input.onInterrupt(() => {
+    void agent.abort().catch(() => {});
+  });
 
   stdout(replBanner());
 
@@ -82,12 +90,12 @@ export async function runRepl(
       if (text === EXIT_COMMAND) return 0;
 
       if (text === CLEAR_COMMAND) {
-        agent.reset();
+        await agent.resetSession();
         // The kernel's own conversation-scoped state (#234) — the untargeted
         // session-start read it has already spent, the last turn it retrieved
-        // for — must reset alongside `agent.state.messages`, or the next
-        // conversation inherits the previous one's "already asked" bookkeeping
-        // and silently loses its session-start injection.
+        // for — must reset alongside the session, or the next conversation
+        // inherits the previous one's "already asked" bookkeeping and silently
+        // loses its session-start injection.
         consolidation.kernel.resetConversation();
         stdout(replClearedMessage());
         continue;
@@ -132,11 +140,8 @@ export async function runRepl(
         continue;
       }
 
-      await agent.prompt(text);
+      const last = await agent.prompt(text);
       stdout("\n");
-
-      const last = agent.state.messages.at(-1);
-      if (last?.role !== "assistant") continue;
 
       if (last.stopReason === "aborted") {
         stderr(replTurnCancelledMessage());
