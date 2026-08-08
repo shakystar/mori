@@ -9,6 +9,7 @@
   "scripts": {
     "build": "turbo run build",
     "dev": "tsx packages/mori/src/index.ts",
+    "bench:nightly-slice": "tsx packages/mori/src/bench/implicit-mem-bench/nightly-slice-cli.ts",
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
