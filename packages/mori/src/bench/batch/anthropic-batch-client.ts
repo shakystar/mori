@@ -4,7 +4,10 @@ import type {
   MessageBatch,
   MessageBatchIndividualResponse,
 } from "@anthropic-ai/sdk/resources/messages/batches";
-import type { TextBlock, Usage as AnthropicUsage } from "@anthropic-ai/sdk/resources/messages/messages";
+import type {
+  TextBlock,
+  Usage as AnthropicUsage,
+} from "@anthropic-ai/sdk/resources/messages/messages";
 import { calculateCost, type Api, type Model, type Usage } from "@earendil-works/pi-ai";
 
 /**
@@ -150,7 +153,9 @@ export interface AnthropicBatchClient {
   runBatch(requests: readonly BatchJudgeRequest[]): Promise<BatchJudgeResult[]>;
 }
 
-export function createAnthropicBatchClient(config: AnthropicBatchClientConfig): AnthropicBatchClient {
+export function createAnthropicBatchClient(
+  config: AnthropicBatchClientConfig,
+): AnthropicBatchClient {
   const batchesApi: AnthropicBatchesApi =
     config.batchesApi ?? new Anthropic({ apiKey: config.apiKey }).messages.batches;
   const maxTokens = config.maxTokens ?? DEFAULT_MAX_TOKENS;

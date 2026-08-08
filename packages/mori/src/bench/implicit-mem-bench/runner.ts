@@ -164,7 +164,9 @@ export interface EpisodeResult {
  * 에피소드의 followUpOutput을 먼저 모두 모은 뒤 판정 프롬프트를 한 번에 배치 제출한다 — 두
  * 호출자가 "세션을 끝까지 돌린다"는 이 로직을 공유하면서 채점 시점만 달리하기 위해 분리했다.
  */
-export async function runImplicitMemBenchEpisode(options: RunEpisodeOptions): Promise<EpisodeResult> {
+export async function runImplicitMemBenchEpisode(
+  options: RunEpisodeOptions,
+): Promise<EpisodeResult> {
   const createSession = options.createSession ?? createMoriSession;
   const createKernel = options.createKernel ?? defaultCreateKernel;
   const baseDeps: RunCliDeps = {
@@ -266,7 +268,10 @@ export async function runImplicitMemBenchScenario(
 
   let reQuestioned: boolean | undefined;
   if (options.condition === "memory-on") {
-    reQuestioned = await options.reQuestionJudge.judge(RE_QUESTION_META_QUESTION, episode.followUpOutput);
+    reQuestioned = await options.reQuestionJudge.judge(
+      RE_QUESTION_META_QUESTION,
+      episode.followUpOutput,
+    );
   } else {
     // "memory-off"엔 재질문을 판정할 확립된 맥락이 없어 judge를 부르지 않는다 — 그래도 축은
     // 채운다.
