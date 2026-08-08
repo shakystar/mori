@@ -218,4 +218,39 @@ export interface MemoryRetractedPayload {
 export interface MemoryInjectedPayload {
   /** ids of the consolidated memories included in the injected context. */
   memoryIds: EntityId[];
+  /**
+   * Entries the injection-budget trim (`fitInjectionBudget`, #238) cut this
+   * turn to keep the rendered block within the ceiling, in drop order (#242
+   * 1/2). Rides this event, rather than a new one, so the injected and
+   * dropped sides of one budgeting decision stay pairable by their shared
+   * `memory.injected` row. Absent/empty on the ordinary within-budget path —
+   * trimming is the exception, not a standing cost every injection pays.
+   */
+  dropped?: InjectionBudgetDrop[];
+}
+
+/**
+ * One entry `fitInjectionBudget` (#238, `injection-budget.ts`) cut from the
+ * ranked pool or the segment channel while trimming to the injection
+ * ceiling — the primitive #242 1/2 exists to record ("무엇이 몇 번째로
+ * 잘렸는가"). Judgement-free by design: this says what was cut and in what
+ * order, not whether the cut was a hit, a waste, or a miss (#242 2/2's job).
+ */
+export interface InjectionBudgetDrop {
+  /** memory id, observation id, or segment id — whichever channel this entry came from. */
+  id: EntityId;
+  channel: "memory" | "observation" | "segment";
+  /**
+   * The entry's ranking score at drop time. Comparable within its own
+   * channel only: memory and observation share one pool's scale (CLS
+   * two-layer ranking), segment carries its own hybrid-search score — the
+   * two are not on the same scale.
+   */
+  score: number;
+  /**
+   * 1-based position in drop order: 1 is the first (least valuable) entry
+   * cut. "How much would the budget need to grow to fit this back in?" is a
+   * function of this number, not of the score alone.
+   */
+  order: number;
 }
