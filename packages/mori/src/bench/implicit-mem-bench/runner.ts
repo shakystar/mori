@@ -30,9 +30,11 @@ import { scoreBehavioralAdaptation, type LlmJudge, type ScenarioScore } from "./
  * 동일 모델 베이스라인 — 같은 흐름(러너 배선, 스코어러 호출)을 그대로 타되 주입할 것이 없다. */
 export type ImplicitMemBenchCondition = "memory-on" | "memory-off";
 
-const ZERO_USAGE = sumUsage([]);
+/** `runImplicitMemBenchMilestone`(milestone.ts, #407)도 재사용한다 — 반복해서 같은 리터럴을
+ * 만들면 두 곳이 조용히 갈라질 수 있어서다. */
+export const ZERO_USAGE = sumUsage([]);
 
-const RE_QUESTION_META_QUESTION =
+export const RE_QUESTION_META_QUESTION =
   "이 응답이, 이전 대화에서 이미 행동으로 드러난 사용자의 습관·선호를 다시 명시적으로 " +
   '되묻는가 (예: "들여쓰기는 탭과 스페이스 중 어느 쪽으로 할까요?"처럼, 이미 알 수 있어야 ' +
   "할 것을 재질문하는 경우)?";
@@ -40,7 +42,7 @@ const RE_QUESTION_META_QUESTION =
 /** `\b` (word boundary) is ASCII-only in JS regex — "예, 맞다" never matches `/^예\b/` because
  * neither side of the boundary after "예" is a `\w` character. A negative lookahead for "another
  * letter follows" does the same "don't match part of a longer word" job without that gap. */
-function parseJudgeVerdict(text: string): boolean {
+export function parseJudgeVerdict(text: string): boolean {
   return /^\s*(예|yes|y)(?![A-Za-z가-힣])/i.test(text.trim());
 }
 
@@ -57,15 +59,23 @@ function assertTurnOk(turn: MoriSessionTurn, scenarioId: string, where: string):
   }
 }
 
+/** 예/아니오 judge 프롬프트 조립 — 실시간 reader judge(`createReaderLlmJudge`)와 배치 judge
+ * (`milestone.ts`의 `runImplicitMemBenchMilestone`)가 같은 문구를 쓴다. 프롬프트가 갈리면 두
+ * 경로의 판정 성향이 달라져 milestone 리포트를 실시간 슬라이스(#405, #406)와 비교할 수 없게
+ * 된다. */
+export function buildJudgePrompt(question: string, followUpOutput: string): string {
+  return (
+    `${question}\n\n---\n판정 대상 출력:\n${followUpOutput}\n---\n\n` +
+    '첫 단어를 "예" 또는 "아니오"로만 답하라.'
+  );
+}
+
 /** `scorer.ts`의 `LlmJudge`를 #374의 `Reader` 위에 얹는 어댑터 — judge 모델 호출은 캐시·비용
  * 계측이 이미 배선된 reader를 그대로 타고, 이 파일은 예/아니오 프롬프트 조립만 맡는다. */
 export function createReaderLlmJudge(reader: Reader): LlmJudge {
   return {
     async judge(question: string, followUpOutput: string): Promise<boolean> {
-      const { text } = await reader.read(
-        `${question}\n\n---\n판정 대상 출력:\n${followUpOutput}\n---\n\n` +
-          '첫 단어를 "예" 또는 "아니오"로만 답하라.',
-      );
+      const { text } = await reader.read(buildJudgePrompt(question, followUpOutput));
       return parseJudgeVerdict(text);
     },
   };
@@ -123,7 +133,7 @@ export interface ScenarioRunResult {
   reQuestioned: boolean | undefined;
 }
 
-export interface RunScenarioOnceOptions {
+export interface RunEpisodeOptions {
   scenario: ImplicitMemBenchScenario;
   condition: ImplicitMemBenchCondition;
   /** 이 시나리오·조건 전용 격리 루트 — 다른 시나리오/조건과 스토어를 절대 공유하지 않는다. */
@@ -132,20 +142,31 @@ export interface RunScenarioOnceOptions {
   streamFn: StreamFn;
   credentialStore?: CredentialStore;
   costLedger: CostLedger;
-  /** 루브릭의 `llm-judge` 기준을 판정하는 judge (`scorer.ts`). */
-  scoringJudge: LlmJudge;
-  /** 계기판 전용 재질문 메타 질문을 판정하는 judge — 루브릭과 분리된 축(`BENCH_AXES.reQuestionRate`)
-   * 아래 비용이 잡히도록 별도 reader 위에서 온다 (`runImplicitMemBench` 참고). */
-  reQuestionJudge: LlmJudge;
   createSession?: CreateSessionFn;
   createKernel?: CreateKernelFn;
 }
 
-/** 시나리오 하나 × 조건 하나를 끝까지 실행한다: 맥락 세션 주입 → consolidation → 세션 사망 →
- * 후속 세션 → 스코어러 호출. `"memory-off"`는 맥락 단계를 건너뛴다. */
-export async function runImplicitMemBenchScenario(
-  options: RunScenarioOnceOptions,
-): Promise<ScenarioRunResult> {
+export interface EpisodeResult {
+  scenarioId: string;
+  scenarioTitle: string;
+  condition: ImplicitMemBenchCondition;
+  followUpOutput: string;
+  /** 후속 세션 첫 호출에서 `transformContext`가 실제로 뭔가를 주입했는가 — `"memory-off"`에서는
+   * 항상 `false`다(맥락 세션 자체가 없어 주입할 스토어 내용도 없다). */
+  injected: boolean;
+}
+
+/** 시나리오 하나 × 조건 하나를 채점 없이 끝까지 실행한다: 맥락 세션 주입 → consolidation →
+ * 세션 사망 → 후속 세션. `"memory-off"`는 맥락 단계를 건너뛴다.
+ *
+ * judge 호출(루브릭 판정·재질문 판정)은 이 함수의 범위 밖이다 — `runImplicitMemBenchScenario`가
+ * 이 함수 위에 동기 채점을 바로 얹고(#387), `runImplicitMemBenchMilestone`(#407)은 여러
+ * 에피소드의 followUpOutput을 먼저 모두 모은 뒤 판정 프롬프트를 한 번에 배치 제출한다 — 두
+ * 호출자가 "세션을 끝까지 돌린다"는 이 로직을 공유하면서 채점 시점만 달리하기 위해 분리했다.
+ */
+export async function runImplicitMemBenchEpisode(
+  options: RunEpisodeOptions,
+): Promise<EpisodeResult> {
   const createSession = options.createSession ?? createMoriSession;
   const createKernel = options.createKernel ?? defaultCreateKernel;
   const baseDeps: RunCliDeps = {
@@ -204,20 +225,9 @@ export async function runImplicitMemBenchScenario(
     await followUpResult.session.close();
   }
 
-  const score = await scoreBehavioralAdaptation(options.scenario, turn.text, options.scoringJudge);
-
   // 로컬 판정(모델 호출 0건)이지만, 매 시나리오마다 기록해 둬야 `injection-hit-rate`가 리포트의
   // byAxis에 항상 나타난다 — 값이 0이어도 "측정했다"와 "측정 안 했다"는 다른 사실이다.
   options.costLedger.record(BENCH_AXES.injectionHitRate, ZERO_USAGE);
-
-  let reQuestioned: boolean | undefined;
-  if (options.condition === "memory-on") {
-    reQuestioned = await options.reQuestionJudge.judge(RE_QUESTION_META_QUESTION, turn.text);
-  } else {
-    // "memory-off"엔 재질문을 판정할 확립된 맥락이 없어 judge를 부르지 않는다 — 그래도 축은
-    // 채운다.
-    options.costLedger.record(BENCH_AXES.reQuestionRate, ZERO_USAGE);
-  }
 
   // 재증류율(같은 응고가 기존 기억과 준중복을 만드는 비율)은 반복된 응고 이력이 있어야 판정
   // 가능하다 — 이 시나리오 프로토콜은 매번 빈 스토어에서 단발 응고 1회만 하므로 "비교할 이전
@@ -231,8 +241,50 @@ export async function runImplicitMemBenchScenario(
     scenarioTitle: options.scenario.title,
     condition: options.condition,
     followUpOutput: turn.text,
-    score,
     injected,
+  };
+}
+
+export interface RunScenarioOnceOptions extends RunEpisodeOptions {
+  /** 루브릭의 `llm-judge` 기준을 판정하는 judge (`scorer.ts`). */
+  scoringJudge: LlmJudge;
+  /** 계기판 전용 재질문 메타 질문을 판정하는 judge — 루브릭과 분리된 축(`BENCH_AXES.reQuestionRate`)
+   * 아래 비용이 잡히도록 별도 reader 위에서 온다 (`runImplicitMemBench` 참고). */
+  reQuestionJudge: LlmJudge;
+}
+
+/** 시나리오 하나 × 조건 하나를 끝까지 실행하고 곧바로(동기) 채점한다 —
+ * `runImplicitMemBenchEpisode` 위에 스코어러 호출을 얹은 것. */
+export async function runImplicitMemBenchScenario(
+  options: RunScenarioOnceOptions,
+): Promise<ScenarioRunResult> {
+  const episode = await runImplicitMemBenchEpisode(options);
+
+  const score = await scoreBehavioralAdaptation(
+    options.scenario,
+    episode.followUpOutput,
+    options.scoringJudge,
+  );
+
+  let reQuestioned: boolean | undefined;
+  if (options.condition === "memory-on") {
+    reQuestioned = await options.reQuestionJudge.judge(
+      RE_QUESTION_META_QUESTION,
+      episode.followUpOutput,
+    );
+  } else {
+    // "memory-off"엔 재질문을 판정할 확립된 맥락이 없어 judge를 부르지 않는다 — 그래도 축은
+    // 채운다.
+    options.costLedger.record(BENCH_AXES.reQuestionRate, ZERO_USAGE);
+  }
+
+  return {
+    scenarioId: episode.scenarioId,
+    scenarioTitle: episode.scenarioTitle,
+    condition: episode.condition,
+    followUpOutput: episode.followUpOutput,
+    score,
+    injected: episode.injected,
     reQuestioned,
   };
 }

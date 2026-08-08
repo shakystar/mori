@@ -12,6 +12,7 @@
     "bench:pr-smoke": "tsx packages/mori/src/bench/implicit-mem-bench/pr-smoke.ts",
     "bench:pr-smoke:record": "tsx packages/mori/src/bench/implicit-mem-bench/pr-smoke.ts --record",
     "bench:nightly-slice": "tsx packages/mori/src/bench/implicit-mem-bench/nightly-slice-cli.ts",
+    "bench:milestone": "tsx packages/mori/src/bench/implicit-mem-bench/milestone-cli.ts",
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
