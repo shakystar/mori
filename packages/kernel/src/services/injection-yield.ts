@@ -36,7 +36,9 @@
 import { nowIso } from "../domain/common.js";
 import type { MemoryInjectedPayload } from "../domain/entities/memory.js";
 import type { DomainEvent } from "../domain/events.js";
+import { laneOf, SELF_LANE } from "../projections/projector.js";
 import { readEvents } from "../storage/event-store.js";
+import { isUnionLog } from "./consolidate-service.js";
 import {
   OBSERVATION_TAIL_LIMIT,
   OBSERVATION_TAIL_MAX_AGE_HOURS,
@@ -81,11 +83,23 @@ export function classifyInjectionYield(occasions: number): InjectionYield {
  * constructed without one. That fallback collapses every session-less injection
  * into a single occasion, which UNDER-counts reuse and never over-counts —
  * the direction this whole module is biased in on purpose.
+ *
+ * SELF LANE ONLY, via the shared `laneOf` — in a workspace union the log also
+ * carries other members' `memory.injected` events, and counting those would
+ * credit THIS store's ranking with an injection another store's ranking made.
+ * The memory population this is joined against (`listValidMemories`) is
+ * self-lane by default, so classifying events any other way would put the two
+ * halves of every ratio on different populations.
  */
-export function countInjectionOccasions(events: readonly DomainEvent[]): Map<string, number> {
+export function countInjectionOccasions(
+  events: readonly DomainEvent[],
+  selfProjectId: string,
+  isUnion: boolean,
+): Map<string, number> {
   const sessionsById = new Map<string, Set<string>>();
   for (const event of events) {
     if (event.type !== "memory.injected") continue;
+    if (laneOf(event, selfProjectId, isUnion) !== SELF_LANE) continue;
     const { memoryIds } = (event.payload ?? {}) as Partial<MemoryInjectedPayload>;
     if (!Array.isArray(memoryIds)) continue;
     for (const memoryId of memoryIds) {
@@ -182,7 +196,13 @@ export interface LongTermYield {
  * the long-term layer would read as the whole picture.
  */
 export interface ShortTermSupply {
-  /** Observations inside the same tail window `retrieveMemoryContext` draws from. */
+  /**
+   * Observations inside the same tail window `retrieveMemoryContext` draws from
+   * — the same `sinceIso` AND the same `OBSERVATION_TAIL_LIMIT` cap, so this
+   * SATURATES at that limit. A store with 20 and one with 2000 recent
+   * observations both report the cap; the number is "did the short-term layer
+   * have candidates", not "how many exist".
+   */
   eligibleObservations: number;
 }
 
@@ -213,6 +233,14 @@ export interface InjectionYieldReport {
  * after a render actually succeeded — so taking the max cannot invent reuse.
  * It can still miss it; see the doc.
  *
+ * Read-only and lock-free, so a session injecting BETWEEN the event read and
+ * the projection read makes the snapshot slightly torn. Bounded and harmless in
+ * both directions: an injection that lands after the event read is still caught
+ * by the `last_accessed_at` half of the max, and a memory consolidated after it
+ * simply reads as `never-injected` — which it is. Taking a lock to tighten this
+ * would make a reporting call able to stall the capture path, which is the one
+ * thing #242 says this must never do.
+ *
  * Async and off the capture path on purpose: it replays the event log.
  */
 export async function buildInjectionYieldReport(
@@ -221,7 +249,11 @@ export async function buildInjectionYieldReport(
 ): Promise<InjectionYieldReport> {
   const generatedAt = opts.nowIso ?? nowIso();
   const nowMs = Date.parse(generatedAt);
-  const occasionsById = countInjectionOccasions(await readEvents(projectId));
+  const occasionsById = countInjectionOccasions(
+    await readEvents(projectId),
+    projectId,
+    isUnionLog(projectId),
+  );
 
   const counts = emptyCounts();
   const byAge = ageBuckets().map((bucket) => ({ ...bucket, counts: emptyCounts() }));
