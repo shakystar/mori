@@ -1,3 +1,4 @@
+import type { MessageEntry } from "@earendil-works/pi-agent-core";
 import { contentText, type AssistantMessage, type Usage } from "@earendil-works/pi-ai";
 import {
   resolveProviderSelection,
@@ -149,10 +150,17 @@ export async function createMoriSession(
         assertOpen("prompt");
 
         return enqueue(async () => {
-          const before = agent.state.messages.length;
+          // A tool-call loop turns one `prompt()` into several provider round-trips, each
+          // its own assistant reply — `prompt()`'s return value is only the last of those,
+          // so summing usage across the whole turn reads the session's own append-only
+          // entry log instead (agent/index.ts's `getEntries`, #398), sliced to what this
+          // call added.
+          const before = (await agent.getEntries()).length;
           await agent.prompt(text);
-          const replies = agent.state.messages
+          const replies = (await agent.getEntries())
             .slice(before)
+            .filter((entry): entry is MessageEntry => entry.type === "message")
+            .map((entry) => entry.message)
             .filter((message): message is AssistantMessage => message.role === "assistant");
           const last = replies.at(-1);
 

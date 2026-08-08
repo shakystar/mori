@@ -4,13 +4,14 @@ import {
   type AgentHarnessEvent,
   type AgentMessage,
   type AgentTool,
+  type SessionEntryCursorOptions,
+  type SessionTreeEntry,
   type StreamFn,
 } from "@earendil-works/pi-agent-core";
 import type { CredentialStore, MutableModels } from "@earendil-works/pi-ai";
 import type { MemoryKernel } from "@mori/kernel";
 import { overrideProviderStream } from "./fake-provider-models.js";
 import { createHarnessSession } from "./harness-session.js";
-import { attachLegacyCliAgent, type MoriAgent } from "./legacy-cli-agent.js";
 import { createMoriModels } from "./model-wiring.js";
 import {
   resolveProviderSelection,
@@ -20,7 +21,28 @@ import {
 import { createBashBeforeToolCall, createMoriTools } from "../tools/index.js";
 
 export { createMoriModels };
-export type { MoriAgent };
+
+/**
+ * The harness `createMoriAgent` returns, plus the two capabilities `AgentHarness`'s own
+ * public surface has no room for: `session` is a private constructor field with no getter
+ * (`pi/dist/harness/agent-harness.d.ts`), so nothing outside this module can reach the
+ * `Session` `moveTo`/`getEntries` live on.
+ *
+ * - `resetSession` — `/clear`'s session replacement. Human decision #7 (2026-08-07) picked
+ *   `Session.moveTo(null)` over rebuilding the harness: it moves the session's leaf to
+ *   null, which empties the context path for the next turn while every entry stays in
+ *   place (`moveTo` only ever appends a `leaf` entry; nothing is deleted) and the harness
+ *   instance, its local state, and every `subscribe()`/`on()` registration all survive
+ *   untouched (harness-session.ts).
+ * - `getEntries` — `Session.getEntries`, bound. The one production consumer left holding
+ *   `agent.state.messages` after the low-level `Agent` (session.ts's turn-usage summing,
+ *   which needs every reply a tool-call loop produced, not just the last) reads the same
+ *   append-only entry log this way instead.
+ */
+export type MoriAgent = AgentHarness & {
+  resetSession(): Promise<void>;
+  getEntries(options?: SessionEntryCursorOptions): Promise<SessionTreeEntry[]>;
+};
 
 /**
  * The `AgentEvent` variants, as a total map so the compiler reports it when pi's union
@@ -129,13 +151,14 @@ export function createMoriAgent(
 
   const tools = options.tools ?? createMoriTools(options.root ?? process.cwd(), env);
 
+  // Kept in this closure rather than dropped once handed to the harness: `AgentHarness`
+  // stores `session` in a private field with no getter, and `resetSession`/`getEntries`
+  // below (the only door onto `Session`, #398) need the same reference the harness reads
+  // from.
+  const session = createHarnessSession();
+
   const harness = new AgentHarness({
-    // Nothing outside this function holds the session: `AgentHarness` keeps it private and
-    // exposes no getter, so reading conversation text back (the follow-on
-    // `ConversationSource` piece) needs a reference kept here. #382 — which replaces
-    // `/clear` with `Session.moveTo(null)` — is where one has to exist; this piece has no
-    // caller for it, and an unused export would be a guess at that piece's shape.
-    session: createHarnessSession(),
+    session,
     models,
     model,
     systemPrompt: "You are mori, a memory-native coding agent.",
@@ -146,7 +169,10 @@ export function createMoriAgent(
     // batch sequential if any tool in it says so, which is why that had to land first.
   });
 
-  const { agent, sinceLastReset } = attachLegacyCliAgent(harness);
+  const agent = Object.assign(harness, {
+    resetSession: () => session.moveTo(null).then(() => undefined),
+    getEntries: session.getEntries.bind(session),
+  }) as MoriAgent;
 
   /**
    * The run's `AbortSignal`, as `subscribe` hands it out.
@@ -179,7 +205,7 @@ export function createMoriAgent(
   });
 
   harness.on("context", async (event) => ({
-    messages: await kernel.transformContext(sinceLastReset(event.messages), runSignal),
+    messages: await kernel.transformContext(event.messages, runSignal),
   }));
 
   const guardBashCall = createBashBeforeToolCall();

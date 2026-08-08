@@ -1,3 +1,4 @@
+import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { ConsolidatorLlm } from "@mori/kernel";
 import {
   createMoriAgent,
@@ -155,8 +156,9 @@ export async function runPrompt(
 
   const { agent, kernel, llm, projectId } = prepared;
 
+  let last: AssistantMessage;
   try {
-    await agent.prompt(prompt);
+    last = await agent.prompt(prompt);
   } finally {
     // The caller exits the process on return, and `observe` is fire-and-forget by
     // contract — so this is the one place that can keep the turn's last
@@ -170,8 +172,7 @@ export async function runPrompt(
   }
   io.stdout("\n");
 
-  const last = agent.state.messages.at(-1);
-  if (last?.role === "assistant" && last.stopReason === "error") {
+  if (last.stopReason === "error") {
     io.stderr(`mori: ${last.errorMessage ?? "unknown provider error"}\n`);
     return 1;
   }

@@ -149,6 +149,19 @@ function scriptedInput(script: ScriptEntry[]) {
   return { source, prompts, state };
 }
 
+/**
+ * Captures every message the harness appends via `message_end` — the equivalent of the
+ * pre-harness `Agent`'s `state.messages` (#381's adapter, removed by #398). Must be
+ * registered before `runRepl` starts driving turns.
+ */
+function collectMessages(agent: MoriAgent): AgentMessage[] {
+  const messages: AgentMessage[] = [];
+  agent.subscribe((event) => {
+    if (event.type === "message_end") messages.push(event.message);
+  });
+  return messages;
+}
+
 function captureOutput() {
   const out: string[] = [];
   const err: string[] = [];
@@ -190,11 +203,12 @@ describe("runRepl", () => {
       { type: "eof" },
     ]);
 
+    const messages = collectMessages(agent);
     await runRepl(agent, input.source, captureOutput(), noConsolidation(kernel));
 
-    // The caller's own reference holds both turns: user, assistant, user, assistant. A
+    // The same agent instance ran both turns: user, assistant, user, assistant. A
     // per-turn agent would leave this one at two messages, or empty.
-    expect(agent.state.messages.map((message) => message.role)).toEqual([
+    expect(messages.map((message) => message.role)).toEqual([
       "user",
       "assistant",
       "user",
@@ -241,7 +255,6 @@ describe("runRepl", () => {
     expect(io.out()).toContain("초기화");
     // The turn after /clear starts from nothing, and the loop went on to serve it.
     expect(provider.sent(1)).not.toContain("question one");
-    expect(agent.state.messages.map((message) => message.role)).toEqual(["user", "assistant"]);
   });
 
   it("resets the kernel's conversation-scoped state on /clear, not just the agent's (#234)", async () => {
@@ -291,6 +304,7 @@ describe("runRepl", () => {
       { type: "eof" },
     ]);
 
+    const messages = collectMessages(agent);
     const exitCode = await runRepl(agent, input.source, io, noConsolidation(kernel));
 
     expect(exitCode).toBe(0);
@@ -298,9 +312,7 @@ describe("runRepl", () => {
     // Turn 1 ends aborted; turn 2 — asked for after the cancellation — runs to completion.
     // A Ctrl-C that killed the session, or one that leaked into the next turn, breaks this.
     expect(
-      agent.state.messages.map((message) =>
-        message.role === "assistant" ? message.stopReason : message.role,
-      ),
+      messages.map((message) => (message.role === "assistant" ? message.stopReason : message.role)),
     ).toEqual(["user", "aborted", "user", "stop"]);
     expect(provider.calls()).toBe(2);
   });

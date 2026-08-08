@@ -304,8 +304,21 @@ function scriptedStreamFn(turns: FakeTurn[]): StreamFn {
   };
 }
 
-function toolResultsOf(agent: { state: { messages: AgentMessage[] } }): ToolResultMessage[] {
-  return agent.state.messages.filter(
+/**
+ * Captures every message the harness appends via `message_end` — the equivalent of the
+ * pre-harness `Agent`'s `state.messages` (#381's adapter, removed by #398). Must be
+ * registered before the `prompt()` call it needs to see.
+ */
+function collectMessages(agent: MoriAgent): AgentMessage[] {
+  const messages: AgentMessage[] = [];
+  agent.subscribe((event) => {
+    if (event.type === "message_end") messages.push(event.message);
+  });
+  return messages;
+}
+
+function toolResultsOf(messages: AgentMessage[]): ToolResultMessage[] {
+  return messages.filter(
     (m): m is ToolResultMessage => (m as { role?: string }).role === "toolResult",
   );
 }
@@ -414,6 +427,7 @@ describe("createMoriAgent", () => {
 
       expect(agent).toBeInstanceOf(AgentHarness);
 
+      const messages = collectMessages(agent);
       await agent.prompt("clean up the disk");
 
       // `context` — the kernel's per-turn retrieval hook ran, on this turn's prompt. On the
@@ -428,7 +442,7 @@ describe("createMoriAgent", () => {
 
       // `tool_call` — the bash guard is the only thing that turns `rm -rf /` into an error
       // tool result instead of a shell command, so an error here means the hook fired.
-      const [toolResult] = toolResultsOf(agent);
+      const [toolResult] = toolResultsOf(messages);
       expect(toolResult?.isError).toBe(true);
       expect(toolResult?.content[0]).toMatchObject({
         type: "text",
@@ -441,6 +455,60 @@ describe("createMoriAgent", () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+
+  it("resetSession() moves the leaf on the same harness instance — subscriptions registered before it keep firing after (human decision #7, #398)", async () => {
+    const agent = agentWith(
+      kernel(),
+      {},
+      scriptedStreamFn([{ text: "first" }, { text: "second" }]),
+    );
+
+    const agentEnds: number[] = [];
+    agent.subscribe((event) => {
+      if (event.type === "agent_end") agentEnds.push(agentEnds.length);
+    });
+
+    await agent.prompt("one");
+    await agent.resetSession();
+
+    // Not a new instance: `resetSession()` (`Session.moveTo(null)`) is the "swap the
+    // session while keeping the harness" branch — the rejected alternative was rebuilding
+    // the harness, which would drop this very subscription (harness-session.ts).
+    expect(agent).toBeInstanceOf(AgentHarness);
+
+    await agent.prompt("two");
+
+    // The subscription registered before resetSession() fired for both the pre- and
+    // post-reset run — it was never re-registered.
+    expect(agentEnds).toEqual([0, 1]);
+  });
+
+  it("getEntries() still returns pre-resetSession() entries — moveTo(null) does not delete (human decision #7 condition 3, #398)", async () => {
+    const agent = agentWith(kernel(), {}, scriptedStreamFn([{ text: "answer one" }]));
+
+    await agent.prompt("question one");
+    const beforeReset = await agent.getEntries();
+    expect(
+      beforeReset.some(
+        (entry) =>
+          entry.type === "message" && JSON.stringify(entry.message).includes("question one"),
+      ),
+    ).toBe(true);
+
+    await agent.resetSession();
+
+    // The product promise is "no destruction" — resetSession() must not retract an entry
+    // already readable through getEntries(). `Session.moveTo(null)` only ever appends a
+    // `leaf` entry (harness-session.ts).
+    const afterReset = await agent.getEntries();
+    expect(afterReset.length).toBeGreaterThanOrEqual(beforeReset.length);
+    expect(
+      afterReset.some(
+        (entry) =>
+          entry.type === "message" && JSON.stringify(entry.message).includes("question one"),
+      ),
+    ).toBe(true);
   });
 });
 
@@ -467,9 +535,10 @@ describe("createMoriAgent toolset wiring", () => {
       { root },
     );
 
-    await agent.prompt("read hello.txt");
+    const messages = collectMessages(agent);
+    const last = await agent.prompt("read hello.txt");
 
-    const [toolResult] = toolResultsOf(agent);
+    const [toolResult] = toolResultsOf(messages);
     expect(toolResult?.toolName).toBe("read_file");
     expect(toolResult?.isError).toBe(false);
     expect(toolResult?.content[0]).toMatchObject({
@@ -477,7 +546,6 @@ describe("createMoriAgent toolset wiring", () => {
       text: expect.stringContaining("hello from disk"),
     });
 
-    const last = agent.state.messages.at(-1);
     expect(last).toMatchObject({ role: "assistant", stopReason: "stop" });
   });
 
@@ -492,16 +560,16 @@ describe("createMoriAgent toolset wiring", () => {
       { root },
     );
 
-    await agent.prompt("clean up the disk");
+    const messages = collectMessages(agent);
+    const last = await agent.prompt("clean up the disk");
 
-    const [toolResult] = toolResultsOf(agent);
+    const [toolResult] = toolResultsOf(messages);
     expect(toolResult?.isError).toBe(true);
     expect(toolResult?.content[0]).toMatchObject({
       type: "text",
       text: expect.stringContaining("rm-root"),
     });
 
-    const last = agent.state.messages.at(-1);
     expect(last).toMatchObject({ role: "assistant", stopReason: "stop" });
   });
 
@@ -516,15 +584,15 @@ describe("createMoriAgent toolset wiring", () => {
       { root },
     );
 
-    await agent.prompt("read a missing file");
+    const messages = collectMessages(agent);
+    const last = await agent.prompt("read a missing file");
 
-    const [toolResult] = toolResultsOf(agent);
+    const [toolResult] = toolResultsOf(messages);
     expect(toolResult?.content[0]).toMatchObject({
       type: "text",
       text: expect.stringContaining("file not found"),
     });
 
-    const last = agent.state.messages.at(-1);
     expect(last).toMatchObject({ role: "assistant", stopReason: "stop" });
   });
 
@@ -539,9 +607,10 @@ describe("createMoriAgent toolset wiring", () => {
       { root },
     );
 
+    const messages = collectMessages(agent);
     await agent.prompt("where are we running");
 
-    const [toolResult] = toolResultsOf(agent);
+    const [toolResult] = toolResultsOf(messages);
     expect(toolResult?.content[0]).toMatchObject({
       type: "text",
       text: expect.stringContaining(root),
@@ -574,11 +643,11 @@ describe("createMoriAgent toolset wiring", () => {
       tools: [],
     });
 
-    await agent.prompt("hi");
+    const messages = collectMessages(agent);
+    const last = await agent.prompt("hi");
 
     expect(agent.getTools()).toEqual([]);
-    expect(toolResultsOf(agent)).toHaveLength(0);
-    const last = agent.state.messages.at(-1);
+    expect(toolResultsOf(messages)).toHaveLength(0);
     expect(last).toMatchObject({ role: "assistant", stopReason: "stop" });
   });
 });
