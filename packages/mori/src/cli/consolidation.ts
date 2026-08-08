@@ -3,9 +3,11 @@
  * #12 built the kernel that does something with it — nothing before this file ever called
  * it.
  *
- * Two triggers, both harness-side (`runtime.ts`'s `runPrompt` finally, `index.ts`'s REPL
- * exit finally, and this file's `/consolidate` handler for `repl.ts`): session end and an
- * explicit user request. `consolidate-service`'s watermark is an idempotency device for
+ * Three triggers, all harness-side (`runtime.ts`'s `runPrompt` finally, `index.ts`'s REPL
+ * exit finally, this file's `/consolidate` handler for `repl.ts`, and — since #409 — the
+ * `session_compact` subscription in `compaction.ts`): session end, an explicit user request,
+ * and the boundary that follows a context compaction.
+ * `consolidate-service`'s watermark is an idempotency device for
  * SEQUENTIAL boundaries, not a concurrency guard (its own module doc says so) — two
  * overlapping calls would each read the same watermark and both append. `consolidateGuarded`
  * below is what keeps that from happening: a per-kernel promise chain that makes the second
@@ -32,15 +34,24 @@ const chains = new WeakMap<MoriKernel, Promise<void>>();
  * A caller's own rejection is still visible to it — only the CHAINING waits on a settled prior
  * call, an earlier failure must not permanently wedge every later trigger.
  *
- * `boundary` (#141) is the per-call telemetry label — this file's two triggers are the only
- * ones actually wired (`threshold`/`session-start`/`post-compact` are out of scope, see the
- * issue), so the two call sites below pass their own literal rather than this function
- * defaulting one.
+ * `boundary` (#141) is the per-call telemetry label — this file's three triggers are the only
+ * ones actually wired (`threshold`/`session-start` are out of scope, see the issue), so the
+ * call sites below pass their own literal rather than this function defaulting one.
+ *
+ * **What the chain keeps from being consumed twice** (#409 widened the set to `post-compact`):
+ * the per-boundary window, i.e. the observations past `consolidate-service`'s watermark. That
+ * watermark cannot do this job itself — it is a read-modify-write, so two boundaries that read
+ * it before either has advanced it both see the same window and both append the memories
+ * distilled from it. Until #409 the two triggers were tied to a human's rhythm (session end,
+ * `/consolidate`) and overlapping them took deliberate effort; `post-compact` fires off nothing
+ * but context size at the end of a turn, so a `/consolidate` still inside its extraction LLM
+ * call while the user keeps typing is an ordinary sequence, not a corner case. Serializing here
+ * makes the second boundary read a watermark the first has already advanced.
  */
 function consolidateGuarded(
   kernel: MoriKernel,
   llm: ConsolidatorLlm,
-  boundary: Extract<ConsolidateBoundary, "session-end" | "manual">,
+  boundary: Extract<ConsolidateBoundary, "session-end" | "manual" | "post-compact">,
   signal?: AbortSignal,
 ): Promise<void> {
   const prior = chains.get(kernel) ?? Promise.resolve();
@@ -72,6 +83,29 @@ export async function consolidateOnSessionEnd(
   } catch (error) {
     onError(sessionEndFailureMessage(error));
   }
+}
+
+/**
+ * Post-compaction trigger (#409, 조각 E). Its one caller is the `session_compact`
+ * subscription in `compaction.ts`, which does NOT await the returned promise (정본 문서
+ * §1 D1: a boundary does not hold up the thing that fired it) and therefore owns the
+ * rejection sink for it (§6.3 D7). So, unlike the other two triggers, this one neither
+ * swallows nor classifies failure — it hands the guarded promise back exactly as
+ * `consolidateGuarded` produced it.
+ *
+ * `llm` undefined is the same quiet no-op the other two triggers give: consolidation is
+ * unconfigured, so there is no boundary to run.
+ *
+ * **This boundary distills observations only** — see `compaction.ts` for why the conversation
+ * text compaction just dropped does not reach the kernel here, and why that is the
+ * pre-existing state rather than something this trigger gives up.
+ */
+export function consolidateAfterCompact(
+  kernel: MoriKernel,
+  llm: ConsolidatorLlm | undefined,
+): Promise<void> {
+  if (!llm) return Promise.resolve();
+  return consolidateGuarded(kernel, llm, "post-compact");
 }
 
 function sessionEndFailureMessage(error: unknown): string {

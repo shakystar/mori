@@ -1,5 +1,6 @@
 import type { ConsolidatorLlm } from "@mori/kernel";
 import type { MoriAgent, MoriKernel } from "../agent/index.js";
+import { compactIfContextFull } from "./compaction.js";
 import { consolidateExplicit, type ExplicitConsolidateOutcome } from "./consolidation.js";
 import {
   replBanner,
@@ -147,6 +148,18 @@ export async function runRepl(
         stderr(replTurnCancelledMessage());
       } else if (last.stopReason === "error") {
         stderr(`mori: ${last.errorMessage ?? "unknown provider error"}\n`);
+      } else {
+        // Between-turns compaction (#409). Here rather than inside the turn because
+        // `compact()` needs an idle harness, and never throws (compaction.ts reports through
+        // `stderr`), so a failed compaction cannot end a REPL session.
+        //
+        // Only after a turn that ran to completion. A cancelled turn is the user asking for
+        // the prompt back, and `compact()` builds its summary on an `AbortSignal` of its own
+        // that no Ctrl-C reaches — starting one there would hand back an unresponsive
+        // session instead. A failed turn contributed nothing to the context worth
+        // summarizing, and its most likely cause (the provider) is what a compaction would
+        // have to reach anyway. Both re-measure at the end of the next turn.
+        await compactIfContextFull(agent, stderr);
       }
     }
   } finally {
