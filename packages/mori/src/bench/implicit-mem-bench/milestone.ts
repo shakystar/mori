@@ -13,6 +13,7 @@ import { createCostLedger, type CostLedger, type CostReport } from "../cost-ledg
 import { IMPLICIT_MEM_BENCH_SCENARIOS, type ImplicitMemBenchScenario } from "./scenarios.js";
 import {
   buildJudgePrompt,
+  computeAxisRates,
   parseJudgeVerdict,
   RE_QUESTION_META_QUESTION,
   runImplicitMemBenchEpisode,
@@ -119,23 +120,6 @@ export interface MilestoneBatchOptions {
   batchClient?: AnthropicBatchClient;
   pollIntervalMs?: number;
   timeoutMs?: number;
-}
-
-function computeAxisRates(results: readonly ScenarioRunResult[]): ImplicitMemBenchReport["axisRates"] {
-  const onConditionResults = results.filter((r) => r.condition === "memory-on");
-  const rate = (hits: number, total: number): number => (total === 0 ? 0 : hits / total);
-
-  return {
-    injectionHitRate: rate(
-      onConditionResults.filter((r) => r.injected).length,
-      onConditionResults.length,
-    ),
-    reDistillationRate: 0,
-    reQuestionRate: rate(
-      onConditionResults.filter((r) => r.reQuestioned === true).length,
-      onConditionResults.length,
-    ),
-  };
 }
 
 /**
