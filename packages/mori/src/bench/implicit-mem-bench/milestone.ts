@@ -42,7 +42,11 @@ import { scoreBehavioralAdaptation, type LlmJudge } from "./scorer.js";
  * 턴의 모델 출력에 의존하므로 사전에 전체 요청을 알아야 하는 Batch API와 안 맞는다).
  */
 
-function rubricCustomId(scenarioId: string, condition: ImplicitMemBenchCondition, criterionId: string): string {
+function rubricCustomId(
+  scenarioId: string,
+  condition: ImplicitMemBenchCondition,
+  criterionId: string,
+): string {
   return `rubric::${scenarioId}::${condition}::${criterionId}`;
 }
 
@@ -78,7 +82,9 @@ function createBatchReplayJudge(
       }
       const result = resultsById.get(customId);
       if (!result) {
-        throw new Error(`mori bench: 시나리오 "${episode.scenarioId}"의 배치 결과 "${customId}"를 찾을 수 없다.`);
+        throw new Error(
+          `mori bench: 시나리오 "${episode.scenarioId}"의 배치 결과 "${customId}"를 찾을 수 없다.`,
+        );
       }
       if (result.error) {
         // 배치 항목 하나의 실패(만료·취소·오류)가 전체 마일스톤 풀런을 죽이지 않는다 — 빈 텍스트는
@@ -92,6 +98,14 @@ function createBatchReplayJudge(
       return Promise.resolve(parseJudgeVerdict(result.text));
     },
   };
+}
+
+/** `ImplicitMemBenchReport`를 깨지 않고 확장한다 — `batchFailures`가 비어있지 않으면 이 리포트의
+ * 점수는 신뢰할 수 없다(일부 judge 배치 항목이 만료·취소·오류로 죽어 "불만족"으로 채점됐다는
+ * 뜻). 마일스톤 풀런은 게이트 판정에 쓰는 최고 신뢰도 측정이라, 이 정보 없이는 인프라 실패가
+ * "모델이 못 했다"로 조용히 리포트에 섞여 들어간다 (#407 owner 수정요청). */
+export interface MilestoneReport extends ImplicitMemBenchReport {
+  batchFailures: readonly { customId: string; error: string }[];
 }
 
 export interface MilestoneBatchOptions {
@@ -133,7 +147,7 @@ export interface MilestoneBatchOptions {
  */
 export async function runImplicitMemBenchMilestone(
   options: MilestoneBatchOptions,
-): Promise<ImplicitMemBenchReport> {
+): Promise<MilestoneReport> {
   const env = options.env ?? process.env;
   const scenarios = options.scenarios ?? IMPLICIT_MEM_BENCH_SCENARIOS;
   const conditions = options.conditions ?? (["memory-on", "memory-off"] as const);
@@ -146,7 +160,9 @@ export async function runImplicitMemBenchMilestone(
     createAnthropicBatchClient({
       model: batchModel,
       apiKey: options.batchApiKey,
-      ...(options.batchSystemPrompt === undefined ? {} : { systemPrompt: options.batchSystemPrompt }),
+      ...(options.batchSystemPrompt === undefined
+        ? {}
+        : { systemPrompt: options.batchSystemPrompt }),
       ...(options.pollIntervalMs === undefined ? {} : { pollIntervalMs: options.pollIntervalMs }),
       ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
     });
@@ -225,7 +241,9 @@ export async function runImplicitMemBenchMilestone(
         const key = reQuestionCustomId(episode.scenarioId, episode.condition);
         const result = resultsById.get(key);
         if (!result) {
-          throw new Error(`mori bench: 시나리오 "${episode.scenarioId}"의 재질문 배치 결과가 없다.`);
+          throw new Error(
+            `mori bench: 시나리오 "${episode.scenarioId}"의 재질문 배치 결과가 없다.`,
+          );
         }
         costLedger.record(BENCH_AXES.reQuestionRate, result.usage);
         reQuestioned = result.error ? false : parseJudgeVerdict(result.text);
@@ -244,11 +262,16 @@ export async function runImplicitMemBenchMilestone(
       });
     }
 
+    const batchFailures = results
+      .filter((r) => r.error !== undefined)
+      .map((r) => ({ customId: r.customId, error: r.error as string }));
+
     const report: CostReport = costLedger.report();
     return {
       ...report,
       scenarios: scenarioResults,
       axisRates: computeAxisRates(scenarioResults),
+      batchFailures,
     };
   } finally {
     if (previousMemorizeRoot === undefined) delete process.env.MEMORIZE_ROOT;

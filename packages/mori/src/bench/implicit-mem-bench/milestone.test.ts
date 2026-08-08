@@ -4,8 +4,17 @@ import { describe, expect, it } from "vitest";
 import type { MoriKernel } from "../../agent/index.js";
 import type { RunCliDeps } from "../../cli/types.js";
 import type { CreateMoriSessionResult, MoriSessionTurn } from "../../session.js";
-import type { AnthropicBatchClient, BatchJudgeRequest, BatchJudgeResult } from "../batch/anthropic-batch-client.js";
-import { buildJudgePrompt, RE_QUESTION_META_QUESTION, type CreateKernelFn, type CreateSessionFn } from "./runner.js";
+import type {
+  AnthropicBatchClient,
+  BatchJudgeRequest,
+  BatchJudgeResult,
+} from "../batch/anthropic-batch-client.js";
+import {
+  buildJudgePrompt,
+  RE_QUESTION_META_QUESTION,
+  type CreateKernelFn,
+  type CreateSessionFn,
+} from "./runner.js";
 import type { ImplicitMemBenchScenario } from "./scenarios.js";
 import { runImplicitMemBenchMilestone } from "./milestone.js";
 
@@ -157,7 +166,9 @@ describe("runImplicitMemBenchMilestone (#407, #397 조각 3/3)", () => {
     expect(requests[0]?.prompt).toBe(
       buildJudgePrompt("이 출력이 기준을 만족하는가?", "reply:follow-up prompt"),
     );
-    expect(requests[1]?.prompt).toBe(buildJudgePrompt(RE_QUESTION_META_QUESTION, "reply:follow-up prompt"));
+    expect(requests[1]?.prompt).toBe(
+      buildJudgePrompt(RE_QUESTION_META_QUESTION, "reply:follow-up prompt"),
+    );
 
     expect(report.scenarios).toHaveLength(1);
     const [result] = report.scenarios;
@@ -177,7 +188,12 @@ describe("runImplicitMemBenchMilestone (#407, #397 조각 3/3)", () => {
       retrieveResults: () => Promise.reject(new Error("unused")),
       runBatch: (requests) =>
         Promise.resolve(
-          requests.map((r) => ({ customId: r.customId, text: "", error: "expired", usage: ZERO_USAGE_FIXTURE })),
+          requests.map((r) => ({
+            customId: r.customId,
+            text: "",
+            error: "expired",
+            usage: ZERO_USAGE_FIXTURE,
+          })),
         ),
     };
 
@@ -202,5 +218,35 @@ describe("runImplicitMemBenchMilestone (#407, #397 조각 3/3)", () => {
     // aggregate score lands at 0.5 (1 of 2 rubric criteria satisfied), not 0.
     expect(result?.score.score).toBe(0.5);
     expect(result?.reQuestioned).toBe(false);
+
+    // The errored batch items must be surfaced, not just silently folded into "unsatisfied" —
+    // otherwise an infra failure (expired/canceled/errored batch entries) reads identically to a
+    // model actually failing the criterion (#407 owner 수정요청).
+    expect(report.batchFailures).toEqual([
+      { customId: "rubric::s2::memory-on::judge-criterion", error: "expired" },
+      { customId: "re-question::s2::memory-on", error: "expired" },
+    ]);
+  });
+
+  it("reports no batch failures when every batch item succeeds", async () => {
+    const harness = fakeHarness();
+    const batchClient = fakeBatchClient();
+
+    const report = await runImplicitMemBenchMilestone({
+      model: model(),
+      streamFn: async () => {
+        throw new Error("streamFn must not be called for judging — that's the batch client's job");
+      },
+      batchApiKey: "test-api-key",
+      workRoot: "/tmp/mori-milestone-fixture-work-3",
+      memorizeRoot: "/tmp/mori-milestone-fixture-store-3",
+      scenarios: [fixtureScenario("s3")],
+      conditions: ["memory-on"],
+      batchClient,
+      createSession: harness.createSession,
+      createKernel: harness.createKernel,
+    });
+
+    expect(report.batchFailures).toEqual([]);
   });
 });

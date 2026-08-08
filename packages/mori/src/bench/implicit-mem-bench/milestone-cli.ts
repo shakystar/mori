@@ -12,7 +12,7 @@ import { defaultCredentialsPath, FileCredentialStore } from "../../auth/credenti
 import { isMainEntry } from "../../cli/entrypoint.js";
 import { unauthenticatedMessage } from "../../cli/messages.js";
 import { writeCostReport } from "../cost-ledger.js";
-import { runImplicitMemBenchMilestone } from "./milestone.js";
+import { runImplicitMemBenchMilestone, type MilestoneReport } from "./milestone.js";
 
 export interface MilestoneCliIO {
   stdout: (chunk: string) => void;
@@ -33,7 +33,9 @@ function defaultOutPath(): string {
 function parsePositiveInt(flag: string, value: string | undefined): number {
   const parsed = value === undefined ? Number.NaN : Number.parseInt(value, 10);
   if (!Number.isInteger(parsed) || parsed <= 0) {
-    throw new Error(`mori bench: ${flag}는 1 이상의 정수(ms)여야 한다 (받은 값: "${String(value)}")`);
+    throw new Error(
+      `mori bench: ${flag}는 1 이상의 정수(ms)여야 한다 (받은 값: "${String(value)}")`,
+    );
   }
   return parsed;
 }
@@ -65,6 +67,30 @@ function parseArgs(argv: string[]): ParsedArgs {
     ...(timeoutMs === undefined ? {} : { timeoutMs }),
     out: out ?? defaultOutPath(),
   };
+}
+
+/** 리포트를 기록하고, `report.batchFailures`가 비어있지 않으면 실패 건수·custom_id를 stderr에
+ * 남기고 0이 아닌 종료 코드를 반환한다 — 그렇지 않으면 인프라 실패(배치 항목 만료·취소·오류)가
+ * "모델이 못 했다"로 조용히 섞여 그린 리포트처럼 보인다(#407 owner 수정요청). auth 해석과
+ * 분리해 둔 이유는 이 판정 로직만 순수 함수로 직접 테스트하기 위해서다. */
+export function reportMilestoneOutcome(
+  report: MilestoneReport,
+  out: string,
+  io: MilestoneCliIO,
+): number {
+  io.stdout(
+    `mori bench: 마일스톤 풀런 완료 — 시나리오 결과 ${String(report.scenarios.length)}건, ` +
+      `총비용 $${report.total.cost.total.toFixed(4)}, 비용 리포트: ${out}\n`,
+  );
+  if (report.batchFailures.length > 0) {
+    io.stderr(
+      `mori bench: judge 배치 항목 ${String(report.batchFailures.length)}건이 실패했다 — ` +
+        `이 리포트의 점수는 신뢰할 수 없다. 실패 항목: ` +
+        `${report.batchFailures.map((f) => `${f.customId}(${f.error})`).join(", ")}\n`,
+    );
+    return 1;
+  }
+  return 0;
 }
 
 /**
@@ -151,11 +177,7 @@ export async function runMilestoneCli(
   });
 
   await writeCostReport(report, args.out);
-  io.stdout(
-    `mori bench: 마일스톤 풀런 완료 — 시나리오 결과 ${String(report.scenarios.length)}건, ` +
-      `총비용 $${report.total.cost.total.toFixed(4)}, 비용 리포트: ${args.out}\n`,
-  );
-  return 0;
+  return reportMilestoneOutcome(report, args.out, io);
 }
 
 if (isMainEntry(process.argv[1], import.meta.url)) {
