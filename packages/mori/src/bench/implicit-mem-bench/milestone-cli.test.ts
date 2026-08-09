@@ -37,6 +37,7 @@ function fixtureReport(overrides: {
     axisRates: { injectionHitRate: 0, reDistillationRate: 0, reQuestionRate: 0 },
     batchFailures: overrides.batchFailures ?? [],
     judgeBatchRequests: overrides.judgeBatchRequests ?? 1,
+    judgeBatchSubmitted: overrides.judgeBatchRequests ?? 1,
   };
 }
 

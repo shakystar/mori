@@ -8,7 +8,16 @@ import type {
   TextBlock,
   Usage as AnthropicUsage,
 } from "@anthropic-ai/sdk/resources/messages/messages";
-import { calculateCost, type Api, type Model, type Usage } from "@earendil-works/pi-ai";
+import {
+  calculateCost,
+  contentText,
+  type Api,
+  type AssistantMessage,
+  type Context,
+  type Model,
+  type Usage,
+} from "@earendil-works/pi-ai";
+import { llmCallCacheKey, type LlmCallCacheStore } from "../cache/llm-call-cache.js";
 
 /**
  * Anthropic Message Batches API 클라이언트 (#407, #397 조각 3/3). 이 리포에 Batch API를 쓰는
@@ -50,6 +59,9 @@ export interface BatchJudgeResult {
   /** 성공한 요청의 실비용 사용량 — 배치 50% 할인이 반영된 값(`toPiUsage` 참고). 실패한 요청은
    * 과금되지 않으므로(Anthropic 문서) 0.  */
   usage: Usage;
+  /** 이 결과가 `cacheStore` 히트에서 재생됐으면 `true` — 실제 Batch API 제출을 타지 않았다는
+   * 뜻이다(#423). 캐시 없이 도는 기존 경로(`cacheStore` 미주입)는 항상 `false`다. */
+  fromCache: boolean;
 }
 
 export class BatchTimeoutError extends Error {
@@ -119,6 +131,20 @@ const ZERO_USAGE: Usage = {
   cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 };
 
+/** 배치 요청 하나를 `llmCallCacheKey`가 요구하는 `Context`로 편다 — reader.ts의 `createApiReader`가
+ * 같은 이유로 쓰는 `timestamp: 0`을 그대로 따른다(실제 호출 시각이 키에 섞이면 재실행마다 캐시가
+ * 미스한다). */
+function batchRequestContext(
+  request: BatchJudgeRequest,
+  systemPrompt: string | undefined,
+): Context {
+  const effectiveSystemPrompt = request.systemPrompt ?? systemPrompt;
+  return {
+    ...(effectiveSystemPrompt === undefined ? {} : { systemPrompt: effectiveSystemPrompt }),
+    messages: [{ role: "user", content: request.prompt, timestamp: 0 }],
+  };
+}
+
 export interface AnthropicBatchClientConfig {
   /** 판정 호출에 쓸 모델 — `model.id`가 Batch API 요청의 `model` 필드가 되고, `model.cost`가
    * `toPiUsage`의 요율 계산에 쓰인다. */
@@ -137,6 +163,12 @@ export interface AnthropicBatchClientConfig {
   sleep?: (ms: number) => Promise<void>;
   /** 테스트 시드: 경과 시간 측정을 `Date.now()` 대신 이 값으로 — 폴링 루프가 매 반복마다 부른다. */
   now?: () => number;
+  /** #372/#423 캐시 스토어 — 주어지면 `runBatch`가 제출 전에 (model, prompt, systemPrompt) 키로
+   * 조회해 히트한 요청은 배치에서 아예 빼고, 실 배치가 돌아온 성공 결과만 저장한다(실패
+   * 결과는 저장하지 않는다 — 일시 실패가 영구 재생되는 것을 막는 `withLlmCallCache`와 같은
+   * 정책). `submit`/`pollUntilComplete`/`retrieveResults`는 이 스토어를 모른다 — 캐시는
+   * `runBatch`가 그 세 단계를 묶는 지점에서만 적용된다. */
+  cacheStore?: LlmCallCacheStore;
 }
 
 export interface AnthropicBatchClient {
@@ -209,6 +241,7 @@ export function createAnthropicBatchClient(
           customId: line.custom_id,
           text,
           usage: toPiUsage(config.model, message.usage),
+          fromCache: false,
         });
       } else {
         results.push({
@@ -216,10 +249,74 @@ export function createAnthropicBatchClient(
           text: "",
           error: line.result.type,
           usage: ZERO_USAGE,
+          fromCache: false,
         });
       }
     }
     return results;
+  }
+
+  /** 캐시 히트 요청을 배치 제출 전에 걸러낸다 — 미스만 실제로 submit/poll/retrieve를 탄다.
+   * `cacheStore`가 없으면(기존 호출자) 이전 그대로 무조건 전체 요청을 제출한다. */
+  async function runBatchCached(
+    store: LlmCallCacheStore,
+    requests: readonly BatchJudgeRequest[],
+  ): Promise<BatchJudgeResult[]> {
+    const keyByCustomId = new Map(
+      requests.map((request) => [
+        request.customId,
+        llmCallCacheKey(config.model, batchRequestContext(request, config.systemPrompt), {
+          maxTokens,
+        }),
+      ]),
+    );
+    const cached: BatchJudgeResult[] = [];
+    const misses: BatchJudgeRequest[] = [];
+    for (const request of requests) {
+      const key = keyByCustomId.get(request.customId);
+      // Presence guaranteed by the map built from the same `requests` array above.
+      if (key === undefined) continue;
+      const hit = await store.get(key);
+      if (hit) {
+        cached.push({
+          customId: request.customId,
+          text: contentText(hit.content),
+          usage: ZERO_USAGE,
+          fromCache: true,
+        });
+      } else {
+        misses.push(request);
+      }
+    }
+    if (misses.length === 0) return cached;
+
+    const batchId = await submit(misses);
+    await pollUntilComplete(batchId);
+    const fresh = await retrieveResults(batchId);
+
+    // 성공한 결과만 저장한다 — expired/canceled/errored를 캐시하면 일시 실패가 영구 재생된다
+    // (`withLlmCallCache`와 같은 정책).
+    await Promise.all(
+      fresh
+        .filter((result) => result.error === undefined)
+        .map((result) => {
+          const key = keyByCustomId.get(result.customId);
+          if (key === undefined) return Promise.resolve();
+          const message: AssistantMessage = {
+            role: "assistant",
+            content: [{ type: "text", text: result.text }],
+            api: config.model.api,
+            provider: config.model.provider,
+            model: config.model.id,
+            usage: result.usage,
+            stopReason: "stop",
+            timestamp: 0,
+          };
+          return store.set(key, message);
+        }),
+    );
+
+    return [...cached, ...fresh];
   }
 
   return {
@@ -227,6 +324,7 @@ export function createAnthropicBatchClient(
     pollUntilComplete,
     retrieveResults,
     async runBatch(requests: readonly BatchJudgeRequest[]): Promise<BatchJudgeResult[]> {
+      if (config.cacheStore) return runBatchCached(config.cacheStore, requests);
       const batchId = await submit(requests);
       await pollUntilComplete(batchId);
       return retrieveResults(batchId);

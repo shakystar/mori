@@ -3,13 +3,30 @@ import type {
   MessageBatch,
   MessageBatchIndividualResponse,
 } from "@anthropic-ai/sdk/resources/messages/batches";
-import type { Api, Model } from "@earendil-works/pi-ai";
+import type { Api, AssistantMessage, Model } from "@earendil-works/pi-ai";
 import { describe, expect, it } from "vitest";
+import { llmCallCacheKey, type LlmCallCacheStore } from "../cache/llm-call-cache.js";
 import {
   BatchTimeoutError,
   createAnthropicBatchClient,
   type AnthropicBatchesApi,
 } from "./anthropic-batch-client.js";
+
+/** An in-memory `LlmCallCacheStore` — the real `FileLlmCallCacheStore` is covered separately in
+ * file-cache-store.test.ts; this test is about `runBatchCached`'s hit/miss orchestration. */
+class InMemoryStore implements LlmCallCacheStore {
+  private readonly entries = new Map<string, AssistantMessage>();
+  readonly setCalls: string[] = [];
+
+  async get(key: string): Promise<AssistantMessage | undefined> {
+    return this.entries.get(key);
+  }
+
+  async set(key: string, message: AssistantMessage): Promise<void> {
+    this.setCalls.push(key);
+    this.entries.set(key, message);
+  }
+}
 
 function model(): Model<Api> {
   return {
@@ -236,6 +253,7 @@ describe("createAnthropicBatchClient (#407)", () => {
             totalTokens: 0,
             cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
           },
+          fromCache: false,
         },
         {
           customId: "canceled-1",
@@ -249,6 +267,7 @@ describe("createAnthropicBatchClient (#407)", () => {
             totalTokens: 0,
             cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
           },
+          fromCache: false,
         },
       ]);
     });
@@ -277,6 +296,97 @@ describe("createAnthropicBatchClient (#407)", () => {
 
       expect(results).toEqual([]);
       expect(calls).toEqual(["create", "retrieve", "results"]);
+    });
+  });
+
+  describe("runBatch with cacheStore (#423)", () => {
+    it("skips cache hits when submitting, tags results with fromCache, and never persists errored results", async () => {
+      const store = new InMemoryStore();
+      const keyA = llmCallCacheKey(
+        model(),
+        { messages: [{ role: "user", content: "질문 A", timestamp: 0 }] },
+        { maxTokens: 1024 },
+      );
+      await store.set(keyA, {
+        role: "assistant",
+        content: [{ type: "text", text: "캐시된 답" }],
+        api: "anthropic-messages",
+        provider: "anthropic",
+        model: "claude-sonnet-4-6",
+        usage: {
+          input: 10,
+          output: 5,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 15,
+          cost: { input: 0.001, output: 0.002, cacheRead: 0, cacheWrite: 0, total: 0.003 },
+        },
+        stopReason: "stop",
+        timestamp: 0,
+      });
+      store.setCalls.length = 0; // Reset: the line above seeds the fixture, not part of the SUT.
+
+      let submitted: BatchCreateParams["requests"] | undefined;
+      const batchesApi: AnthropicBatchesApi = {
+        create: (body) => {
+          submitted = body.requests;
+          return Promise.resolve(pendingBatch("b-cached"));
+        },
+        retrieve: () => Promise.resolve(endedBatch("b-cached")),
+        results: () =>
+          Promise.resolve(
+            asyncIterableOf<MessageBatchIndividualResponse>([
+              {
+                custom_id: "b",
+                result: {
+                  type: "succeeded",
+                  message: {
+                    id: "msg_b",
+                    type: "message",
+                    role: "assistant",
+                    model: "claude-sonnet-4-6",
+                    content: [{ type: "text", text: "새 답" }],
+                    stop_reason: "end_turn",
+                    stop_sequence: null,
+                    usage: {
+                      input_tokens: 10,
+                      output_tokens: 5,
+                      cache_creation_input_tokens: null,
+                      cache_read_input_tokens: null,
+                      cache_creation: null,
+                      server_tool_use: null,
+                      service_tier: "batch",
+                      inference_geo: null,
+                    },
+                  },
+                },
+              },
+              { custom_id: "c", result: { type: "expired" } },
+              // Cast: fixture only fills the fields the client reads — see the retrieveResults
+              // fixture above for the same rationale.
+            ] as unknown as MessageBatchIndividualResponse[]),
+          ),
+      };
+      const client = createAnthropicBatchClient({ model: model(), batchesApi, cacheStore: store });
+
+      const results = await client.runBatch([
+        { customId: "a", prompt: "질문 A" },
+        { customId: "b", prompt: "질문 B" },
+        { customId: "c", prompt: "질문 C" },
+      ]);
+
+      // Only the misses (b, c) are submitted — the cache hit (a) never reaches the Batch API.
+      expect(submitted?.map((r) => r.custom_id)).toEqual(["b", "c"]);
+
+      const byId = new Map(results.map((r) => [r.customId, r]));
+      expect(byId.get("a")).toMatchObject({ fromCache: true, text: "캐시된 답" });
+      expect(byId.get("a")?.usage.cost.total).toBe(0);
+      expect(byId.get("b")).toMatchObject({ fromCache: false, text: "새 답" });
+      expect(byId.get("c")).toMatchObject({ fromCache: false, error: "expired" });
+
+      // The errored result (c) must not be persisted — caching a transient failure would replay
+      // it forever (same policy as withLlmCallCache). Only the fresh success (b) is stored.
+      expect(store.setCalls).toHaveLength(1);
     });
   });
 });
