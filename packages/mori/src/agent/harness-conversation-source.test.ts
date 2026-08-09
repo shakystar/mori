@@ -198,9 +198,7 @@ describe("createHarnessConversationSource", () => {
   });
 
   it("returns undefined instead of throwing when a successfully-read entry doesn't match the shape turnOf expects", async () => {
-    const source = createHarnessConversationSource(
-      new Session(new MalformedEntrySessionStorage()),
-    );
+    const source = createHarnessConversationSource(new Session(new MalformedEntrySessionStorage()));
 
     await expect(source.read(0)).resolves.toBeUndefined();
   });
