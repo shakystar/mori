@@ -22,6 +22,7 @@ import {
   renderMemoryContext,
   SqliteMemoryKernel,
   stripBom,
+  type ConversationSource,
   type Embedder,
   type MemoryContext,
   type ObservedToolCall,
@@ -428,6 +429,15 @@ export interface CreateMoriKernelOptions {
    */
   sessionId?: string;
   /**
+   * Conversation seam for consolidation (#426, #7 조각 2/2), forwarded to the kernel
+   * verbatim. Absent ⇒ the kernel's own pre-existing degraded behaviour — an
+   * observation-only consolidation boundary — which is not an error (`@mori/kernel`'s
+   * `ConversationSource` doc). The caller (`cli/runtime.ts`'s `prepareAgent`) is the one
+   * that knows which `Session` the harness is actually typing into, so this stays a plain
+   * pass-through rather than this function building its own adapter.
+   */
+  conversationSource?: ConversationSource;
+  /**
    * Sink for a capture that failed after the turn moved on. Called at most once
    * per kernel: a store that is broken is broken for every later event, and the
    * agent's output is not a log.
@@ -570,6 +580,12 @@ export type MoriKernelHandle = SqliteMemoryKernel<AgentMessage, AgentEvent> & {
  * only `renderContext` the kernel injects once at session start, and the
  * turn-level retrieval it can do would be code that never runs in production.
  *
+ * `options.conversationSource` is a plain pass-through (#426, #7 조각 2/2), not built
+ * here: this function only knows a working root, never the harness's `Session` the
+ * source has to read from — that identity lives one level up, in `prepareAgent`.
+ * Absent, it degrades to the kernel's own observation-only boundary — same contract
+ * as `embedder`.
+ *
  * The store lives under the kernel's own root (`~/.mori`, or `MEMORIZE_ROOT`) —
  * resolved inside the kernel's path-resolver from `process.env`, which is why
  * tests that exercise this must set that variable rather than pass an env object.
@@ -627,6 +643,7 @@ export function createMoriKernel(options: CreateMoriKernelOptions = {}): MoriKer
     readQuery: readTurnQuery,
     ...(embedder ? { embedder } : {}),
     ...(contextEmbedder ? { contextEmbedder } : {}),
+    ...(options.conversationSource ? { conversation: options.conversationSource } : {}),
     onCaptureError: (error: unknown) => {
       if (!warn || warned) return;
       warned = true;

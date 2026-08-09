@@ -21,10 +21,10 @@ import type {
   ToolCall,
 } from "@earendil-works/pi-ai";
 import { createAssistantMessageEventStream, InMemoryCredentialStore } from "@earendil-works/pi-ai";
-import type { ConsolidatorLlm } from "@mori/kernel";
+import type { ConsolidatorLlm, ConversationSource } from "@mori/kernel";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { fakeProviderModels } from "../agent/fake-provider-models.js";
-import { consolidateOnSessionEnd } from "../cli/consolidation.js";
+import { consolidateAfterCompact, consolidateOnSessionEnd } from "../cli/consolidation.js";
 import { runCli } from "../index.js";
 import { createMoriTools } from "../tools/index.js";
 import {
@@ -750,5 +750,75 @@ describe("mori turn -> sqlite store", () => {
 
     expect(exitCode).toBe(0);
     expect(readdirSync(store)).toEqual([]);
+  });
+});
+
+describe("createMoriKernel — conversationSource wiring (#426, #7 조각 2/2)", () => {
+  let root: string;
+  let store: string;
+
+  beforeEach(() => {
+    root = realpathSync(mkdtempSync(join(tmpdir(), "mori-kernel-root-")));
+    store = realpathSync(mkdtempSync(join(tmpdir(), "mori-kernel-store-")));
+    process.env.MEMORIZE_ROOT = store;
+  });
+
+  afterEach(() => {
+    delete process.env.MEMORIZE_ROOT;
+    rmSync(root, { recursive: true, force: true });
+    rmSync(store, { recursive: true, force: true });
+  });
+
+  it("omitting conversationSource is not an error — the kernel still runs as the pre-existing observation-only boundary", async () => {
+    const llm: ConsolidatorLlm = { async complete(): Promise<string> { return "[]"; } };
+    const kernel = createMoriKernel({ root, env: {} });
+
+    const result = await kernel.consolidateWithResult(llm);
+
+    expect(result.outcome).toBe("noop");
+  });
+
+  it("a post-compact boundary's consolidate call carries text pulled from the wired ConversationSource, from the watermark forward", async () => {
+    const reads: number[] = [];
+    const source: ConversationSource = {
+      id: "conv-426",
+      async read(offset) {
+        reads.push(offset);
+        return { text: "USER: 안녕\n\nAGENT: 네", newOffset: 100, resumePoints: [] };
+      },
+    };
+    const prompts: string[] = [];
+    const llm: ConsolidatorLlm = {
+      async complete(prompt: string): Promise<string> {
+        prompts.push(prompt);
+        return "[]";
+      },
+    };
+    const kernel = createMoriKernel({ root, env: {}, conversationSource: source });
+
+    await consolidateAfterCompact(kernel, llm);
+
+    expect(reads).toEqual([0]);
+    expect(prompts[0]).toContain("안녕");
+  });
+
+  it("the session-end boundary and the post-compact boundary share one watermark — back to back, the second does not re-read what the first already consumed", async () => {
+    const reads: number[] = [];
+    const source: ConversationSource = {
+      id: "conv-426",
+      async read(offset) {
+        reads.push(offset);
+        return { text: `대화 (offset ${offset})`, newOffset: offset + 10, resumePoints: [] };
+      },
+    };
+    const llm: ConsolidatorLlm = { async complete(): Promise<string> { return "[]"; } };
+    const kernel = createMoriKernel({ root, env: {}, conversationSource: source });
+
+    await consolidateOnSessionEnd(kernel, llm, () => {});
+    await consolidateAfterCompact(kernel, llm);
+
+    // The second boundary's read starts at the first boundary's newOffset (10), not 0 —
+    // one kernel instance, one bound source, one watermark, regardless of which trigger ran.
+    expect(reads).toEqual([0, 10]);
   });
 });
