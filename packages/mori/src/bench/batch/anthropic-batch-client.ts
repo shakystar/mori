@@ -59,6 +59,9 @@ export interface BatchJudgeResult {
   /** 성공한 요청의 실비용 사용량 — 배치 50% 할인이 반영된 값(`toPiUsage` 참고). 실패한 요청은
    * 과금되지 않으므로(Anthropic 문서) 0.  */
   usage: Usage;
+  /** 이 결과가 `cacheStore` 히트에서 재생됐으면 `true` — 실제 Batch API 제출을 타지 않았다는
+   * 뜻이다(#423). 캐시 없이 도는 기존 경로(`cacheStore` 미주입)는 항상 `false`다. */
+  fromCache: boolean;
 }
 
 export class BatchTimeoutError extends Error {
@@ -238,6 +241,7 @@ export function createAnthropicBatchClient(
           customId: line.custom_id,
           text,
           usage: toPiUsage(config.model, message.usage),
+          fromCache: false,
         });
       } else {
         results.push({
@@ -245,6 +249,7 @@ export function createAnthropicBatchClient(
           text: "",
           error: line.result.type,
           usage: ZERO_USAGE,
+          fromCache: false,
         });
       }
     }
@@ -277,6 +282,7 @@ export function createAnthropicBatchClient(
           customId: request.customId,
           text: contentText(hit.content),
           usage: ZERO_USAGE,
+          fromCache: true,
         });
       } else {
         misses.push(request);

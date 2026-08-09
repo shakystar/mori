@@ -191,7 +191,12 @@ function fakeBatchClient(): AnthropicBatchClient & { requestsSeen: BatchJudgeReq
   const runBatch = (requests: readonly BatchJudgeRequest[]): Promise<BatchJudgeResult[]> => {
     requestsSeen.push([...requests]);
     return Promise.resolve(
-      requests.map((r) => ({ customId: r.customId, text: "예, 그렇다.", usage: usage() })),
+      requests.map((r) => ({
+        customId: r.customId,
+        text: "예, 그렇다.",
+        usage: usage(),
+        fromCache: false,
+      })),
     );
   };
   return {
@@ -266,6 +271,7 @@ describe("runImplicitMemBenchMilestone (#407, #397 조각 3/3)", () => {
             text: "",
             error: "expired",
             usage: ZERO_USAGE_FIXTURE,
+            fromCache: false,
           })),
         ),
     };
@@ -350,6 +356,10 @@ describe("runImplicitMemBenchMilestone (#407, #397 조각 3/3)", () => {
     const requests = batchClient.requestsSeen[0] ?? [];
     expect(report.judgeBatchRequests).toBe(requests.length);
     expect(report.judgeBatchRequests).toBe(2);
+    // fakeBatchClient never marks a result as a cache hit, so every logical request was actually
+    // submitted — judgeBatchSubmitted tracks a separate seam (#423), exercised by
+    // anthropic-batch-client.test.ts's runBatchCached test.
+    expect(report.judgeBatchSubmitted).toBe(2);
   });
 });
 
