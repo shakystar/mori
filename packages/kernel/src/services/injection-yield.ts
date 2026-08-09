@@ -22,6 +22,12 @@
  * and nothing came of it" point tuning in OPPOSITE directions (raise the budget
  * vs. fix the ranking), and a two-way split hides which one you are looking at.
  *
+ * Alongside the three states, the report carries the axis of what never got in
+ * at all: `budgetPressure`, the truncation facts #414 put on the same
+ * `memory.injected` event. Three states about what WAS injected cannot say
+ * whether to raise the budget or fix the ranking; the drop list is the half
+ * that can.
+ *
  * The names are deliberately the OBSERVABLE, not the interpretation — there is
  * no `hit`/`miss` here. The proxy these names stand in for, the reason it is
  * the best available signal, and the places it is wrong are in
@@ -34,6 +40,7 @@
  */
 
 import { nowIso } from "../domain/common.js";
+import type { InjectionBudgetDrop } from "../domain/entities.js";
 import type { MemoryInjectedPayload } from "../domain/entities/memory.js";
 import type { DomainEvent } from "../domain/events.js";
 import { laneOf, SELF_LANE } from "../projections/projector.js";
@@ -76,42 +83,123 @@ export function classifyInjectionYield(occasions: number): InjectionYield {
 }
 
 /**
- * memoryId → number of distinct sessions that injected it, from the event log.
+ * The truncation axis (#414, #242 조각 1/2) — what the injection budget pushed
+ * OUT, standing in the same report as the three-way judgement above.
  *
- * `scopeId` is the session id for `memory.injected` (the kernel appends with
- * `scopeType: "session"`), and falls back to the project id when the kernel was
- * constructed without one. That fallback collapses every session-less injection
- * into a single occasion, which UNDER-counts reuse and never over-counts —
- * the direction this whole module is biased in on purpose.
+ * The two axes only answer #242's question together. "Raise the budget or fix
+ * the ranking?" is undecidable from either half alone: a store full of
+ * `injected-once` says the ranking lifts the wrong things, but if those turns
+ * were also cutting `memory`-channel entries to fit, the ranking never got to
+ * show what it would have chosen. Read them as one row, not two reports.
+ */
+export interface BudgetPressure {
+  /** Injecting turns that cut at least one entry. */
+  turnsWithDrops: number;
+  /**
+   * Injecting turns in total — the denominator `turnsWithDrops` is a share of.
+   * One `memory.injected` event per injecting turn, so this counts turns that
+   * actually reached the model, not retrievals.
+   */
+  totalInjections: number;
+  /**
+   * Drops per channel. `segment` alone means the documented priority worked
+   * (verbatim transcript, usually already distilled, yields first); `memory` or
+   * `observation` appearing means the ceiling reached past the cheap channel
+   * into what the ranking actually chose.
+   */
+  dropsByChannel: Record<InjectionBudgetDrop["channel"], number>;
+  /**
+   * Every `order: 1` entry — the first thing each trimming turn cut, i.e. the
+   * cheapest one to buy back. At most one per turn, so this is bounded by
+   * {@link turnsWithDrops} and carries no per-turn identity: it is the
+   * population "what does the margin of the budget look like", not a timeline.
+   */
+  firstCut: InjectionBudgetDrop[];
+}
+
+/** What one replay of the event log yields — both axes, from the same pass. */
+export interface InjectionLogSummary {
+  /** memoryId → number of distinct sessions that injected it. */
+  occasionsById: Map<string, number>;
+  budgetPressure: BudgetPressure;
+}
+
+/**
+ * Walk `memory.injected` ONCE and take everything the report needs off it.
+ *
+ * Both axes are carried by the same event by construction (#414 put `dropped`
+ * on the `memory.injected` payload rather than minting an event type), so
+ * separate readers would mean replaying the log twice for facts that arrive
+ * together — and this replay is the expensive part of the whole report.
+ *
+ * Occasions, not events: `memory.injected` is appended once per injecting turn
+ * and re-sends everything the block still carries, so counting events would
+ * score a long session as heavy reuse. `scopeId` is the session id (the kernel
+ * appends with `scopeType: "session"`), and falls back to the project id when
+ * the kernel was constructed without one. That fallback collapses every
+ * session-less injection into a single occasion, which UNDER-counts reuse and
+ * never over-counts — the direction this whole module is biased in on purpose.
  *
  * SELF LANE ONLY, via the shared `laneOf` — in a workspace union the log also
  * carries other members' `memory.injected` events, and counting those would
  * credit THIS store's ranking with an injection another store's ranking made.
  * The memory population this is joined against (`listValidMemories`) is
  * self-lane by default, so classifying events any other way would put the two
- * halves of every ratio on different populations.
+ * halves of every ratio on different populations. The drop tally takes the same
+ * filter for the same reason: another member's budget pressure is not this
+ * store's evidence about its own ceiling.
  */
-export function countInjectionOccasions(
+export function summarizeInjectionEvents(
   events: readonly DomainEvent[],
   selfProjectId: string,
   isUnion: boolean,
-): Map<string, number> {
+): InjectionLogSummary {
   const sessionsById = new Map<string, Set<string>>();
+  const dropsByChannel: Record<InjectionBudgetDrop["channel"], number> = {
+    memory: 0,
+    observation: 0,
+    segment: 0,
+  };
+  const firstCut: InjectionBudgetDrop[] = [];
+  let turnsWithDrops = 0;
+  let totalInjections = 0;
+
   for (const event of events) {
     if (event.type !== "memory.injected") continue;
     if (laneOf(event, selfProjectId, isUnion) !== SELF_LANE) continue;
-    const { memoryIds } = (event.payload ?? {}) as Partial<MemoryInjectedPayload>;
-    if (!Array.isArray(memoryIds)) continue;
-    for (const memoryId of memoryIds) {
-      let sessions = sessionsById.get(memoryId);
-      if (!sessions) {
-        sessions = new Set<string>();
-        sessionsById.set(memoryId, sessions);
+    totalInjections += 1;
+
+    const { memoryIds, dropped } = (event.payload ?? {}) as Partial<MemoryInjectedPayload>;
+    if (Array.isArray(memoryIds)) {
+      for (const memoryId of memoryIds) {
+        let sessions = sessionsById.get(memoryId);
+        if (!sessions) {
+          sessions = new Set<string>();
+          sessionsById.set(memoryId, sessions);
+        }
+        sessions.add(event.scopeId);
       }
-      sessions.add(event.scopeId);
+    }
+
+    // Absent on the ordinary within-budget path — trimming is the exception,
+    // and an untrimmed turn still counts in `totalInjections` above.
+    if (!Array.isArray(dropped) || dropped.length === 0) continue;
+    turnsWithDrops += 1;
+    for (const drop of dropped) {
+      // `hasOwn`, not `in`: the payload is JSON off the log, and `in` would let
+      // a channel named after an Object.prototype key (`constructor`, …) past
+      // the guard and then write a NaN own-property onto the tally.
+      if (Object.hasOwn(dropsByChannel, drop.channel)) dropsByChannel[drop.channel] += 1;
+      if (drop.order === 1) firstCut.push(drop);
     }
   }
-  return new Map([...sessionsById].map(([memoryId, sessions]) => [memoryId, sessions.size]));
+
+  return {
+    occasionsById: new Map(
+      [...sessionsById].map(([memoryId, sessions]) => [memoryId, sessions.size]),
+    ),
+    budgetPressure: { turnsWithDrops, totalInjections, dropsByChannel, firstCut },
+  };
 }
 
 /**
@@ -212,6 +300,14 @@ export interface InjectionYieldReport {
   halfLifeDays: number;
   longTerm: LongTermYield;
   shortTerm: ShortTermSupply;
+  /**
+   * The truncation axis (#414), in the SAME report as the three-way judgement
+   * on purpose — see {@link BudgetPressure} for why the two are undecidable
+   * apart. Under-counts in one known direction: a turn the budget emptied
+   * completely never appends `memory.injected` at all, so its drops are absent
+   * here. That case is written up in the doc's 「아직 세우지 못한 축」.
+   */
+  budgetPressure: BudgetPressure;
 }
 
 /**
@@ -249,7 +345,8 @@ export async function buildInjectionYieldReport(
 ): Promise<InjectionYieldReport> {
   const generatedAt = opts.nowIso ?? nowIso();
   const nowMs = Date.parse(generatedAt);
-  const occasionsById = countInjectionOccasions(
+  // ONE replay, both axes (see `summarizeInjectionEvents`).
+  const { occasionsById, budgetPressure } = summarizeInjectionEvents(
     await readEvents(projectId),
     projectId,
     isUnionLog(projectId),
@@ -280,5 +377,6 @@ export async function buildInjectionYieldReport(
     halfLifeDays: RECENCY_HALF_LIFE_DAYS,
     longTerm: { total: rows.length, counts, byAge },
     shortTerm: { eligibleObservations },
+    budgetPressure,
   };
 }
