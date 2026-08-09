@@ -59,6 +59,21 @@ class UnreadableSessionStorage extends InMemorySessionStorage {
   }
 }
 
+/**
+ * A real `SessionStorage` whose `getEntries` resolves SUCCESSFULLY but hands back an entry
+ * `turnOf` cannot assemble — a `"message"` entry with no `message` field. Distinct from
+ * {@link UnreadableSessionStorage}: that one fails at the storage call itself, this one fails
+ * one step later, inside `buildSlice` (PR #427 review round — #426 completion condition: the
+ * `try` around `read` has to cover both failure points, not just the storage call).
+ */
+class MalformedEntrySessionStorage extends InMemorySessionStorage {
+  override getEntries(): Promise<SessionTreeEntry[]> {
+    return Promise.resolve([
+      { type: "message", id: "e1", parentId: null, timestamp: 0 } as unknown as SessionTreeEntry,
+    ]);
+  }
+}
+
 async function append(session: Session, ...messages: AgentMessage[]): Promise<void> {
   for (const message of messages) await session.appendMessage(message);
 }
@@ -180,6 +195,32 @@ describe("createHarnessConversationSource", () => {
     const source = createHarnessConversationSource(new Session(new UnreadableSessionStorage()));
 
     await expect(source.read(0)).resolves.toBeUndefined();
+  });
+
+  it("returns undefined instead of throwing when a successfully-read entry doesn't match the shape turnOf expects", async () => {
+    const source = createHarnessConversationSource(
+      new Session(new MalformedEntrySessionStorage()),
+    );
+
+    await expect(source.read(0)).resolves.toBeUndefined();
+  });
+
+  it("marks a /clear so the text before and after it is not read as one continuous conversation", async () => {
+    const session = newSession();
+    await append(session, userMessage("before clear"), agentSays("ack"));
+    await session.moveTo(null);
+    await append(session, userMessage("after clear"), agentSays("ack again"));
+    const source = createHarnessConversationSource(session);
+
+    const slice = await source.read(0);
+
+    expect(slice?.text).toBe(
+      "USER: before clear\n\n" +
+        "AGENT: ack\n\n" +
+        "SESSION: /clear — nothing above this line continues below it\n\n" +
+        "USER: after clear\n\n" +
+        "AGENT: ack again",
+    );
   });
 
   it("gives one id per session, and different ids to different sessions", async () => {
