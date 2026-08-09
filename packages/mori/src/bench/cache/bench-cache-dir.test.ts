@@ -4,9 +4,9 @@ import { BENCH_CACHE_DIR_ENV, resolveBenchCacheDir } from "./bench-cache-dir.js"
 
 describe("resolveBenchCacheDir (#422)", () => {
   it("prefers the --cache-dir argument over everything else", () => {
-    expect(
-      resolveBenchCacheDir("/explicit/cache", { [BENCH_CACHE_DIR_ENV]: "/env/cache" }),
-    ).toBe("/explicit/cache");
+    expect(resolveBenchCacheDir("/explicit/cache", { [BENCH_CACHE_DIR_ENV]: "/env/cache" })).toBe(
+      "/explicit/cache",
+    );
   });
 
   it("falls back to MORI_BENCH_CACHE_DIR when no argument is given", () => {
