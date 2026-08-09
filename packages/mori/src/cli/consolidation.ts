@@ -96,9 +96,9 @@ export async function consolidateOnSessionEnd(
  * `llm` undefined is the same quiet no-op the other two triggers give: consolidation is
  * unconfigured, so there is no boundary to run.
  *
- * **This boundary distills observations only** — see `compaction.ts` for why the conversation
- * text compaction just dropped does not reach the kernel here, and why that is the
- * pre-existing state rather than something this trigger gives up.
+ * **This call never pushes conversation text of its own** — see `compaction.ts` for why, and
+ * for how the kernel's own bound `ConversationSource` (#426) still pulls conversation text
+ * into this boundary without this file (or that one) handing any over.
  */
 export function consolidateAfterCompact(
   kernel: MoriKernel,
