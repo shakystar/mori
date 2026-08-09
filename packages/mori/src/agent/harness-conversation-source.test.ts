@@ -163,6 +163,19 @@ describe("createHarnessConversationSource", () => {
     expect(slice?.text).toBe("");
   });
 
+  it("reads from the start of the log when the offset is not a usable cursor", async () => {
+    const session = newSession();
+    await append(session, userMessage("one"), agentSays("two"));
+    const source = createHarnessConversationSource(session);
+
+    const slice = await source.read(Number.NaN);
+
+    // Not `slice(NaN)`'s whole log paired with a `NaN` cursor: re-reading is recoverable,
+    // an unorderable cursor pins the axis for good.
+    expect(slice?.text).toBe("USER: one\n\nAGENT: two");
+    expect(slice?.newOffset).toBe(2);
+  });
+
   it("returns undefined instead of throwing when the entry log cannot be read", async () => {
     const source = createHarnessConversationSource(new Session(new UnreadableSessionStorage()));
 

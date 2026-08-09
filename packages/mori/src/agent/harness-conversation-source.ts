@@ -85,15 +85,25 @@ export function createHarnessConversationSource(session: Session): ConversationS
   return {
     id: conversationIdOf(session),
     async read(offset: number): Promise<ConversationSlice | undefined> {
+      // `getEntries` is `entries.slice(afterEntrySeq)`, and `slice(NaN)` is `slice(0)` — a
+      // non-integer cursor would therefore quietly resurface the WHOLE log and then hand back
+      // a `NaN` cursor that no later comparison can order. Read from the start instead, which
+      // is what the kernel itself does with an unparseable stored watermark
+      // (`readConversationOffset`): re-reading a span is recoverable, an unorderable cursor is
+      // not.
+      const from = Number.isInteger(offset) && offset > 0 ? offset : 0;
       let entries: SessionTreeEntry[];
       try {
-        entries = await session.getEntries({ afterEntrySeq: offset });
+        entries = await session.getEntries({ afterEntrySeq: from });
       } catch {
         // Storage failures are the "unreadable" case, not a boundary failure.
         return undefined;
       }
       if (entries.length === 0) return undefined;
-      return buildSlice(entries, offset);
+      // `newOffset` counts the entries actually READ, never the log's live length: anything
+      // appended while this read was in flight stays for the next boundary rather than being
+      // consumed unshown.
+      return buildSlice(entries, from);
     },
   };
 }
