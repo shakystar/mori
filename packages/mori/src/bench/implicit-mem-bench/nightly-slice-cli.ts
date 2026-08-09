@@ -12,7 +12,7 @@ import { defaultCredentialsPath, FileCredentialStore } from "../../auth/credenti
 import { isMainEntry } from "../../cli/entrypoint.js";
 import { unauthenticatedMessage } from "../../cli/messages.js";
 import { writeCostReport } from "../cost-ledger.js";
-import { runNightlySlice } from "./nightly-slice.js";
+import { runNightlySlice, type NightlySliceReport } from "./nightly-slice.js";
 
 export interface NightlySliceCliIO {
   stdout: (chunk: string) => void;
@@ -54,6 +54,28 @@ function parseArgs(argv: string[]): ParsedArgs {
   }
 
   return { ...(repeats === undefined ? {} : { repeats }), out: out ?? defaultOutPath() };
+}
+
+/** 리포트를 기록하고, `report.scenarios.length === 0`이면 stderr에 사유를 남기고 0이 아닌 종료
+ * 코드를 반환한다 — 그렇지 않으면 대상 0건이 "측정했고 문제 없었다"와 구별되지 않는 그린으로
+ * 새어 나간다(PR 스모크 층의 #405 선례와 같은 회귀, #416). auth 해석과 분리해 둔 이유는 이
+ * 판정 로직만 순수 함수로 직접 테스트하기 위해서다(milestone-cli.ts의 `reportMilestoneOutcome`
+ * 선례를 따른다). */
+export function reportNightlySliceOutcome(
+  report: NightlySliceReport,
+  out: string,
+  io: NightlySliceCliIO,
+): number {
+  io.stdout(
+    `mori bench: 나이틀리/주간 슬라이스 완료 — 반복 ${String(report.repeatsPerScenario)}회, ` +
+      `시나리오 결과 ${String(report.scenarios.length)}건, 총비용 $${report.total.cost.total.toFixed(4)}, ` +
+      `비용 리포트: ${out}\n`,
+  );
+  if (report.scenarios.length === 0) {
+    io.stderr("mori bench: 실행된 시나리오가 0건이다 — 가드가 헛돈 것이므로 실패로 처리한다.\n");
+    return 1;
+  }
+  return 0;
 }
 
 /**
@@ -115,12 +137,7 @@ export async function runNightlySliceCli(
   });
 
   await writeCostReport(report, args.out);
-  io.stdout(
-    `mori bench: 나이틀리/주간 슬라이스 완료 — 반복 ${String(report.repeatsPerScenario)}회, ` +
-      `시나리오 결과 ${String(report.scenarios.length)}건, 총비용 $${report.total.cost.total.toFixed(4)}, ` +
-      `비용 리포트: ${args.out}\n`,
-  );
-  return 0;
+  return reportNightlySliceOutcome(report, args.out, io);
 }
 
 if (isMainEntry(process.argv[1], import.meta.url)) {
