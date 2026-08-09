@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { mkdtemp } from "node:fs/promises";
+import { mkdir, mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createMoriModels } from "../../agent/model-wiring.js";
@@ -11,6 +11,7 @@ import {
 import { defaultCredentialsPath, FileCredentialStore } from "../../auth/credential-store.js";
 import { isMainEntry } from "../../cli/entrypoint.js";
 import { unauthenticatedMessage } from "../../cli/messages.js";
+import { resolveBenchCacheDir } from "../cache/bench-cache-dir.js";
 import { writeCostReport } from "../cost-ledger.js";
 import { runImplicitMemBenchMilestone, type MilestoneReport } from "./milestone.js";
 
@@ -23,6 +24,7 @@ interface ParsedArgs {
   pollIntervalMs?: number;
   timeoutMs?: number;
   out: string;
+  cacheDir?: string;
 }
 
 function defaultOutPath(): string {
@@ -44,6 +46,7 @@ function parseArgs(argv: string[]): ParsedArgs {
   let pollIntervalMs: number | undefined;
   let timeoutMs: number | undefined;
   let out: string | undefined;
+  let cacheDir: string | undefined;
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -55,9 +58,13 @@ function parseArgs(argv: string[]): ParsedArgs {
       const value = argv[++i];
       if (!value) throw new Error("mori bench: --out에 경로가 필요하다");
       out = value;
+    } else if (arg === "--cache-dir") {
+      const value = argv[++i];
+      if (!value) throw new Error("mori bench: --cache-dir에 경로가 필요하다");
+      cacheDir = value;
     } else {
       throw new Error(
-        `mori bench: 알 수 없는 인자 "${String(arg)}" (지원: --poll-interval-ms, --timeout-ms, --out)`,
+        `mori bench: 알 수 없는 인자 "${String(arg)}" (지원: --poll-interval-ms, --timeout-ms, --out, --cache-dir)`,
       );
     }
   }
@@ -65,6 +72,7 @@ function parseArgs(argv: string[]): ParsedArgs {
   return {
     ...(pollIntervalMs === undefined ? {} : { pollIntervalMs }),
     ...(timeoutMs === undefined ? {} : { timeoutMs }),
+    ...(cacheDir === undefined ? {} : { cacheDir }),
     out: out ?? defaultOutPath(),
   };
 }
@@ -181,6 +189,10 @@ export async function runMilestoneCli(
     return 1;
   }
 
+  // #423: `cacheDir`는 고정 경로(재사용됨across runs) — nightly-slice-cli.ts의 같은 주석대로
+  // `workRoot`/`memorizeRoot`는 실행마다 mkdtemp되는 스크래치 디렉터리로 남긴다.
+  const cacheDir = resolveBenchCacheDir(args.cacheDir, env);
+  await mkdir(cacheDir, { recursive: true });
   const workRoot = await mkdtemp(join(tmpdir(), "mori-milestone-work-"));
   const memorizeRoot = await mkdtemp(join(tmpdir(), "mori-milestone-store-"));
 
@@ -188,6 +200,7 @@ export async function runMilestoneCli(
     model,
     streamFn: models.streamSimple.bind(models),
     batchApiKey: batchAuth.auth.apiKey,
+    cacheDir,
     workRoot,
     memorizeRoot,
     env,

@@ -9,6 +9,7 @@ import {
   type BatchJudgeResult,
 } from "../batch/anthropic-batch-client.js";
 import { BENCH_AXES, type BenchAxis } from "../axes.js";
+import { FileLlmCallCacheStore, sweepOrphanCacheTmpFiles } from "../cache/file-cache-store.js";
 import { createCostLedger, type CostLedger, type CostReport } from "../cost-ledger.js";
 import { IMPLICIT_MEM_BENCH_SCENARIOS, type ImplicitMemBenchScenario } from "./scenarios.js";
 import {
@@ -120,6 +121,11 @@ export interface MilestoneBatchOptions {
   streamFn: StreamFn;
   /** Batch API(judge 채점 패스) 인증용 Anthropic API 키. */
   batchApiKey: string;
+  /** #372 캐시 스토어 디렉터리 — `runImplicitMemBench`(runner.ts)와 같은 역할이지만 여기서는
+   * 에피소드 실행(phase (a))과 judge 배치 제출(phase (b)) 양쪽을 모두 경유하게 한다(#423).
+   * 호출자(`milestone-cli.ts`)가 `#422`의 `resolveBenchCacheDir`로 영속 경로를 골라 넘긴다 —
+   * `workRoot`/`memorizeRoot`와 달리 실행마다 새로 만들면 안 된다(재실행이 전액 재과금된다). */
+  cacheDir: string;
   /** 배치 judge 호출에 쓸 모델 id. 기본값 `model.id`. */
   batchModel?: string;
   batchSystemPrompt?: string;
@@ -158,6 +164,11 @@ export async function runImplicitMemBenchMilestone(
   const conditions = options.conditions ?? (["memory-on", "memory-off"] as const);
   const costLedger = createCostLedger();
 
+  // #423: sweep once at startup, before the cache dir is read/written — same "runner owns the
+  // cache dir's lifetime" contract `createBenchRunner` (bench/runner.ts) follows.
+  await sweepOrphanCacheTmpFiles(options.cacheDir);
+  const cacheStore = new FileLlmCallCacheStore(options.cacheDir);
+
   const batchModel: Model<Api> =
     options.batchModel === undefined ? options.model : { ...options.model, id: options.batchModel };
   const batchClient =
@@ -165,6 +176,7 @@ export async function runImplicitMemBenchMilestone(
     createAnthropicBatchClient({
       model: batchModel,
       apiKey: options.batchApiKey,
+      cacheStore,
       ...(options.batchSystemPrompt === undefined
         ? {}
         : { systemPrompt: options.batchSystemPrompt }),
@@ -188,6 +200,7 @@ export async function runImplicitMemBenchMilestone(
             root,
             env,
             streamFn: options.streamFn,
+            cacheStore,
             ...(options.credentialStore ? { credentialStore: options.credentialStore } : {}),
             costLedger,
             ...(options.createSession ? { createSession: options.createSession } : {}),

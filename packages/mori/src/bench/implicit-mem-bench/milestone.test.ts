@@ -1,6 +1,16 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { AgentMessage, StreamFn } from "@earendil-works/pi-agent-core";
-import type { Api, Model, Usage } from "@earendil-works/pi-ai";
-import { describe, expect, it } from "vitest";
+import {
+  contentText,
+  createAssistantMessageEventStream,
+  type Api,
+  type AssistantMessage,
+  type Model,
+  type Usage,
+} from "@earendil-works/pi-ai";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { MoriKernel } from "../../agent/index.js";
 import type { RunCliDeps } from "../../cli/types.js";
 import type { CreateMoriSessionResult, MoriSessionTurn } from "../../session.js";
@@ -111,6 +121,68 @@ function fakeHarness(): { createSession: CreateSessionFn; createKernel: CreateKe
   return { createSession, createKernel };
 }
 
+/** A `StreamFn` double that answers every call with a fixed reply and counts its own
+ * invocations — lets a test observe whether phase (a)'s episode turns actually reach the
+ * provider or replay from cache (#423). */
+function fakeEpisodeStreamFn(): StreamFn & { calls: number } {
+  let calls = 0;
+  const fn: StreamFn = async (m) => {
+    calls += 1;
+    const message: AssistantMessage = {
+      role: "assistant",
+      content: [{ type: "text", text: "episode reply" }],
+      api: m.api,
+      provider: m.provider,
+      model: m.id,
+      usage: usage(),
+      stopReason: "stop",
+      timestamp: 0,
+    };
+    const stream = createAssistantMessageEventStream();
+    stream.push({ type: "start", partial: message });
+    stream.push({ type: "done", reason: "stop", message });
+    stream.end(message);
+    return stream;
+  };
+  Object.defineProperty(fn, "calls", { get: () => calls });
+  return fn as unknown as StreamFn & { calls: number };
+}
+
+/** Unlike `fakeHarness` above (whose `session.prompt()` returns a canned reply without ever
+ * touching `deps.streamFn`), this harness's `prompt()` actually calls `deps.streamFn` — the
+ * only way to observe from the outside whether phase (a) episode turns are cache-eligible. */
+function streamingHarness(m: Model<Api>): {
+  createSession: CreateSessionFn;
+  createKernel: CreateKernelFn;
+} {
+  const createKernel: CreateKernelFn = () => fakeKernel({ injects: true });
+  const createSession: CreateSessionFn = (
+    _env: NodeJS.ProcessEnv,
+    deps: RunCliDeps,
+  ): Promise<CreateMoriSessionResult> =>
+    Promise.resolve({
+      ok: true,
+      session: {
+        async prompt(text: string): Promise<MoriSessionTurn> {
+          await deps.kernel?.transformContext([{ role: "user", content: text, timestamp: 0 }]);
+          if (!deps.streamFn) throw new Error("fixture: streamFn missing");
+          const stream = await deps.streamFn(m, {
+            messages: [{ role: "user", content: text, timestamp: 0 }],
+          });
+          const message = await stream.result();
+          return {
+            text: contentText(message.content),
+            stopReason: message.stopReason,
+            usage: message.usage,
+          };
+        },
+        consolidate: () => Promise.resolve({ kind: "ok" as const }),
+        close: () => Promise.resolve(),
+      },
+    });
+  return { createSession, createKernel };
+}
+
 /** Fake `AnthropicBatchClient` that answers "예" to every request and records what it was
  * asked — lets a test assert the milestone runner drives judging through this seam instead of
  * a live `streamFn`. */
@@ -146,6 +218,7 @@ describe("runImplicitMemBenchMilestone (#407, #397 조각 3/3)", () => {
       model: model(),
       streamFn,
       batchApiKey: "test-api-key",
+      cacheDir: "/tmp/mori-milestone-fixture-cache",
       workRoot: "/tmp/mori-milestone-fixture-work",
       memorizeRoot: "/tmp/mori-milestone-fixture-store",
       scenarios: [scenario],
@@ -203,6 +276,7 @@ describe("runImplicitMemBenchMilestone (#407, #397 조각 3/3)", () => {
         throw new Error("unused");
       },
       batchApiKey: "test-api-key",
+      cacheDir: "/tmp/mori-milestone-fixture-cache-2",
       workRoot: "/tmp/mori-milestone-fixture-work-2",
       memorizeRoot: "/tmp/mori-milestone-fixture-store-2",
       scenarios: [fixtureScenario("s2")],
@@ -238,6 +312,7 @@ describe("runImplicitMemBenchMilestone (#407, #397 조각 3/3)", () => {
         throw new Error("streamFn must not be called for judging — that's the batch client's job");
       },
       batchApiKey: "test-api-key",
+      cacheDir: "/tmp/mori-milestone-fixture-cache-3",
       workRoot: "/tmp/mori-milestone-fixture-work-3",
       memorizeRoot: "/tmp/mori-milestone-fixture-store-3",
       scenarios: [fixtureScenario("s3")],
@@ -260,6 +335,7 @@ describe("runImplicitMemBenchMilestone (#407, #397 조각 3/3)", () => {
         throw new Error("streamFn must not be called for judging — that's the batch client's job");
       },
       batchApiKey: "test-api-key",
+      cacheDir: "/tmp/mori-milestone-fixture-cache-4",
       workRoot: "/tmp/mori-milestone-fixture-work-4",
       memorizeRoot: "/tmp/mori-milestone-fixture-store-4",
       scenarios: [fixtureScenario("s4")],
@@ -274,5 +350,55 @@ describe("runImplicitMemBenchMilestone (#407, #397 조각 3/3)", () => {
     const requests = batchClient.requestsSeen[0] ?? [];
     expect(report.judgeBatchRequests).toBe(requests.length);
     expect(report.judgeBatchRequests).toBe(2);
+  });
+});
+
+describe("runImplicitMemBenchMilestone episode cache (#423)", () => {
+  let cacheDir: string;
+  let workRoot: string;
+  let memorizeRoot: string;
+
+  beforeEach(async () => {
+    cacheDir = await mkdtemp(join(tmpdir(), "mori-milestone-cache-"));
+    workRoot = await mkdtemp(join(tmpdir(), "mori-milestone-work-"));
+    memorizeRoot = await mkdtemp(join(tmpdir(), "mori-milestone-store-"));
+  });
+
+  afterEach(async () => {
+    await rm(cacheDir, { recursive: true, force: true });
+    await rm(workRoot, { recursive: true, force: true });
+    await rm(memorizeRoot, { recursive: true, force: true });
+  });
+
+  it("replays phase (a) episode turns from cache on a rerun against the same cacheDir — zero real streamFn calls", async () => {
+    const m = model();
+    const harness = streamingHarness(m);
+    const scenario = fixtureScenario("cache-s1");
+
+    async function run(episodeStreamFn: StreamFn & { calls: number }) {
+      return runImplicitMemBenchMilestone({
+        model: m,
+        streamFn: episodeStreamFn,
+        batchApiKey: "test-api-key",
+        cacheDir,
+        workRoot,
+        memorizeRoot,
+        scenarios: [scenario],
+        conditions: ["memory-on"],
+        batchClient: fakeBatchClient(),
+        createSession: harness.createSession,
+        createKernel: harness.createKernel,
+      });
+    }
+
+    const firstStream = fakeEpisodeStreamFn();
+    const firstReport = await run(firstStream);
+    // One context turn + one follow-up turn for the single memory-on episode.
+    expect(firstStream.calls).toBe(2);
+    expect(firstReport.scenarios).toHaveLength(1);
+
+    const secondStream = fakeEpisodeStreamFn();
+    await run(secondStream);
+    expect(secondStream.calls).toBe(0);
   });
 });

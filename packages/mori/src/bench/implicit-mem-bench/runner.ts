@@ -13,6 +13,7 @@ import {
 } from "../../session.js";
 import { BENCH_AXES } from "../axes.js";
 import { FileLlmCallCacheStore } from "../cache/file-cache-store.js";
+import { withLlmCallCache, type LlmCallCacheStore } from "../cache/llm-call-cache.js";
 import type { CostLedger, CostReport } from "../cost-ledger.js";
 import { createReader, type Reader } from "../reader.js";
 import { createBenchRunner } from "../runner.js";
@@ -140,6 +141,12 @@ export interface RunEpisodeOptions {
   root: string;
   env: NodeJS.ProcessEnv;
   streamFn: StreamFn;
+  /** #372 캐시 스토어 — 주어지면 세션 턴(맥락 주입·후속 프롬프트)의 `streamFn`을 #372의
+   * `withLlmCallCache`로 감싸 호출한다. `runImplicitMemBench`(위 `ImplicitMemBenchOptions`)는
+   * 이 필드를 넘기지 않는다 — 리더/재질문 판정만 캐시를 거치는 기존 배선을 바꾸지 않기 위해서다
+   * (#423 비범위). 마일스톤 풀런(`milestone.ts`, #423)은 에피소드 자체가 재실행마다 전액
+   * 재과금되는 것을 막기 위해 이 필드를 채운다. */
+  cacheStore?: LlmCallCacheStore;
   credentialStore?: CredentialStore;
   costLedger: CostLedger;
   createSession?: CreateSessionFn;
@@ -169,8 +176,11 @@ export async function runImplicitMemBenchEpisode(
 ): Promise<EpisodeResult> {
   const createSession = options.createSession ?? createMoriSession;
   const createKernel = options.createKernel ?? defaultCreateKernel;
+  const streamFn = options.cacheStore
+    ? withLlmCallCache(options.streamFn, options.cacheStore)
+    : options.streamFn;
   const baseDeps: RunCliDeps = {
-    streamFn: options.streamFn,
+    streamFn,
     root: options.root,
     ...(options.credentialStore ? { credentialStore: options.credentialStore } : {}),
   };
