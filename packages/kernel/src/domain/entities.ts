@@ -60,6 +60,7 @@ export {
   MIN_SALIENCE,
   type ConsolidatedMemory,
   type ConsolidatedMemoryKind,
+  type InjectionBudgetDrop,
   type MemoryInjectedPayload,
   type MemoryRetractedPayload,
   type MemorySupersededPayload,

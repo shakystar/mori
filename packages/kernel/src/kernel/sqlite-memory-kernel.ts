@@ -20,7 +20,7 @@
  *   reads env or config, and nothing here spawns a process.
  */
 
-import { createProject } from "../domain/entities.js";
+import { createProject, type InjectionBudgetDrop } from "../domain/entities.js";
 import type {
   ConsolidateCallOptions,
   ConsolidatorLlm,
@@ -496,16 +496,17 @@ export class SqliteMemoryKernel<M, E> implements MemoryKernel<M, E> {
     if (!projectStoreExists(this.options.projectId)) return messages;
 
     let context: MemoryContext;
+    let dropped: InjectionBudgetDrop[];
     try {
       // The derived query IS the `taskTitle` the retrieval services rank by —
       // it turns on the semantic path in `retrieveMemoryContext` and the
       // `rawSegments` channel, both of which degrade to FTS-only (or to
       // nothing, for segments) without one. Absent, this is the untargeted
       // session-start read #149 shipped.
-      context = await buildMemoryContext(this.options.projectId, {
+      ({ context, dropped } = await buildMemoryContext(this.options.projectId, {
         ...(turn.kind === "query" ? { taskTitle: turn.turn.query } : {}),
         ...(this.options.contextEmbedder ? { embedder: this.options.contextEmbedder } : {}),
-      });
+      }));
     } catch {
       // Silent, deliberately: the only sink this seam has is `onCaptureError`,
       // which harnesses render as a CAPTURE failure (mori prints exactly that),
@@ -609,6 +610,12 @@ export class SqliteMemoryKernel<M, E> implements MemoryKernel<M, E> {
     // above, deliberately: the event answers "what did the model see this
     // turn", and a turn that re-sent a familiar memory reporting `[]` would
     // deny an injection that actually happened.
+    //
+    // `dropped` (#242 1/2) rides the same append: it is this same retrieval's
+    // budget trim, computed once by `buildMemoryContext` above and carried
+    // through untouched — not a second read, and not a second judgement about
+    // what mattered. Omitted rather than sent as `[]` when nothing was cut,
+    // matching how `MemoryContext`'s own channels are conditionally present.
     try {
       await appendEvent({
         type: "memory.injected",
@@ -616,7 +623,7 @@ export class SqliteMemoryKernel<M, E> implements MemoryKernel<M, E> {
         scopeType: "session",
         scopeId: this.options.sessionId ?? this.options.projectId,
         actor: this.options.actor,
-        payload: { memoryIds },
+        payload: { memoryIds, ...(dropped.length > 0 ? { dropped } : {}) },
       });
     } catch {
       // best-effort — see comment above.

@@ -34,7 +34,7 @@
  * of silently pushing the real injection past the stated ceiling.
  */
 
-import type { Observation } from "../domain/entities.js";
+import type { InjectionBudgetDrop, Observation } from "../domain/entities.js";
 import { isEmptyMemoryContext, renderMemoryContext } from "./context-render.js";
 import type { MemoryContext } from "./context-service.js";
 import {
@@ -75,7 +75,11 @@ function assemble(ranked: RankedPoolEntry[], segments: RetrievedSegment[]): Memo
     entry.channel === "observation" ? [entry.observation] : [],
   );
   return {
-    ...(segments.length > 0 ? { rawSegments: segments } : {}),
+    // Picked field-by-field, not spread: `segments` carries a retrieval-only
+    // `score` (kept for the drop record below), which must not leak into the
+    // injected `MemoryContext` — the same reason `consolidatedMemories` and
+    // `recentObservations` below are rebuilt rather than passed through.
+    ...(segments.length > 0 ? { rawSegments: segments.map(({ id, text }) => ({ id, text })) } : {}),
     ...(memories.length > 0
       ? {
           consolidatedMemories: memories.map(({ memory }) => ({
@@ -100,6 +104,16 @@ function assemble(ranked: RankedPoolEntry[], segments: RetrievedSegment[]): Memo
   };
 }
 
+/** memory id / observation id, whichever the entry is. */
+function poolEntryId(entry: RankedPoolEntry): string {
+  return entry.channel === "memory" ? entry.memory.memory.id : entry.observation.id;
+}
+
+/** The entry's ranking score — `RankedMemory` bundles it, the observation variant carries it alongside. */
+function poolEntryScore(entry: RankedPoolEntry): number {
+  return entry.channel === "memory" ? entry.memory.score : entry.score;
+}
+
 /**
  * Assemble the retrieved channels into the context to inject, dropping the
  * least valuable entries until the RENDERED block fits
@@ -122,22 +136,43 @@ function assemble(ranked: RankedPoolEntry[], segments: RetrievedSegment[]): Memo
  * independent — dropping the last memory removes the whole `## Consolidated
  * memory` heading, and a segment's fence width depends on the segment. Only the
  * over-budget path pays for it, and it pays one render per dropped entry.
+ *
+ * `dropped` (#242 1/2) is the primitive this issue exists to add: every entry
+ * cut on the way to the returned `context`, in the order it was cut. It is
+ * built for free alongside the loop above — no extra render, no extra pass —
+ * because the loop already visits exactly the entry it is about to drop right
+ * before dropping it. Empty when the input never overflows, which is the
+ * ordinary case; nothing here changes what gets dropped or why, only what is
+ * recorded about it.
  */
 export function fitInjectionBudget(input: {
   ranked: RankedPoolEntry[];
   segments: RetrievedSegment[];
-}): MemoryContext {
+}): { context: MemoryContext; dropped: InjectionBudgetDrop[] } {
   let ranked = input.ranked;
   let segments = input.segments;
+  const dropped: InjectionBudgetDrop[] = [];
 
   for (;;) {
     const context = assemble(ranked, segments);
     // Empty is trivially within budget (it renders to ""), and is also the
     // terminating case: every iteration drops exactly one entry, so a corpus
     // that somehow cannot fit ends up here rather than looping.
-    if (isEmptyMemoryContext(context)) return context;
-    if (injectedTokens(context) <= INJECTION_BUDGET_TOKENS) return context;
-    if (segments.length > 0) segments = segments.slice(0, -1);
-    else ranked = ranked.slice(0, -1);
+    if (isEmptyMemoryContext(context)) return { context, dropped };
+    if (injectedTokens(context) <= INJECTION_BUDGET_TOKENS) return { context, dropped };
+    if (segments.length > 0) {
+      const cut = segments[segments.length - 1]!;
+      dropped.push({ id: cut.id, channel: "segment", score: cut.score, order: dropped.length + 1 });
+      segments = segments.slice(0, -1);
+    } else {
+      const cut = ranked[ranked.length - 1]!;
+      dropped.push({
+        id: poolEntryId(cut),
+        channel: cut.channel,
+        score: poolEntryScore(cut),
+        order: dropped.length + 1,
+      });
+      ranked = ranked.slice(0, -1);
+    }
   }
 }

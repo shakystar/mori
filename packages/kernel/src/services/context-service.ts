@@ -1,4 +1,4 @@
-import type { StartupContextPayload } from "../domain/entities.js";
+import type { InjectionBudgetDrop, StartupContextPayload } from "../domain/entities.js";
 import type { Embedder } from "../index.js";
 import { hasEmbeddings } from "./embeddings-store.js";
 import { fitInjectionBudget } from "./injection-budget.js";
@@ -36,11 +36,15 @@ export type MemoryContext = Pick<
  * task-service/workspace-service/personal-store-service — host-CLI product
  * services with no kernel consumer yet, so they stay out of this port
  * (mori#63).
+ *
+ * Returns `dropped` (#242 1/2) alongside `context` — what `fitInjectionBudget`
+ * cut on the way to it — so a caller that confirms injection (the kernel) can
+ * carry that fact onto `memory.injected` without a second budgeting pass.
  */
 export async function buildMemoryContext(
   projectId: string,
   opts: { taskTitle?: string; embedder?: Embedder } = {},
-): Promise<MemoryContext> {
+): Promise<{ context: MemoryContext; dropped: InjectionBudgetDrop[] }> {
   // Embed the task title ONCE, up front, and reuse the vector across both
   // the memory (P3-c) and segment (raw-detail) retrieval paths below. The
   // two paths used to each resolve their own embedder and embed the same
