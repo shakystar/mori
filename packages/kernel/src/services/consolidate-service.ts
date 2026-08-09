@@ -1652,8 +1652,13 @@ export interface ConsolidationStatus {
  * synced members share the db. Cheap (at most one row per member) and the one
  * place that decides it, so the boundary and the backlog count below can never
  * classify the same event differently.
+ *
+ * Exported (#415) for the same reason it is a single function here: any other
+ * module that classifies raw events self/foreign must reach THIS one rather
+ * than deriving its own genesis count, which is the drift `laneWhereSql`'s
+ * docstring warns about.
  */
-function isUnionLog(projectId: string): boolean {
+export function isUnionLog(projectId: string): boolean {
   const genesisIds = new Set(
     readGenesisEventsSync(projectId).map((event) => (event.payload as Project).id),
   );
