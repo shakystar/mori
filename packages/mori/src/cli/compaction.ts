@@ -82,23 +82,26 @@ export async function compactIfContextFull(
  * consequence of compaction, not a participant in it. Registering both would also fire the
  * boundary twice per compaction, which no watermark would undo (see `consolidation.ts`).
  *
- * ## This boundary distills OBSERVATIONS ONLY — that is not a regression, and not a bug
+ * ## This boundary never PUSHES conversation text — it does not need to (#426)
  *
- * The conversation text that compaction just cut out of the context does not reach the
- * kernel, here or anywhere: the boundary takes no conversation argument. Do not "fix" that by
- * pushing `compactionEntry.retainedTail` (or the summary) into `kernel.consolidate` — there is
- * no parameter for it, and the seam that would carry it is `ConversationSource`, a PULL seam
- * that a push cannot be poured into. The kernel names this configuration itself: a missing
- * `ConversationSource` is "an observation-only boundary, which is the pre-existing degraded
- * behaviour, not an error" (`packages/kernel/src/index.ts`).
+ * This function's own call — `consolidateAfterCompact(kernel, llm())` below — takes no
+ * conversation argument, and never will: do not "fix" that by pushing
+ * `compactionEntry.retainedTail` (or the summary) into `kernel.consolidate` — there is no
+ * parameter for it, and the seam that would carry it is `ConversationSource`, a PULL seam
+ * that a push cannot be poured into.
  *
- * So the count of conversation text this boundary hands the kernel is zero, and it was zero
- * before compaction existed too (정본 문서 §5.2 R5) — this trigger neither loses nor gains
- * anything on that axis. The text itself is not destroyed: session entries are append-only,
- * so what compaction dropped from the CONTEXT is still in the session's entry log
- * (`getEntries`, §Q3). Wiring that log to the kernel is the follow-on `ConversationSource`
- * piece, which has its own decision to make first (push parameter vs. pull adapter) and is
- * explicitly not this one.
+ * That PULL seam is wired, though (#426, #7 조각 2/2): `prepareAgent` (`cli/runtime.ts`)
+ * constructs `kernel` with a `ConversationSource` bound at CONSTRUCTION time, over the same
+ * harness `Session` this boundary's `agent` reads and writes. `kernel.consolidate` pulls from
+ * that source on every call regardless of which trigger made it — `consolidate-service.ts`
+ * has no boundary-type branch that skips the pull for `"post-compact"`. So the conversation
+ * text compaction just cut out of the CONTEXT (still in the session's append-only entry log,
+ * `getEntries`, §Q3 — compaction never deletes it) DOES reach the kernel through this
+ * boundary, sourced by the kernel pulling, never by this file pushing. A missing
+ * `ConversationSource` is still "an observation-only boundary, which is the pre-existing
+ * degraded behaviour, not an error" (`packages/kernel/src/index.ts`) — that degrade path is
+ * only live for a caller that constructs a kernel without one, which `prepareAgent` no longer
+ * does.
  *
  * ## The boundary is not awaited
  *

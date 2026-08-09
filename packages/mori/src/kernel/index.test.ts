@@ -21,10 +21,12 @@ import type {
   ToolCall,
 } from "@earendil-works/pi-ai";
 import { createAssistantMessageEventStream, InMemoryCredentialStore } from "@earendil-works/pi-ai";
-import type { ConsolidatorLlm } from "@mori/kernel";
+import type { ConsolidatorLlm, ConversationSource } from "@mori/kernel";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { fakeProviderModels } from "../agent/fake-provider-models.js";
-import { consolidateOnSessionEnd } from "../cli/consolidation.js";
+import { compactIfContextFull } from "../cli/compaction.js";
+import { consolidateAfterCompact, consolidateOnSessionEnd } from "../cli/consolidation.js";
+import { prepareAgent } from "../cli/runtime.js";
 import { runCli } from "../index.js";
 import { createMoriTools } from "../tools/index.js";
 import {
@@ -104,6 +106,110 @@ function messageText(message: Message): string {
   return message.content
     .map((part) => ("text" in part && typeof part.text === "string" ? part.text : ""))
     .join("");
+}
+
+/** The system prompt `createMoriAgent` gives the harness (agent/index.ts) — what tells a
+ * real turn request apart from pi's own compaction summarizer and the consolidator's
+ * extraction call, neither of which carries it. */
+const MORI_SYSTEM_PROMPT = "You are mori, a memory-native coding agent.";
+
+function usage(totalTokens: number) {
+  return {
+    input: 0,
+    output: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    totalTokens,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+  };
+}
+
+type CompactionFakeTurn =
+  | { toolCall: { name: string; arguments: Record<string, unknown> } }
+  | { text: string; usage?: ReturnType<typeof usage> };
+
+/**
+ * Plays back one scripted `FakeTurn` per real turn request, and answers every other request
+ * (pi's own compaction summarizer, or the consolidator's extraction call, `cli/pi-consolidator.ts`)
+ * without consuming one — told apart from a real turn by `systemPrompt`, the same way
+ * `cli/compaction.test.ts`'s `scriptedProvider` does. `requests` records every context handed
+ * to this provider, real turn or not, for the caller to inspect afterward.
+ */
+function compactionStreamFn(turns: CompactionFakeTurn[], requests: Context[]): StreamFn {
+  let call = 0;
+  return (model, context) => {
+    requests.push(context);
+    const stream = createAssistantMessageEventStream();
+    const base = {
+      role: "assistant" as const,
+      api: model.api,
+      provider: model.provider,
+      model: model.id,
+      timestamp: 0,
+    };
+
+    if (context.systemPrompt !== MORI_SYSTEM_PROMPT) {
+      // No systemPrompt at all -> the consolidator's own completion (pi-consolidator.ts sends
+      // a single bare user message). Any other systemPrompt -> pi's compaction summarizer.
+      const text = context.systemPrompt === undefined ? "[]" : "COMPACTED-SUMMARY";
+      const message: AssistantMessage = {
+        ...base,
+        content: [{ type: "text", text }],
+        usage: usage(0),
+        stopReason: "stop",
+      };
+      stream.push({ type: "start", partial: message } satisfies AssistantMessageEvent);
+      stream.push({ type: "done", reason: "stop", message } satisfies AssistantMessageEvent);
+      return stream;
+    }
+
+    const turn = turns[call] ?? turns.at(-1)!;
+    call++;
+    const message: AssistantMessage =
+      "toolCall" in turn
+        ? {
+            ...base,
+            content: [
+              {
+                type: "toolCall",
+                id: `call-${call}`,
+                name: turn.toolCall.name,
+                arguments: turn.toolCall.arguments,
+              } satisfies ToolCall,
+            ],
+            usage: usage(0),
+            stopReason: "toolUse",
+          }
+        : {
+            ...base,
+            content: [{ type: "text", text: turn.text }],
+            usage: turn.usage ?? usage(0),
+            stopReason: "stop",
+          };
+
+    stream.push({ type: "start", partial: message } satisfies AssistantMessageEvent);
+    stream.push({
+      type: "done",
+      reason: message.stopReason === "toolUse" ? "toolUse" : "stop",
+      message,
+    } satisfies AssistantMessageEvent);
+    return stream;
+  };
+}
+
+/**
+ * Polls until `predicate` is true or `timeoutMs` elapses. The post-compact boundary fires
+ * without being awaited (`subscribePostCompactConsolidation`, cli/compaction.ts) and, unlike
+ * `cli/compaction.test.ts`'s stub `spyKernel`, the real kernel's `consolidate` does several
+ * real async hops (SQLite reads, the extraction call itself) before it resolves — a single
+ * flushed microtask is not enough to observe its effects.
+ */
+async function waitFor(predicate: () => boolean, timeoutMs = 2000): Promise<void> {
+  const start = Date.now();
+  while (!predicate()) {
+    if (Date.now() - start > timeoutMs) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
 }
 
 function toolStart(toolCallId: string, toolName: string, args: unknown): AgentEvent {
@@ -750,5 +856,130 @@ describe("mori turn -> sqlite store", () => {
 
     expect(exitCode).toBe(0);
     expect(readdirSync(store)).toEqual([]);
+  });
+});
+
+describe("createMoriKernel — conversationSource wiring (#426, #7 조각 2/2)", () => {
+  let root: string;
+  let store: string;
+
+  beforeEach(() => {
+    root = realpathSync(mkdtempSync(join(tmpdir(), "mori-kernel-root-")));
+    store = realpathSync(mkdtempSync(join(tmpdir(), "mori-kernel-store-")));
+    process.env.MEMORIZE_ROOT = store;
+  });
+
+  afterEach(() => {
+    delete process.env.MEMORIZE_ROOT;
+    rmSync(root, { recursive: true, force: true });
+    rmSync(store, { recursive: true, force: true });
+  });
+
+  it("omitting conversationSource is not an error — the kernel still runs as the pre-existing observation-only boundary", async () => {
+    const llm: ConsolidatorLlm = {
+      async complete(): Promise<string> {
+        return "[]";
+      },
+    };
+    const kernel = createMoriKernel({ root, env: {} });
+
+    const result = await kernel.consolidateWithResult(llm);
+
+    expect(result.outcome).toBe("noop");
+  });
+
+  it(
+    "a post-compact boundary fired through prepareAgent's own production wiring pulls text " +
+      "from the SAME harness session the turn ran on — not a hand-built ConversationSource " +
+      "(PR #429 review: exercises the wiring `prepareAgent` does, not just the kernel/adapter halves)",
+    async () => {
+      const marker = "내 커피는 항상 아이스다";
+      const requests: Context[] = [];
+      const streamFn = compactionStreamFn(
+        [
+          // Passes the capture filter (#107) so the on-disk store exists — the post-compact
+          // boundary's `llm` getter (`sessionEndLlm`, cli/runtime.ts) degrades to `undefined`
+          // otherwise, same gate the session-end trigger uses, and no request would reach
+          // `requests` at all below.
+          {
+            toolCall: {
+              name: "edit_file",
+              arguments: { path: "notes.md", oldString: "", newString: "메모\n" },
+            },
+          },
+          { text: "생성했습니다" },
+          // The reported usage that pushes `estimateContextTokens` over threshold (see
+          // cli/compaction.test.ts, same technique) — content length itself does not.
+          { text: "확인했습니다", usage: usage(10_000_000) },
+        ],
+        requests,
+      );
+      // The default turn model, not a made-up id: `PiConsolidatorLlm.complete` resolves the
+      // model through the real `Models.getModel` (unlike the hand-built `ConsolidatorLlm`
+      // stubs elsewhere in this file), so an unregistered id would throw before ever
+      // reaching the fake provider's `streamFn`.
+      const env = {
+        ANTHROPIC_API_KEY: "sk-ant-test",
+        MORI_CONSOLIDATE_MODEL: "anthropic/claude-sonnet-4-6",
+      };
+      const credentialStore = new InMemoryCredentialStore();
+      const errors: string[] = [];
+
+      const prepared = await prepareAgent(
+        "anthropic",
+        env,
+        { root, credentialStore, models: fakeProviderModels(env, credentialStore, streamFn) },
+        { stdout: () => {}, stderr: (chunk) => errors.push(chunk) },
+      );
+      if (!prepared.ok)
+        throw new Error("prepareAgent did not authenticate against the fake provider");
+
+      // The marker lives in this prompt's own text, not in any hand-built source — it only
+      // reaches the consolidator below if `prepareAgent` really wired the kernel's
+      // `ConversationSource` over the same `Session` this turn typed into.
+      await prepared.agent.prompt(marker);
+      // `observe` is fire-and-forget (runtime.ts's `runPrompt` drains in its `finally` for
+      // exactly this reason) — draining here is what makes the store exist before the
+      // post-compact boundary below reads `sessionEndLlm`'s gate.
+      await prepared.kernel.drain();
+      await compactIfContextFull(prepared.agent, () => {});
+      await prepared.agent.prompt("한 번 더");
+      await compactIfContextFull(prepared.agent, () => {});
+
+      const consolidatorRequestArrived = () =>
+        requests.some((context) => context.systemPrompt === undefined);
+      await waitFor(consolidatorRequestArrived);
+
+      expect(readdirSync(store)).toContain("projects");
+      expect(errors).toEqual([]);
+
+      const consolidatorRequest = requests.find((context) => context.systemPrompt === undefined);
+      expect(consolidatorRequest).toBeDefined();
+      expect(messageText(consolidatorRequest!.messages[0]!)).toContain(marker);
+    },
+  );
+
+  it("the session-end boundary and the post-compact boundary share one watermark — back to back, the second does not re-read what the first already consumed", async () => {
+    const reads: number[] = [];
+    const source: ConversationSource = {
+      id: "conv-426",
+      async read(offset) {
+        reads.push(offset);
+        return { text: `대화 (offset ${offset})`, newOffset: offset + 10, resumePoints: [] };
+      },
+    };
+    const llm: ConsolidatorLlm = {
+      async complete(): Promise<string> {
+        return "[]";
+      },
+    };
+    const kernel = createMoriKernel({ root, env: {}, conversationSource: source });
+
+    await consolidateOnSessionEnd(kernel, llm, () => {});
+    await consolidateAfterCompact(kernel, llm);
+
+    // The second boundary's read starts at the first boundary's newOffset (10), not 0 —
+    // one kernel instance, one bound source, one watermark, regardless of which trigger ran.
+    expect(reads).toEqual([0, 10]);
   });
 });

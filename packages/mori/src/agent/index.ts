@@ -4,6 +4,7 @@ import {
   type AgentHarnessEvent,
   type AgentMessage,
   type AgentTool,
+  type Session,
   type SessionEntryCursorOptions,
   type SessionTreeEntry,
   type StreamFn,
@@ -122,6 +123,17 @@ export interface CreateMoriAgentOptions {
    * store, or the agent resolves auth against one store while its caller believes another.
    */
   models?: MutableModels;
+  /**
+   * The `Session` the harness is built on, in place of a fresh `createHarnessSession()`.
+   *
+   * `prepareAgent` (#426, #7 조각 2/2) sets this so the SAME `Session` instance backs both
+   * the harness AND the `ConversationSource` wired into `kernel` at construction — the two
+   * must be one object, not two independently-created sessions, or the kernel's
+   * conversation boundary reads an entry log the harness never writes to
+   * (harness-conversation-source.ts's per-`Session` `id`). Unset — every other call site —
+   * builds a fresh session exactly as before this seam existed.
+   */
+  session?: Session;
 }
 
 export function createMoriAgent(
@@ -163,8 +175,10 @@ export function createMoriAgent(
   // Kept in this closure rather than dropped once handed to the harness: `AgentHarness`
   // stores `session` in a private field with no getter, and `resetSession`/`getEntries`
   // below (the only door onto `Session`, #398) need the same reference the harness reads
-  // from.
-  const session = createHarnessSession();
+  // from. `options.session` (#426) lets `prepareAgent` hand in the SAME instance it
+  // already wrapped into the kernel's `ConversationSource` — see that option's doc for
+  // why a second, independently-created session here would be a silent bug.
+  const session = options.session ?? createHarnessSession();
 
   const harness = new AgentHarness({
     session,

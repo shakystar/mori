@@ -92,18 +92,23 @@ export function createHarnessConversationSource(session: Session): ConversationS
       // (`readConversationOffset`): re-reading a span is recoverable, an unorderable cursor is
       // not.
       const from = Number.isInteger(offset) && offset > 0 ? offset : 0;
-      let entries: SessionTreeEntry[];
       try {
-        entries = await session.getEntries({ afterEntrySeq: from });
+        // `buildSlice` is INSIDE the try, not just `getEntries` (PR #427 review round —
+        // #426 completion condition): a storage that returns SUCCESSFULLY can still hand
+        // back an entry shaped unlike what `turnOf` expects (a `"message"` entry with no
+        // `message`, say), and `read`'s contract is "never throws" for the whole call, not
+        // just for the storage half of it.
+        const entries = await session.getEntries({ afterEntrySeq: from });
+        if (entries.length === 0) return undefined;
+        // `newOffset` counts the entries actually READ, never the log's live length:
+        // anything appended while this read was in flight stays for the next boundary
+        // rather than being consumed unshown.
+        return buildSlice(entries, from);
       } catch {
-        // Storage failures are the "unreadable" case, not a boundary failure.
+        // Storage failures AND assembly failures are both the "unreadable" case, not a
+        // boundary failure.
         return undefined;
       }
-      if (entries.length === 0) return undefined;
-      // `newOffset` counts the entries actually READ, never the log's live length: anything
-      // appended while this read was in flight stays for the next boundary rather than being
-      // consumed unshown.
-      return buildSlice(entries, from);
     },
   };
 }
@@ -164,16 +169,44 @@ function buildSlice(entries: readonly SessionTreeEntry[], offset: number): Conve
  *   that is what this adapter reads — so nothing is lost by skipping it. (정본 문서 §5.2 R5
  *   keeps the summary as a safety net SEPARATE from kernel re-injection, for the same reason.)
  * - `custom`: harness-authored UI messages, neither said by a human nor answered by the agent.
+ * - a `leaf` entry with `targetId` set (ordinary tree navigation, not `/clear`): bookkeeping,
+ *   same as `label`/`model_change`/….
  *
- * Every other entry type (`leaf`, `label`, `model_change`, …) is bookkeeping, not a message.
+ * A `leaf` entry with `targetId: null` is the one exception — see {@link CLEAR_MARKER}.
+ *
+ * Every other entry type (`label`, `model_change`, …) is bookkeeping, not a message.
  */
 function turnOf(entry: SessionTreeEntry): string | undefined {
+  if (entry.type === "leaf") return entry.targetId === null ? CLEAR_MARKER : undefined;
   if (entry.type !== "message") return undefined;
   const message: AgentMessage = entry.message;
   if (message.role === "user") return prefixed("USER", textOf(message.content));
   if (message.role === "assistant") return prefixed("AGENT", textOf(message.content));
   return undefined;
 }
+
+/**
+ * Marks a `/clear` inside the joined text (#426, #7 조각 2/2 완료 조건 — the `/clear` handling
+ * PR #427's review left this piece to decide).
+ *
+ * `Session.moveTo(null)` appends a `leaf` entry with `targetId: null`, and it is the ONLY leaf
+ * mori ever appends this way: mori calls `moveTo` from exactly one call site
+ * (`agent/index.ts`'s `resetSession`, always with `null`) and never calls
+ * `AgentHarness.navigateTree` at all, so a `targetId: null` leaf unambiguously means the user
+ * typed `/clear`, not ordinary tree navigation.
+ *
+ * DECISION (완료 조건의 ⓑ): mark the boundary, rather than leaving it silent (ⓐ) or deferring
+ * to a separate issue (ⓒ). Without a marker, the turns before and after a `/clear` join with
+ * the SAME blank line `buildSlice` puts between any two ordinary turns — nothing in the text
+ * says "these are two unrelated conversations." A consolidation window that straddles a
+ * `/clear` (the entry log is append-only and `/clear` does not reset the kernel's watermark,
+ * only `resetConversation()`'s retrieval-side state) would then hand the extractor what reads
+ * as one continuous dialogue, risking memories that stitch the new conversation's facts onto
+ * the old one's context. ⓒ was not taken because the fix is this cheap: one more case in
+ * `turnOf`, riding the exact entry-iteration `buildSlice` already does — there is no unresolved
+ * design question left to defer once the wiring that makes this observable (this issue) exists.
+ */
+const CLEAR_MARKER = "SESSION: /clear — nothing above this line continues below it";
 
 function prefixed(speaker: string, text: string): string | undefined {
   return text === "" ? undefined : `${speaker}: ${text}`;

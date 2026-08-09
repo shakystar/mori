@@ -1,5 +1,7 @@
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { ConsolidatorLlm } from "@mori/kernel";
+import { createHarnessConversationSource } from "../agent/harness-conversation-source.js";
+import { createHarnessSession } from "../agent/harness-session.js";
 import {
   createMoriAgent,
   createMoriModels,
@@ -77,6 +79,14 @@ export async function prepareAgent(
   // what makes this respect the injected `env` the rest of `prepareAgent` uses.
   const llm = getConsolidatorLlm(models, resolveConsolidatorConfig(env));
 
+  // The `Session` the turn's `AgentHarness` will actually type into — built here,
+  // ahead of the kernel, so the kernel's `ConversationSource` (below) and the harness
+  // (`createMoriAgent`'s `options.session`, further down) share the exact same instance.
+  // Built even on the `deps.kernel` test-seam branch: `createMoriAgent` always needs a
+  // session, and using this one rather than letting it mint its own default keeps a single
+  // code path instead of branching test seam from production seam twice.
+  const session = createHarnessSession();
+
   // The real memory kernel (#12), sharing the toolset's working root so "which
   // checkout is this" has one answer. It writes nothing until an observation
   // passes the capture filter, so preparing an agent stays side-effect-free.
@@ -84,12 +94,23 @@ export async function prepareAgent(
   // `projectId` is only set on the real-kernel branch: it is the id THIS construction
   // resolved (#230), carried forward for `sessionEndLlm` instead of being re-read from
   // disk at session end, when `.mori/project.json` may no longer say the same thing.
+  //
+  // `conversationSource` wraps `session` (#426, #7 조각 2/2): the session-end boundary
+  // (`runPrompt`'s `finally`, below) and the post-compact boundary (`subscribePostCompactConsolidation`,
+  // also below) both drive THIS kernel instance, so wiring the adapter once here is what
+  // makes both boundaries drain the same entry log through the same watermark — neither
+  // boundary builds its own source.
   let kernel: MoriKernel;
   let projectId: string | undefined;
   if (deps.kernel) {
     kernel = deps.kernel;
   } else {
-    const created = createMoriKernel({ root: deps.root ?? process.cwd(), env, warn: stderr });
+    const created = createMoriKernel({
+      root: deps.root ?? process.cwd(),
+      env,
+      warn: stderr,
+      conversationSource: createHarnessConversationSource(session),
+    });
     kernel = created;
     projectId = created.projectId;
   }
@@ -98,6 +119,7 @@ export async function prepareAgent(
     agent = createMoriAgent(kernel, credentialStore, env, deps.streamFn, {
       ...(deps.root ? { root: deps.root } : {}),
       models,
+      session,
     });
   } catch (err) {
     // Unknown-model errors from createMoriAgent are already a plain, user-facing message
