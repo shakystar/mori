@@ -211,6 +211,44 @@ describe("runNightlySlice (#406)", () => {
     expect(process.env.MEMORIZE_ROOT).toBeUndefined();
   });
 
+  it("reruns against the same cacheDir for free — second call makes zero streamFn calls (#422)", async () => {
+    const scenarios = [fixtureScenario("solo")];
+    let callCount = 0;
+    const countingStreamFn: StreamFn = (model, context, options) => {
+      callCount++;
+      return fakeJudgeStreamFn()(model, context, options);
+    };
+
+    const runOnce = async (): Promise<void> => {
+      const runWorkRoot = await mkdtemp(join(tmpdir(), "mori-nightly-slice-work-"));
+      const runMemorizeRootBase = await mkdtemp(join(tmpdir(), "mori-nightly-slice-store-"));
+      const harness = fakeHarness();
+      try {
+        await runNightlySlice({
+          model: model(),
+          streamFn: countingStreamFn,
+          cacheDir,
+          workRoot: runWorkRoot,
+          memorizeRootBase: runMemorizeRootBase,
+          scenarios,
+          repeatsPerScenario: 1,
+          createSession: harness.createSession,
+          createKernel: harness.createKernel,
+        });
+      } finally {
+        await rm(runWorkRoot, { recursive: true, force: true });
+        await rm(runMemorizeRootBase, { recursive: true, force: true });
+      }
+    };
+
+    await runOnce();
+    expect(callCount).toBeGreaterThan(0);
+
+    callCount = 0;
+    await runOnce();
+    expect(callCount).toBe(0);
+  });
+
   it("defaults repeatsPerScenario from MORI_BENCH_SLICE_REPEATS", async () => {
     const harness = fakeHarness();
     const report = await runNightlySlice({

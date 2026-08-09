@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { mkdtemp } from "node:fs/promises";
+import { mkdir, mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createMoriModels } from "../../agent/model-wiring.js";
@@ -11,6 +11,7 @@ import {
 import { defaultCredentialsPath, FileCredentialStore } from "../../auth/credential-store.js";
 import { isMainEntry } from "../../cli/entrypoint.js";
 import { unauthenticatedMessage } from "../../cli/messages.js";
+import { resolveBenchCacheDir } from "../cache/bench-cache-dir.js";
 import { writeCostReport } from "../cost-ledger.js";
 import { runNightlySlice, type NightlySliceReport } from "./nightly-slice.js";
 
@@ -22,6 +23,7 @@ export interface NightlySliceCliIO {
 interface ParsedArgs {
   repeats?: number;
   out: string;
+  cacheDir?: string;
 }
 
 function defaultOutPath(): string {
@@ -32,6 +34,7 @@ function defaultOutPath(): string {
 function parseArgs(argv: string[]): ParsedArgs {
   let repeats: number | undefined;
   let out: string | undefined;
+  let cacheDir: string | undefined;
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -48,12 +51,22 @@ function parseArgs(argv: string[]): ParsedArgs {
       const value = argv[++i];
       if (!value) throw new Error("mori bench: --out에 경로가 필요하다");
       out = value;
+    } else if (arg === "--cache-dir") {
+      const value = argv[++i];
+      if (!value) throw new Error("mori bench: --cache-dir에 경로가 필요하다");
+      cacheDir = value;
     } else {
-      throw new Error(`mori bench: 알 수 없는 인자 "${String(arg)}" (지원: --repeats, --out)`);
+      throw new Error(
+        `mori bench: 알 수 없는 인자 "${String(arg)}" (지원: --repeats, --out, --cache-dir)`,
+      );
     }
   }
 
-  return { ...(repeats === undefined ? {} : { repeats }), out: out ?? defaultOutPath() };
+  return {
+    ...(repeats === undefined ? {} : { repeats }),
+    ...(cacheDir === undefined ? {} : { cacheDir }),
+    out: out ?? defaultOutPath(),
+  };
 }
 
 /** 리포트를 기록하고, `report.scenarios.length === 0`이면 stderr에 사유를 남기고 0이 아닌 종료
@@ -121,7 +134,12 @@ export async function runNightlySliceCli(
     return 1;
   }
 
-  const cacheDir = await mkdtemp(join(tmpdir(), "mori-nightly-slice-cache-"));
+  // #422: `cacheDir` is a fixed, reused-across-runs path (unlike `workRoot`/`memorizeRootBase`
+  // below, which stay one-mkdtemp-per-run scratch dirs on purpose — see nightly-slice.ts's
+  // `runNightlySlice` doc for why those two must never be shared across runs). Reusing the
+  // cache dir is what makes a rerun with unchanged scenarios/prompts free instead of full price.
+  const cacheDir = resolveBenchCacheDir(args.cacheDir, env);
+  await mkdir(cacheDir, { recursive: true });
   const workRoot = await mkdtemp(join(tmpdir(), "mori-nightly-slice-work-"));
   const memorizeRootBase = await mkdtemp(join(tmpdir(), "mori-nightly-slice-store-"));
 
