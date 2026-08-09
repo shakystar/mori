@@ -249,4 +249,30 @@ describe("runImplicitMemBenchMilestone (#407, #397 조각 3/3)", () => {
 
     expect(report.batchFailures).toEqual([]);
   });
+
+  it("fills judgeBatchRequests with the number of requests actually submitted to the batch (#416)", async () => {
+    const harness = fakeHarness();
+    const batchClient = fakeBatchClient();
+
+    const report = await runImplicitMemBenchMilestone({
+      model: model(),
+      streamFn: async () => {
+        throw new Error("streamFn must not be called for judging — that's the batch client's job");
+      },
+      batchApiKey: "test-api-key",
+      workRoot: "/tmp/mori-milestone-fixture-work-4",
+      memorizeRoot: "/tmp/mori-milestone-fixture-store-4",
+      scenarios: [fixtureScenario("s4")],
+      conditions: ["memory-on"],
+      batchClient,
+      createSession: harness.createSession,
+      createKernel: harness.createKernel,
+    });
+
+    // Fixture scenario has one llm-judge rubric criterion + the memory-on re-question meta
+    // question submitted to the batch — see the "defers every judge call" test above.
+    const requests = batchClient.requestsSeen[0] ?? [];
+    expect(report.judgeBatchRequests).toBe(requests.length);
+    expect(report.judgeBatchRequests).toBe(2);
+  });
 });

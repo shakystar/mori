@@ -106,6 +106,11 @@ function createBatchReplayJudge(
  * "모델이 못 했다"로 조용히 리포트에 섞여 들어간다 (#407 owner 수정요청). */
 export interface MilestoneReport extends ImplicitMemBenchReport {
   batchFailures: readonly { customId: string; error: string }[];
+  /** 이번 실행이 실제로 Batch API에 제출한 judge 요청 수 (`requests.length`). 0이면 시나리오가
+   * 있어도 judge 채점이 배치를 한 번도 거치지 않았다는 뜻이다 — 루브릭에 `llm-judge` 기준이
+   * 하나도 없거나 조건이 전부 `memory-off`일 때 발생한다(#416). 마일스톤 풀런의 존재 이유
+   * (judge 채점이 Batch API를 경유한다는 것, #340 §3·#342 승인)를 이 값으로 검증할 수 있다. */
+  judgeBatchRequests: number;
 }
 
 export interface MilestoneBatchOptions {
@@ -272,6 +277,7 @@ export async function runImplicitMemBenchMilestone(
       scenarios: scenarioResults,
       axisRates: computeAxisRates(scenarioResults),
       batchFailures,
+      judgeBatchRequests: requests.length,
     };
   } finally {
     if (previousMemorizeRoot === undefined) delete process.env.MEMORIZE_ROOT;

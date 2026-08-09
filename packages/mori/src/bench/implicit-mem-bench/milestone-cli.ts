@@ -69,10 +69,18 @@ function parseArgs(argv: string[]): ParsedArgs {
   };
 }
 
-/** 리포트를 기록하고, `report.batchFailures`가 비어있지 않으면 실패 건수·custom_id를 stderr에
- * 남기고 0이 아닌 종료 코드를 반환한다 — 그렇지 않으면 인프라 실패(배치 항목 만료·취소·오류)가
- * "모델이 못 했다"로 조용히 섞여 그린 리포트처럼 보인다(#407 owner 수정요청). auth 해석과
- * 분리해 둔 이유는 이 판정 로직만 순수 함수로 직접 테스트하기 위해서다. */
+/** 리포트를 기록하고 종료 코드를 정한다. 아래 순서로 판정한다 — 앞의 두 가드가 "측정 자체가
+ * 헛돌았다"는 더 근본적인 실패라 `batchFailures`(측정은 됐지만 일부가 죽었다)보다 먼저 본다:
+ *
+ * 1. `report.scenarios.length === 0` — 대상이 0건이면 "측정했고 문제 없었다"와 구별이 안 되는
+ *    그린이다(PR 스모크 층의 #405 선례와 같은 회귀, #416).
+ * 2. `report.judgeBatchRequests === 0` — 시나리오는 돌았어도 judge 채점이 Batch API를 한 번도
+ *    거치지 않았다는 뜻이다. 마일스톤 풀런의 정의 자체(judge 채점이 Batch API를 경유한다,
+ *    #340 §3·#342 승인)가 깨진 것이므로 `batchFailures`와 별개로 실패다(#416).
+ * 3. `report.batchFailures`가 비어있지 않으면 — 인프라 실패(배치 항목 만료·취소·오류)가
+ *    "모델이 못 했다"로 조용히 섞여 그린 리포트처럼 보이는 것을 막는다(#407 owner 수정요청).
+ *
+ * auth 해석과 분리해 둔 이유는 이 판정 로직만 순수 함수로 직접 테스트하기 위해서다. */
 export function reportMilestoneOutcome(
   report: MilestoneReport,
   out: string,
@@ -82,6 +90,18 @@ export function reportMilestoneOutcome(
     `mori bench: 마일스톤 풀런 완료 — 시나리오 결과 ${String(report.scenarios.length)}건, ` +
       `총비용 $${report.total.cost.total.toFixed(4)}, 비용 리포트: ${out}\n`,
   );
+  if (report.scenarios.length === 0) {
+    io.stderr("mori bench: 실행된 시나리오가 0건이다 — 가드가 헛돈 것이므로 실패로 처리한다.\n");
+    return 1;
+  }
+  if (report.judgeBatchRequests === 0) {
+    io.stderr(
+      "mori bench: judge 배치 요청이 0건이다 — judge 채점이 Batch API를 한 번도 거치지 않았다 " +
+        "(루브릭에 llm-judge 기준이 없거나 조건이 전부 memory-off이면 발생한다). 마일스톤 " +
+        "풀런의 정의(judge 채점이 Batch API를 경유한다)를 충족하지 못하므로 실패로 처리한다.\n",
+    );
+    return 1;
+  }
   if (report.batchFailures.length > 0) {
     io.stderr(
       `mori bench: judge 배치 항목 ${String(report.batchFailures.length)}건이 실패했다 — ` +
