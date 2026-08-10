@@ -1,5 +1,6 @@
 import type { Usage } from "@earendil-works/pi-ai";
 import { describe, expect, it } from "vitest";
+import { KILL_SWITCH_GAP_THRESHOLD } from "./kill-switch.js";
 import { reportMilestoneOutcome } from "./milestone-cli.js";
 import type { MilestoneReport } from "./milestone.js";
 import type { ScenarioRunResult } from "./runner.js";
@@ -29,6 +30,7 @@ function fixtureReport(overrides: {
   scenarios?: readonly ScenarioRunResult[];
   judgeBatchRequests?: number;
   batchFailures?: MilestoneReport["batchFailures"];
+  killSwitch?: MilestoneReport["killSwitch"];
 }): MilestoneReport {
   return {
     total: ZERO_USAGE,
@@ -38,6 +40,11 @@ function fixtureReport(overrides: {
     batchFailures: overrides.batchFailures ?? [],
     judgeBatchRequests: overrides.judgeBatchRequests ?? 1,
     judgeBatchSubmitted: overrides.judgeBatchRequests ?? 1,
+    killSwitch: overrides.killSwitch ?? {
+      threshold: KILL_SWITCH_GAP_THRESHOLD,
+      scenarios: [],
+      invalid: false,
+    },
   };
 }
 
@@ -100,5 +107,22 @@ describe("reportMilestoneOutcome (#407 owner 수정요청, #416)", () => {
 
     expect(code).toBe(1);
     expect(stderr.join("")).toContain("judge 배치 요청이 0건이다");
+  });
+
+  it("returns 1 when the kill switch judges any scenario invalid (#435)", () => {
+    const { stderr, io } = fakeIo();
+    const report = fixtureReport({
+      killSwitch: {
+        threshold: KILL_SWITCH_GAP_THRESHOLD,
+        scenarios: [{ scenarioId: "s1", oracleScore: 0.5, offScore: 0.5, gap: 0, invalid: true }],
+        invalid: true,
+      },
+    });
+
+    const code = reportMilestoneOutcome(report, "bench-reports/out.json", io);
+
+    expect(code).toBe(1);
+    expect(stderr.join("")).toContain("킬 스위치 발동");
+    expect(stderr.join("")).toContain("s1(gap=0)");
   });
 });

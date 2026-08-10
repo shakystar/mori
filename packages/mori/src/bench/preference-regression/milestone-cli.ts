@@ -87,6 +87,11 @@ function parseArgs(argv: string[]): ParsedArgs {
  *    #340 §3·#342 승인)가 깨진 것이므로 `batchFailures`와 별개로 실패다(#416).
  * 3. `report.batchFailures`가 비어있지 않으면 — 인프라 실패(배치 항목 만료·취소·오류)가
  *    "모델이 못 했다"로 조용히 섞여 그린 리포트처럼 보이는 것을 막는다(#407 owner 수정요청).
+ * 4. `report.killSwitch.invalid`이면 — ORACLE(정답을 통째로 준 팔)과 OFF(하네스 압축 요약만
+ *    받은 팔)의 점수 간격이 임계값(kill-switch.ts) 미만인 시나리오가 하나라도 있으면, 그
+ *    시나리오는 "정답을 알아도 점수가 안 오른다"는 뜻이라 그 위에서 잰 mori 점수가 아무것도
+ *    말하지 못한다(#435). 앞의 세 가드를 통과해 점수 자체는 신뢰할 수 있는 상태에서만 의미가
+ *    있으므로 마지막 순서다.
  *
  * auth 해석과 분리해 둔 이유는 이 판정 로직만 순수 함수로 직접 테스트하기 위해서다. */
 export function reportMilestoneOutcome(
@@ -115,6 +120,15 @@ export function reportMilestoneOutcome(
       `mori bench: judge 배치 항목 ${String(report.batchFailures.length)}건이 실패했다 — ` +
         `이 리포트의 점수는 신뢰할 수 없다. 실패 항목: ` +
         `${report.batchFailures.map((f) => `${f.customId}(${f.error})`).join(", ")}\n`,
+    );
+    return 1;
+  }
+  if (report.killSwitch.invalid) {
+    const invalidScenarios = report.killSwitch.scenarios.filter((s) => s.invalid);
+    io.stderr(
+      `mori bench: 킬 스위치 발동 — ORACLE−OFF 간격이 임계값(${String(report.killSwitch.threshold)}) ` +
+        `미만인 시나리오 ${String(invalidScenarios.length)}건: ` +
+        `${invalidScenarios.map((s) => `${s.scenarioId}(gap=${String(s.gap)})`).join(", ")}\n`,
     );
     return 1;
   }

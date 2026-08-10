@@ -28,6 +28,7 @@ import {
   type ScenarioRunResult,
 } from "./runner.js";
 import { scoreBehavioralAdaptation, type LlmJudge } from "./scorer.js";
+import { computeKillSwitchReport, type KillSwitchReport } from "./kill-switch.js";
 
 /**
  * 마일스톤 풀런 — #397의 3계층 케이든스 중 "Batch API 경유" 층 (#407, #397 조각 3/3). #387의
@@ -116,6 +117,10 @@ export interface MilestoneReport extends PreferenceRegressionReport {
   /** 이번 실행이 **실제로 Batch API에 제출한** judge 요청 수 — 캐시 히트는 빠진다(#423).
    * judge 채점이 Batch API를 경유한다는 것(#340 §3·#342 승인)은 이 값으로 검증한다. */
   judgeBatchSubmitted: number;
+  /** ORACLE−OFF 간격 킬 스위치 판정(#435) — `axisRates`와 분모가 달라(그쪽은 `"memory-on"`
+   * 팔 하나) 별도 필드로 둔다. `reportMilestoneOutcome`(milestone-cli.ts)의 4번째 가드가
+   * `killSwitch.invalid`를 읽는다. */
+  killSwitch: KillSwitchReport;
 }
 
 export interface MilestoneBatchOptions {
@@ -300,6 +305,7 @@ export async function runPreferenceRegressionMilestone(
       batchFailures,
       judgeBatchRequests: requests.length,
       judgeBatchSubmitted: results.filter((r) => !r.fromCache).length,
+      killSwitch: computeKillSwitchReport(scenarioResults),
     };
   } finally {
     if (previousMemorizeRoot === undefined) delete process.env.MEMORIZE_ROOT;
