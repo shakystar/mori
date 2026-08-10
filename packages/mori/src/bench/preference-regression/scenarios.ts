@@ -15,8 +15,13 @@ import type { RubricCriterion } from "./scorer.js";
  * - `followUpPrompt`는 별도 세션(맥락 세션은 죽고 mori 스토어의 증류물+retrieval만 남은 상태)
  *   에서 실행되는 과제다. `impliedPreference`를 직접 묻지 않는다 — 명시 질의 없이 행동에
  *   반영돼야 측정 대상(무의식적 행동 적응)이 된다.
- * - `impliedPreference`는 채점에만 쓰이는 정답 라벨이다. 어떤 세션의 컨텍스트에도 주입되지
- *   않는다 — 러너(#387)는 이 필드를 세션 프롬프트 조립에 절대 쓰지 않아야 한다.
+ * - `impliedPreference`는 채점에 쓰이는 정답 라벨이다. **ORACLE 팔 하나를 제외하고** 어떤
+ *   세션의 컨텍스트에도 주입되지 않는다. 그 예외의 근거는
+ *   [2026-08-10 사람 결정](https://github.com/shakystar/mori/issues/343#issuecomment-5237291066)
+ *   지시 3·4 — «기억이 완벽했다면 낼 수 있는 점수»라는 천장 팔이 있어야 OFF와의 간격이 «잴 수
+ *   있는 폭»이 되기 때문이다(#434). 예외가 그 하나뿐임은 주석이 아니라 코드가 강제한다:
+ *   주입 지점은 러너의 `injectOraclePreference`(runner.ts) 하나뿐이고, `"oracle"`이 아닌
+ *   조건이 그 경로로 들어오면 던진다. 새 주입 지점을 만들지 말고 그 함수를 거쳐라.
  */
 export interface PreferenceRegressionScenario {
   id: string;
@@ -25,7 +30,7 @@ export interface PreferenceRegressionScenario {
   contextTurns: readonly string[];
   /** 후속 세션(맥락 세션과 분리된 새 세션)에서 실행되는 과제. */
   followUpPrompt: string;
-  /** 채점용 정답 라벨 — 세션 컨텍스트에는 절대 노출되지 않는다. */
+  /** 채점용 정답 라벨 — ORACLE 팔의 컨텍스트에만 노출된다(위 doc 참고). */
   impliedPreference: string;
   rubric: readonly RubricCriterion[];
 }

@@ -115,6 +115,9 @@ function fakeHarness(): { createSession: CreateSessionFn; createKernel: CreateKe
           return { text: `reply:${text}`, stopReason: "stop", usage: usage() };
         },
         consolidate: () => Promise.resolve({ kind: "ok" as const }),
+        // OFF 팔이 이월할 하네스 압축 요약 — 이 파일의 테스트는 memory-on 팔만 돌리므로
+        // 실제로 불리지 않지만, `MoriSession` 계약을 채우려면 있어야 한다 (#434).
+        compact: () => Promise.resolve({ summary: "fixture compaction summary", usage: usage() }),
         close: () => Promise.resolve(),
       },
     });
@@ -177,6 +180,9 @@ function streamingHarness(m: Model<Api>): {
           };
         },
         consolidate: () => Promise.resolve({ kind: "ok" as const }),
+        // OFF 팔이 이월할 하네스 압축 요약 — 이 파일의 테스트는 memory-on 팔만 돌리므로
+        // 실제로 불리지 않지만, `MoriSession` 계약을 채우려면 있어야 한다 (#434).
+        compact: () => Promise.resolve({ summary: "fixture compaction summary", usage: usage() }),
         close: () => Promise.resolve(),
       },
     });

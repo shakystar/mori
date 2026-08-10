@@ -23,9 +23,9 @@ import { scoreBehavioralAdaptation, type LlmJudge, type ScenarioScore } from "./
 /**
  * 선호 유지 회귀 검사(preference regression) 러너 배선 (#343 조각 2/4, #387). #386의
  * 시나리오(scenarios.ts)·스코어러(scorer.ts)를 #374의 `createBenchRunner` 위에 얹어
- * "맥락 세션 주입 → consolidation → 세션 사망 → 후속 세션(스토어 전용 읽기) → 스코어러 호출"
- * 흐름을 실행한다. 실제 모델 호출로 진짜 수치를 내는 것은 #388의 몫 — 이 파일은 배선과
- * 리포트 형태까지다.
+ * "맥락 세션 → 세션 사망 → 후속 세션(이월물만 보고 실행) → 스코어러 호출" 흐름을 실행한다.
+ * 그 이월물이 무엇이냐가 팔을 가른다 — `PreferenceRegressionCondition` 참고 (#434).
+ * 실제 모델 호출로 진짜 수치를 내는 것은 #388의 몫 — 이 파일은 배선과 리포트 형태까지다.
  *
  * ## 이것은 논문 벤치가 아니다
  *
@@ -44,9 +44,132 @@ import { scoreBehavioralAdaptation, type LlmJudge, type ScenarioScore } from "./
  * 되살리는 변경은 위 결정과 반대 방향이다.
  */
 
-/** `"memory-off"`는 맥락 세션을 아예 건너뛰고 빈 스토어에서 곧장 `followUpPrompt`를 실행하는
- * 동일 모델 베이스라인 — 같은 흐름(러너 배선, 스코어러 호출)을 그대로 타되 주입할 것이 없다. */
-export type PreferenceRegressionCondition = "memory-on" | "memory-off";
+/**
+ * 세 팔 (#434, #343 재정의 조각 3/5). 세 팔은 **후속 세션에 무엇이 이월되는가** 하나만 다르다
+ * — 맥락 세션·후속 프롬프트·루브릭·채점은 전부 같다.
+ *
+ * - `"memory-off"`: 같은 맥락 세션을 보되 남는 것은 **하네스 기본 압축 요약**뿐이다
+ *   (mori 증류·retrieval 없음). «mori가 없었으면» 의 정직한 모습.
+ * - `"memory-on"`: mori 증류물 + retrieval.
+ * - `"oracle"`: `impliedPreference`를 컨텍스트에 직접 주입한 천장.
+ *
+ * ## OFF가 왜 이 모습이어야 하는가
+ *
+ * 이 팔은 한때 「맥락 세션을 아예 건너뛰고 빈 스토어에서 곧장 `followUpPrompt`를 실행」했다.
+ * [2026-08-10 사람 결정](https://github.com/shakystar/mori/issues/343#issuecomment-5237291066)
+ * §2가 그 설계를 물렸다 — 맥락 세션을 건너뛰면 OFF 팔은 선호가 드러난 대화를 **본 적조차 없다.**
+ * 그러면 «mori가 이겼다»가 나와도 그것이 재는 것은 «기억 시스템이 좋다»가 아니라 «컨텍스트를
+ * 아예 안 준 쪽이 졌다»이고, 어떤 수치가 나와도 #327 명제의 반증이 불가능해진다. 델타를 크게
+ * 만드는 베이스라인은 베이스라인이 아니다.
+ *
+ * ## ORACLE이 왜 필요한가
+ *
+ * OFF 혼자서는 «간격이 얼마나 벌어질 수 있는지»의 위쪽 끝을 모른다. `impliedPreference`를 직접
+ * 주입한 팔이 있어야 ORACLE−OFF가 «잴 수 있는 폭»이 되고, 그 폭이 0이면 시나리오 자체가
+ * 무효라는 판정(조각 4의 킬 스위치)이 가능해진다. 그 판정 자체는 이 파일의 몫이 아니다 —
+ * 여기서는 세 팔이 돌게만 한다.
+ */
+export type PreferenceRegressionCondition = "memory-off" | "memory-on" | "oracle";
+
+/** 세 팔의 기본 실행 순서 — `runPreferenceRegression`·`runPreferenceRegressionMilestone`
+ * (milestone.ts)가 공유한다. 리터럴을 두 곳에서 따로 적으면 한쪽만 팔이 늘어난 채 조용히
+ * 갈라진다 (실제로 #434 전까지 두 파일이 각자 `["memory-on", "memory-off"]`를 적고 있었다). */
+export const PREFERENCE_REGRESSION_CONDITIONS: readonly PreferenceRegressionCondition[] = [
+  "memory-off",
+  "memory-on",
+  "oracle",
+];
+
+/** 후속 세션 컨텍스트에 얹히는 이월물의 머리말 — 팔마다 다르다. 이월물이 있다는 사실 자체는
+ * 모델에게 숨기지 않는다(하네스 압축도 요약임을 표시한 채 컨텍스트에 남는다). */
+export const COMPACTION_CARRY_OVER_PREFIX = "[이전 세션의 압축 요약]\n";
+export const ORACLE_CARRY_OVER_PREFIX = "[이전 세션에서 드러난 사용자 선호]\n";
+
+/**
+ * `impliedPreference`(채점 정답 라벨)가 세션 컨텍스트로 들어가는 **유일한** 지점이다.
+ *
+ * `scenarios.ts`는 이 라벨의 컨텍스트 주입을 전면 금지하고 있었다. 위 사람 결정 **지시 4**가
+ * 그 금지에 예외를 딱 하나 뚫었고 — ORACLE 팔 — 동시에 그 예외가 하나뿐임을 **코드가 강제**할
+ * 것을 요구했다. 이 함수가 그 강제다: 주입 경로가 여기 하나뿐이고, `"oracle"`이 아닌 조건이
+ * 들어오면 던진다. 주석으로 «다른 팔엔 넣지 마라»라고 적어 두는 것은 강제가 아니다 — 다음
+ * 세션이 팔을 하나 더 늘리면서 이 라벨을 무심코 흘리는 것을 막지 못한다.
+ *
+ * 라벨이 다른 팔의 컨텍스트로 새면 그 팔의 점수는 «기억이 통했다»가 아니라 «정답을 알려줬다»를
+ * 재게 되고, 그 순간 이 축 전체가 무의미해진다.
+ */
+function injectOraclePreference(
+  scenario: PreferenceRegressionScenario,
+  condition: PreferenceRegressionCondition,
+): string {
+  if (condition !== "oracle") {
+    throw new Error(
+      `mori bench: impliedPreference(채점 정답 라벨)는 "oracle" 팔의 컨텍스트에만 주입된다 — ` +
+        `조건 "${condition}"이 주입 경로에 들어왔다 (시나리오 "${scenario.id}"). ` +
+        `다른 팔이 이 라벨을 보면 그 팔은 기억이 아니라 정답 공개를 재게 된다.`,
+    );
+  }
+  return `${ORACLE_CARRY_OVER_PREFIX}${scenario.impliedPreference}`;
+}
+
+/**
+ * 세션 사망을 건너 후속 세션에 이월되는 단 하나의 것. 팔이 다르다는 건 이 값이 다르다는
+ * 뜻이고, 그 외에는 세 팔이 완전히 같은 코드를 탄다.
+ *
+ * `"memory-on"`만 `undefined`다 — 그 팔의 이월물은 러너가 손으로 넘기는 것이 아니라 mori
+ * 커널이 스토어에서 직접 꺼내 오기 때문이다(`transformContext`).
+ */
+function buildFollowUpCarryOver(
+  condition: PreferenceRegressionCondition,
+  scenario: PreferenceRegressionScenario,
+  compactionSummary: string | undefined,
+): string | undefined {
+  switch (condition) {
+    case "memory-on":
+      return undefined;
+    case "memory-off":
+      // 빈 요약도 «없음»으로 친다. 머리말만 얹고 넘어가면 후속 세션은 아무것도 못 본 채
+      // 실행되는데 리포트에는 「압축 요약을 봤다」로 남아, 정확히 이 조각이 없앤 예전
+      // «맥락을 아예 안 준» 베이스라인이 이름만 바꿔 되살아난다.
+      if (compactionSummary === undefined || compactionSummary.trim() === "") {
+        throw new Error(
+          `mori bench: 시나리오 "${scenario.id}"의 "memory-off" 팔에 하네스 압축 요약이 없다 — ` +
+            `이 팔은 맥락 세션을 돌고 그 압축 요약**만** 이월하는 베이스라인이다(#434).`,
+        );
+      }
+      return `${COMPACTION_CARRY_OVER_PREFIX}${compactionSummary}`;
+    case "oracle":
+      return injectOraclePreference(scenario, condition);
+    default: {
+      // 팔을 하나 더 늘리면 여기서 **컴파일이 깨진다**. 이 `default`가 없으면 새 팔은 조용히
+      // `undefined`(=이월물 없음)로 떨어져 «mori 팔인 척하는 빈 팔»이 된다 — 반환 타입에
+      // `undefined`가 이미 있어서 타입 검사만으로는 안 잡힌다.
+      const unhandled: never = condition;
+      throw new Error(
+        `mori bench: 알 수 없는 조건 "${String(unhandled)}" — 팔을 늘렸으면 그 팔이 세션 ` +
+          `사망을 건너 무엇을 이월하는지도 여기서 정해야 한다.`,
+      );
+    }
+  }
+}
+
+/**
+ * mori 스토어를 한 번도 건드리지 않는 커널 — `"memory-off"`·`"oracle"` 팔의 맥락/후속 세션이
+ * 모두 이것을 쓴다.
+ *
+ * 이 두 팔의 정직성은 «스토어를 안 읽는다»가 아니라 «스토어 핸들이 애초에 없다»로 보장된다:
+ * `createKernel`(=`createMoriKernel`)을 부르지 않으므로 읽을 대상 자체가 존재하지 않는다.
+ * `BufferKernel`(@mori/kernel)이 형태는 같지만 그쪽은 TEST-ONLY로 못박혀 있어(“Keep new
+ * production wiring off it”) 벤치 배선이 쓸 것이 아니다.
+ */
+function createStoreFreeKernel(): MoriKernel {
+  return {
+    transformContext: (messages) => Promise.resolve(messages),
+    observe: () => {},
+    consolidate: () => Promise.resolve(),
+    resetConversation: () => {},
+    drain: () => Promise.resolve(),
+  };
+}
 
 /** `runPreferenceRegressionMilestone`(milestone.ts, #407)도 재사용한다 — 반복해서 같은 리터럴을
  * 만들면 두 곳이 조용히 갈라질 수 있어서다. */
@@ -123,6 +246,27 @@ function withInjectionProbe(kernel: MoriKernel, onProbe: (injected: boolean) => 
   };
 }
 
+/**
+ * 후속 세션 컨텍스트 맨 앞에 이월물 한 건을 얹는다 — mori retrieval이 쓰는 것과 **같은**
+ * `transformContext` 자리다. 세 팔이 이 한 자리에서만 갈리므로, 팔 사이 비교가 «주입물이
+ * 다르다» 외의 변수를 타지 않는다.
+ *
+ * `withInjectionProbe` **바깥에** 감는다: `injected`(injection-hit-rate)는 mori retrieval이
+ * 무엇을 꺼냈는지를 재는 축이라, 러너가 손으로 얹은 이월물이 그 수치에 섞이면 안 된다.
+ */
+function withCarryOver(kernel: MoriKernel, carryOver: string): MoriKernel {
+  return {
+    transformContext: async (messages, signal) => [
+      { role: "user", content: carryOver, timestamp: 0 },
+      ...(await kernel.transformContext(messages, signal)),
+    ],
+    observe: (event) => kernel.observe(event),
+    consolidate: (llm, opts) => kernel.consolidate(llm, opts),
+    resetConversation: () => kernel.resetConversation(),
+    drain: () => kernel.drain(),
+  };
+}
+
 export type CreateSessionFn = (
   env: NodeJS.ProcessEnv,
   deps: RunCliDeps,
@@ -143,11 +287,12 @@ export interface ScenarioRunResult {
   condition: PreferenceRegressionCondition;
   followUpOutput: string;
   score: ScenarioScore;
-  /** 후속 세션 첫 호출에서 `transformContext`가 실제로 뭔가를 주입했는가 — `"memory-off"`에서는
-   * 항상 `false`다(맥락 세션 자체가 없어 주입할 스토어 내용도 없다). */
+  /** 후속 세션 첫 호출에서 **mori retrieval**이 실제로 뭔가를 주입했는가 — `"memory-off"`·
+   * `"oracle"`에서는 항상 `false`다(두 팔은 mori 커널을 만들지 않는다. 그 팔들이 받는 이월물은
+   * `withCarryOver`가 얹는 것이고 이 프로브는 그것을 세지 않는다). */
   injected: boolean;
-  /** 후속 출력이 이미 확립된 습관을 재질문했는가 — `"memory-off"`에서는 재질문을 판정할 확립된
-   * 맥락 자체가 없으므로 `undefined`. */
+  /** 후속 출력이 이미 확립된 습관을 재질문했는가 — mori 팔(`"memory-on"`) 밖에서는
+   * `undefined`다. 이유는 `runPreferenceRegressionScenario`의 판정 분기 주석 참고. */
   reQuestioned: boolean | undefined;
 }
 
@@ -175,13 +320,23 @@ export interface EpisodeResult {
   scenarioTitle: string;
   condition: PreferenceRegressionCondition;
   followUpOutput: string;
-  /** 후속 세션 첫 호출에서 `transformContext`가 실제로 뭔가를 주입했는가 — `"memory-off"`에서는
-   * 항상 `false`다(맥락 세션 자체가 없어 주입할 스토어 내용도 없다). */
+  /** 후속 세션 첫 호출에서 **mori retrieval**이 실제로 뭔가를 주입했는가 — `"memory-off"`·
+   * `"oracle"`에서는 항상 `false`다 (`ScenarioRunResult.injected` 참고). */
   injected: boolean;
 }
 
-/** 시나리오 하나 × 조건 하나를 채점 없이 끝까지 실행한다: 맥락 세션 주입 → consolidation →
- * 세션 사망 → 후속 세션. `"memory-off"`는 맥락 단계를 건너뛴다.
+/** 시나리오 하나 × 조건 하나를 채점 없이 끝까지 실행한다: 맥락 세션 주입 → 세션 사망 →
+ * 후속 세션.
+ *
+ * **세 팔 모두 맥락 세션을 돈다** (#434). 팔이 갈리는 곳은 두 군데뿐이다:
+ * (a) 커널 — `"memory-on"`만 진짜 mori 커널을 만든다. 나머지 둘은 `createStoreFreeKernel`이라
+ *     스토어를 아예 열지 않는다.
+ * (b) 이월물 — `buildFollowUpCarryOver`가 팔마다 하나씩 고른다.
+ *
+ * `"oracle"`의 맥락 세션은 후속 세션 결과에 아무 영향도 주지 않는다(후속 세션은 새 세션이고
+ * 이월되는 것은 정답 라벨뿐이다). 그래도 돌린다 — 비용 축(`BENCH_AXES.cost`)이 팔 사이에
+ * 비교 가능하려면 세 팔이 같은 수의 턴을 태워야 하고, 조각 4가 판정할 ORACLE−OFF 간격이
+ * «주입물이 다르다» 이외의 변수를 타면 안 되기 때문이다.
  *
  * judge 호출(루브릭 판정·재질문 판정)은 이 함수의 범위 밖이다 — `runPreferenceRegressionScenario`가
  * 이 함수 위에 동기 채점을 바로 얹고(#387), `runPreferenceRegressionMilestone`(#407)은 여러
@@ -202,40 +357,57 @@ export async function runPreferenceRegressionEpisode(
     ...(options.credentialStore ? { credentialStore: options.credentialStore } : {}),
   };
 
-  if (options.condition === "memory-on") {
-    const contextKernel = createKernel(options.root, "context", options.env);
-    const contextResult = await createSession(options.env, { ...baseDeps, kernel: contextKernel });
-    if (!contextResult.ok) {
-      throw new Error(
-        `mori bench: 시나리오 "${options.scenario.id}"의 맥락 세션 생성 실패 ` +
-          `(exitCode ${String(contextResult.exitCode)})`,
-      );
+  // `"memory-on"`만 진짜 mori 커널을 만든다. 나머지 두 팔이 `createKernel`을 부르지 않는 것이
+  // "이 팔들의 mori 스토어 읽기는 0건"의 근거다 — 스토어 핸들이 생기지 않는다.
+  const usesMoriStore = options.condition === "memory-on";
+  const contextKernel = usesMoriStore
+    ? createKernel(options.root, "context", options.env)
+    : createStoreFreeKernel();
+  const contextResult = await createSession(options.env, { ...baseDeps, kernel: contextKernel });
+  if (!contextResult.ok) {
+    throw new Error(
+      `mori bench: 시나리오 "${options.scenario.id}"의 맥락 세션 생성 실패 ` +
+        `(exitCode ${String(contextResult.exitCode)})`,
+    );
+  }
+  let compactionSummary: string | undefined;
+  // try/finally: close()가 drain + session-end consolidation의 유일한 트리거이므로, 맥락
+  // 턴 중 실패해도(assertTurnOk의 throw 포함) 이 세션의 관찰 기록이 응고되지 않은 채 남으면
+  // 안 된다.
+  try {
+    for (const turn of options.scenario.contextTurns) {
+      const result = await contextResult.session.prompt(turn);
+      // record를 단언보다 먼저 둔다 — 실패한 턴도 토큰을 태웠다면 비용에는 잡혀야 정확하다.
+      options.costLedger.record(BENCH_AXES.cost, result.usage);
+      assertTurnOk(result, options.scenario.id, "맥락");
     }
-    // try/finally: close()가 drain + session-end consolidation의 유일한 트리거이므로, 맥락
-    // 턴 중 실패해도(assertTurnOk의 throw 포함) 이 세션의 관찰 기록이 응고되지 않은 채 남으면
-    // 안 된다.
-    try {
-      for (const turn of options.scenario.contextTurns) {
-        const result = await contextResult.session.prompt(turn);
-        // record를 단언보다 먼저 둔다 — 실패한 턴도 토큰을 태웠다면 비용에는 잡혀야 정확하다.
-        options.costLedger.record(BENCH_AXES.cost, result.usage);
-        assertTurnOk(result, options.scenario.id, "맥락");
-      }
-    } finally {
-      // close()의 drain + session-end consolidation이 "세션 사망"이다 — 이 아래에서 여는 후속
-      // 세션은 항상 이 시점 이후에 생성되므로, 스토어 전용 읽기만 보고 raw 세션 원문을
-      // 재노출받지 않는다(memorize#176 leniency 함정).
-      await contextResult.session.close();
+    if (options.condition === "memory-off") {
+      // OFF 팔의 이월물을 여기서 만든다 — 세션이 죽기 전에, 그 세션 자신의 하네스 압축으로.
+      // 임계치를 기다리지 않고 직접 부르는 이유: 이 시나리오들의 맥락 세션은 컨텍스트 창을
+      // 채울 만큼 길지 않아 자동 트리거(`compactIfContextFull`)가 영영 안 걸린다. 압축 경로
+      // 자체는 pi의 기본 그대로다(#7과 별개 축 — 이 조각은 쓰기만 한다).
+      const compaction = await contextResult.session.compact();
+      options.costLedger.record(BENCH_AXES.cost, compaction.usage);
+      compactionSummary = compaction.summary;
     }
+  } finally {
+    // close()의 drain + session-end consolidation이 "세션 사망"이다 — 이 아래에서 여는 후속
+    // 세션은 항상 이 시점 이후에 생성되므로, 스토어 전용 읽기만 보고 raw 세션 원문을
+    // 재노출받지 않는다(memorize#176 leniency 함정).
+    await contextResult.session.close();
   }
 
+  const carryOver = buildFollowUpCarryOver(options.condition, options.scenario, compactionSummary);
+
   let injected = false;
-  const followUpKernel = withInjectionProbe(
-    createKernel(options.root, "follow-up", options.env),
+  const probedKernel = withInjectionProbe(
+    usesMoriStore ? createKernel(options.root, "follow-up", options.env) : createStoreFreeKernel(),
     (hit) => {
       injected = hit;
     },
   );
+  const followUpKernel =
+    carryOver === undefined ? probedKernel : withCarryOver(probedKernel, carryOver);
   const followUpResult = await createSession(options.env, { ...baseDeps, kernel: followUpKernel });
   if (!followUpResult.ok) {
     throw new Error(
@@ -300,8 +472,9 @@ export async function runPreferenceRegressionScenario(
       episode.followUpOutput,
     );
   } else {
-    // "memory-off"엔 재질문을 판정할 확립된 맥락이 없어 judge를 부르지 않는다 — 그래도 축은
-    // 채운다.
+    // 재질문율은 #327 계기판의 **mori 경로** 축이고, `computeAxisRates`의 분모도 mori 팔
+    // 하나다 — `"memory-off"`·`"oracle"`에서 judge를 부르면 어떤 계기판도 읽지 않을 판정에
+    // judge 토큰을 태우는 것이 된다. 축 자체는 그래도 채운다("측정 안 함"과 "0"은 다르다).
     options.costLedger.record(BENCH_AXES.reQuestionRate, ZERO_USAGE);
   }
 
@@ -362,22 +535,25 @@ export interface PreferenceRegressionReport extends CostReport {
  * `runPreferenceRegression`가 단일 실행에 쓰고, #406의 나이틀리/주간 슬라이스가 여러 반복의
  * 결과를 합친 뒤 같은 계산을 재사용한다 — 비율 계산 로직이 두 곳에서 갈라지지 않게 하는 것이
  * 분리의 유일한 목적이다.
+ *
+ * 세 축 모두 분모가 **mori 팔(`"memory-on"`) 하나**다: injection-hit도 재질문도 mori
+ * retrieval이 있어야 성립하는 값이고, `"memory-off"`(하네스 압축 요약)·`"oracle"`(정답 라벨)의
+ * 후속 세션에는 mori 커널 자체가 없다. 팔 셋을 «mori 팔 vs 나머지»로 가르는 이 서술은
+ * 「`"memory-off"`가 아닌 것」이 아니라 「`"memory-on"`인 것」으로 써야 한다 — 팔이 둘이던
+ * 시절엔 두 표현이 같았지만 #434 이후로는 다르다.
  */
 export function computeAxisRates(
   results: readonly ScenarioRunResult[],
 ): PreferenceRegressionReport["axisRates"] {
-  const onConditionResults = results.filter((r) => r.condition === "memory-on");
+  const moriArmResults = results.filter((r) => r.condition === "memory-on");
   const rate = (hits: number, total: number): number => (total === 0 ? 0 : hits / total);
 
   return {
-    injectionHitRate: rate(
-      onConditionResults.filter((r) => r.injected).length,
-      onConditionResults.length,
-    ),
+    injectionHitRate: rate(moriArmResults.filter((r) => r.injected).length, moriArmResults.length),
     reDistillationRate: 0,
     reQuestionRate: rate(
-      onConditionResults.filter((r) => r.reQuestioned === true).length,
-      onConditionResults.length,
+      moriArmResults.filter((r) => r.reQuestioned === true).length,
+      moriArmResults.length,
     ),
   };
 }
@@ -398,7 +574,7 @@ export async function runPreferenceRegression(
 ): Promise<PreferenceRegressionReport> {
   const env = options.env ?? process.env;
   const scenarios = options.scenarios ?? PREFERENCE_REGRESSION_SCENARIOS;
-  const conditions = options.conditions ?? (["memory-on", "memory-off"] as const);
+  const conditions = options.conditions ?? PREFERENCE_REGRESSION_CONDITIONS;
 
   const previousMemorizeRoot = process.env.MEMORIZE_ROOT;
   process.env.MEMORIZE_ROOT = options.memorizeRoot;

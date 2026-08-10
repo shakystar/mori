@@ -105,7 +105,7 @@ export function reportMilestoneOutcome(
   if (report.judgeBatchRequests === 0) {
     io.stderr(
       "mori bench: judge 배치 요청이 0건이다 — judge 채점이 Batch API를 한 번도 거치지 않았다 " +
-        "(루브릭에 llm-judge 기준이 없거나 조건이 전부 memory-off이면 발생한다). 마일스톤 " +
+        "(루브릭에 llm-judge 기준이 하나도 없고 memory-on 팔도 안 돌렸으면 발생한다). 마일스톤 " +
         "풀런의 정의(judge 채점이 Batch API를 경유한다)를 충족하지 못하므로 실패로 처리한다.\n",
     );
     return 1;
