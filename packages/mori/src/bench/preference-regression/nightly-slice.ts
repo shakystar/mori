@@ -2,13 +2,13 @@ import path from "node:path";
 import type { Api, CredentialStore, Model } from "@earendil-works/pi-ai";
 import type { StreamFn } from "@earendil-works/pi-agent-core";
 import { createCostLedger, type CostReport } from "../cost-ledger.js";
-import type { ImplicitMemBenchScenario } from "./scenarios.js";
+import type { PreferenceRegressionScenario } from "./scenarios.js";
 import {
   computeAxisRates,
-  runImplicitMemBench,
+  runPreferenceRegression,
   type CreateKernelFn,
   type CreateSessionFn,
-  type ImplicitMemBenchCondition,
+  type PreferenceRegressionCondition,
   type ScenarioRunResult,
 } from "./runner.js";
 
@@ -42,8 +42,8 @@ export interface NightlySliceOptions {
   memorizeRootBase: string;
   env?: NodeJS.ProcessEnv;
   credentialStore?: CredentialStore;
-  scenarios?: readonly ImplicitMemBenchScenario[];
-  conditions?: readonly ImplicitMemBenchCondition[];
+  scenarios?: readonly PreferenceRegressionScenario[];
+  conditions?: readonly PreferenceRegressionCondition[];
   systemPrompt?: string;
   /** 기본값 `resolveSliceRepeatsPerScenario(env)`. */
   repeatsPerScenario?: number;
@@ -59,14 +59,14 @@ export interface NightlySliceReport extends CostReport {
 
 /**
  * 나이틀리/주간 슬라이스 — #397의 3계층 케이든스 중 "고정 슬라이스, 실비용 API 경로" 층
- * (#406, #397 조각 2/3). `runImplicitMemBench`(#387)를 시나리오 세트당 `repeatsPerScenario`회
+ * (#406, #397 조각 2/3). `runPreferenceRegression`(#387)를 시나리오 세트당 `repeatsPerScenario`회
  * 반복 호출해 memorize#176 선례의 표본 크기(per-type 10, n=30)를 만든다. 나이틀리·주간은
  * 실행 빈도만 다를 뿐 같은 스크립트를 쓴다 — 이 파일에 별도 분기는 없다.
  *
- * 반복마다 `runImplicitMemBench`를 별도 `workRoot`/`memorizeRoot`로 호출하는 이유: 그 함수
- * 자체가 "호출마다 비어있는 새 디렉터리"를 요구한다(runner.ts의 `ImplicitMemBenchOptions.workRoot`
+ * 반복마다 `runPreferenceRegression`를 별도 `workRoot`/`memorizeRoot`로 호출하는 이유: 그 함수
+ * 자체가 "호출마다 비어있는 새 디렉터리"를 요구한다(runner.ts의 `PreferenceRegressionOptions.workRoot`
  * 문서) — 같은 루트를 재사용하면 이전 반복이 응고한 기억이 다음 반복의 후속 세션에 새어
- * 들어간다. `runImplicitMemBench`가 실행 동안 `MEMORIZE_ROOT`를 프로세스 전역으로 바꾸는 것도
+ * 들어간다. `runPreferenceRegression`가 실행 동안 `MEMORIZE_ROOT`를 프로세스 전역으로 바꾸는 것도
  * 동시 호출을 막으므로(같은 문서), 반복은 항상 순차로 돈다.
  *
  * `cacheDir`는 호출자가 실행마다(예: 매 크론 잡마다) 새로 만들어 넘겨야 한다 — 이 층의 존재
@@ -84,7 +84,7 @@ export async function runNightlySlice(options: NightlySliceOptions): Promise<Nig
   const ledger = createCostLedger();
 
   for (let rep = 0; rep < repeatsPerScenario; rep++) {
-    const report = await runImplicitMemBench({
+    const report = await runPreferenceRegression({
       model: options.model,
       streamFn: options.streamFn,
       cacheDir: options.cacheDir,

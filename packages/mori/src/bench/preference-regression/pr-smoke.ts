@@ -7,11 +7,11 @@ import { isMainEntry } from "../../cli/entrypoint.js";
 import { DEFAULT_MODEL_ID, DEFAULT_PROVIDER_ID } from "../../agent/provider-selection.js";
 import { FileLlmCallCacheStore } from "../cache/file-cache-store.js";
 import { createFixtureCacheStreamFn } from "./pr-smoke-cache.js";
-import { runImplicitMemBench } from "./runner.js";
+import { runPreferenceRegression } from "./runner.js";
 
 /**
  * #397 3계층 케이든스의 "PR 스모크" 층 (#397 조각 1/3) — #374의 `createBenchRunner` +
- * ImplicitMemBench 러너(#387)를 100% 캐시 재생으로 구동해, 그 배선이 여전히 끝까지 도는지를
+ * PreferenceRegression 러너(#387)를 100% 캐시 재생으로 구동해, 그 배선이 여전히 끝까지 도는지를
  * 매 PR마다 값싸게 확인한다. 실제 모델 품질 측정(#388)이나 메모리 주입 실측(consolidation이
  * 실제로 뭔가를 증류하는지)은 의도적으로 이 스크립트의 범위 밖이다 — `MORI_CONSOLIDATE_MODEL`을
  * 비워 둬 consolidation을 꺼진 채로 두고(session.ts/consolidation 계약, 세팅 안 하면 no-op),
@@ -55,7 +55,7 @@ export async function runPrSmoke(options: { record: boolean }): Promise<number> 
   const memorizeRoot = await mkdtemp(join(tmpdir(), "mori-bench-pr-smoke-store-"));
 
   try {
-    const report = await runImplicitMemBench({
+    const report = await runPreferenceRegression({
       model: MODEL,
       streamFn,
       cacheDir: FIXTURE_CACHE_DIR,
@@ -70,7 +70,7 @@ export async function runPrSmoke(options: { record: boolean }): Promise<number> 
         `캐시 hit=${hitCount()} miss=${missCount()}`,
     );
 
-    // `IMPLICIT_MEM_BENCH_SCENARIOS`가 어떤 이유로든 비어버리면 hit/miss가 둘 다 0으로
+    // `PREFERENCE_REGRESSION_SCENARIOS`가 어떤 이유로든 비어버리면 hit/miss가 둘 다 0으로
     // 조용히 "통과"한다 — 대상이 0건일 때 그린이 되는 것이 바로 이 스모크가 막으려는
     // 회귀(#405)이므로, ci.yml의 turbo coverage guard와 같은 원칙으로 여기서도 실패로 만든다.
     if (report.scenarios.length === 0) {

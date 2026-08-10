@@ -63,7 +63,7 @@ function replayMessage(message: AssistantMessage): AssistantMessageEventStream {
 /** A fixed, content-free reply — the PR smoke only needs the pipeline to run to completion
  * (real behavioral-adaptation scoring is #388's job, on real models), not a meaningful score.
  * Starts with "예" so it also satisfies the reader/judge calls' "첫 단어를 예/아니오로" contract
- * (`runImplicitMemBenchScenario`'s `createReaderLlmJudge`) without branching on call shape. */
+ * (`runPreferenceRegressionScenario`'s `createReaderLlmJudge`) without branching on call shape. */
 function fixedReply(model: Model<Api>): AssistantMessage {
   return {
     role: "assistant",
@@ -93,7 +93,7 @@ export interface FixtureCacheStreamFn {
 /**
  * Builds a `StreamFn` that never makes a real provider call: a cache hit replays the stored
  * reply, a cache miss synthesizes `fixedReply` and persists it. Used as `streamFn` for BOTH
- * `runImplicitMemBench`'s session turns (this cache is the only thing making them replayable —
+ * `runPreferenceRegression`'s session turns (this cache is the only thing making them replayable —
  * see `fixtureCacheKey`'s doc) and, once more, as the seed `streamFn` `createBenchRunner`
  * (runner.ts, #374) wraps again with the standard `withLlmCallCache` for the reader/judge path —
  * that outer wrap's own cache resolves reader calls first (their `Context` is already

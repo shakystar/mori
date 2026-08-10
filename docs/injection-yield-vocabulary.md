@@ -13,7 +13,7 @@
 
 ## 빌려올 곳이 없음을 확인했다
 
-#242의 게이트 코멘트는 판정 어휘를 `bench/implicit-mem-bench/scorer.ts`에서
+#242의 게이트 코멘트는 판정 어휘를 `bench/preference-regression/scorer.ts`에서
 재사용하면 된다고 적었으나, 그 전제는 틀렸다. `scorer.ts`가 내보내는 것은
 `RubricCriterion` / `ScenarioScore` / `ScoredScenario` — **시나리오 루브릭 채점** 어휘이고,
 「주입된 것이 값을 했는가」와는 다른 축이다. 그래서 이 어휘는 여기서 새로 세운다.
