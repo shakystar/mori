@@ -1,11 +1,13 @@
 import type { RubricCriterion } from "./scorer.js";
 
 /**
- * ImplicitMemBench(arXiv 2604.08064) 시나리오 정의 — discussion #327의 "선호는 kind 선언이
- * 아니라 세션 횡단 재생에서 결과론적으로 석출된다" 명제를 검증하기 위한 최소 시나리오 세트
- * (#343 조각 1/4). 이 파일은 순수 데이터 + 타입만 담당한다 — 이 턴들을 실제 mori 세션에
- * 흘리고 consolidation을 거쳐 후속 세션을 실행하는 배선은 러너(#387)의 몫이고, 실측 실행은
- * #388의 몫이다.
+ * 선호 유지 회귀 검사(preference regression) 시나리오 정의 — discussion #327의 "선호는 kind
+ * 선언이 아니라 세션 횡단 재생에서 결과론적으로 석출된다" 명제를 검증하기 위한 최소 시나리오
+ * 세트(#343 조각 1/4). 프로토콜(맥락 세션 → 세션 사망 → 후속 세션 관찰)은 arXiv 2604.08064의
+ * 설계에서 빌려왔으나 문항은 자체 제작이다 — 이 디렉터리가 논문 벤치가 아닌 이유는
+ * `runner.ts` 상단 doc 참고. 이 파일은 순수 데이터 + 타입만 담당한다 — 이 턴들을 실제 mori
+ * 세션에 흘리고 consolidation을 거쳐 후속 세션을 실행하는 배선은 러너(#387)의 몫이고, 실측
+ * 실행은 #388의 몫이다.
  *
  * 프로토콜 (원 이슈 #343 본문 반영):
  * - `contextTurns`는 맥락 세션의 사용자 발화다. `impliedPreference`를 선언하는 문장(예: "나는
@@ -16,7 +18,7 @@ import type { RubricCriterion } from "./scorer.js";
  * - `impliedPreference`는 채점에만 쓰이는 정답 라벨이다. 어떤 세션의 컨텍스트에도 주입되지
  *   않는다 — 러너(#387)는 이 필드를 세션 프롬프트 조립에 절대 쓰지 않아야 한다.
  */
-export interface ImplicitMemBenchScenario {
+export interface PreferenceRegressionScenario {
   id: string;
   title: string;
   /** 맥락 세션의 사용자 발화 순서. 마지막 턴 이후 세션은 consolidation을 거쳐 죽는다. */
@@ -28,7 +30,7 @@ export interface ImplicitMemBenchScenario {
   rubric: readonly RubricCriterion[];
 }
 
-const TABS_INDENTATION_SCENARIO: ImplicitMemBenchScenario = {
+const TABS_INDENTATION_SCENARIO: PreferenceRegressionScenario = {
   id: "tabs-indentation",
   title: "탭 들여쓰기 되돌림",
   contextTurns: [
@@ -63,7 +65,7 @@ const TABS_INDENTATION_SCENARIO: ImplicitMemBenchScenario = {
   ],
 };
 
-const CONCISE_RESPONSES_SCENARIO: ImplicitMemBenchScenario = {
+const CONCISE_RESPONSES_SCENARIO: PreferenceRegressionScenario = {
   id: "concise-responses",
   title: "군더더기 없는 답변 선호",
   contextTurns: [
@@ -90,7 +92,7 @@ const CONCISE_RESPONSES_SCENARIO: ImplicitMemBenchScenario = {
   ],
 };
 
-const PNPM_WORKFLOW_SCENARIO: ImplicitMemBenchScenario = {
+const PNPM_WORKFLOW_SCENARIO: PreferenceRegressionScenario = {
   id: "pnpm-workflow",
   title: "패키지 매니저 pnpm 습관",
   contextTurns: [
@@ -122,7 +124,7 @@ const PNPM_WORKFLOW_SCENARIO: ImplicitMemBenchScenario = {
   ],
 };
 
-export const IMPLICIT_MEM_BENCH_SCENARIOS: readonly ImplicitMemBenchScenario[] = [
+export const PREFERENCE_REGRESSION_SCENARIOS: readonly PreferenceRegressionScenario[] = [
   TABS_INDENTATION_SCENARIO,
   CONCISE_RESPONSES_SCENARIO,
   PNPM_WORKFLOW_SCENARIO,

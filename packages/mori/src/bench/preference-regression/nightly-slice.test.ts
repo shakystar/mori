@@ -15,7 +15,7 @@ import {
   runNightlySlice,
 } from "./nightly-slice.js";
 import type { CreateKernelFn, CreateSessionFn } from "./runner.js";
-import type { ImplicitMemBenchScenario } from "./scenarios.js";
+import type { PreferenceRegressionScenario } from "./scenarios.js";
 
 function model(): Model<Api> {
   return {
@@ -64,7 +64,7 @@ function fakeJudgeStreamFn(): StreamFn {
   };
 }
 
-function fixtureScenario(id: string): ImplicitMemBenchScenario {
+function fixtureScenario(id: string): PreferenceRegressionScenario {
   return {
     id,
     title: `fixture-${id}`,

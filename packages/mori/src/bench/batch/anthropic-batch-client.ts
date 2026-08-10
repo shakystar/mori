@@ -27,9 +27,9 @@ import { llmCallCacheKey, type LlmCallCacheStore } from "../cache/llm-call-cache
  *
  * 세션 턴(맥락 주입·후속 프롬프트)은 이 클라이언트의 대상이 아니다: 각 턴이 이전 턴의 모델
  * 출력에 의존하는 순차 실행이라 사전에 전체 요청을 알아야 하는 Batch API와 근본적으로 안
- * 맞는다(runner.ts의 `runImplicitMemBenchEpisode` 참고). 이 클라이언트는 에피소드가 이미 끝난
+ * 맞는다(runner.ts의 `runPreferenceRegressionEpisode` 참고). 이 클라이언트는 에피소드가 이미 끝난
  * 뒤 결과 텍스트를 판정하는 judge/reader 호출만 배치 대상으로 삼는다
- * (`implicit-mem-bench/milestone.ts`).
+ * (`preference-regression/milestone.ts`).
  */
 
 /** 실 SDK가 요구하는 만큼만 뽑은 좁은 인터페이스 — `Batches`(SDK)는 `protected _client`를 가진

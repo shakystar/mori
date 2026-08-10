@@ -25,8 +25,8 @@ import {
   type CreateKernelFn,
   type CreateSessionFn,
 } from "./runner.js";
-import type { ImplicitMemBenchScenario } from "./scenarios.js";
-import { runImplicitMemBenchMilestone } from "./milestone.js";
+import type { PreferenceRegressionScenario } from "./scenarios.js";
+import { runPreferenceRegressionMilestone } from "./milestone.js";
 
 function model(): Model<Api> {
   return {
@@ -63,7 +63,7 @@ const ZERO_USAGE_FIXTURE: Usage = {
   cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 };
 
-function fixtureScenario(id: string): ImplicitMemBenchScenario {
+function fixtureScenario(id: string): PreferenceRegressionScenario {
   return {
     id,
     title: `fixture-${id}`,
@@ -210,7 +210,7 @@ function fakeBatchClient(): AnthropicBatchClient & { requestsSeen: BatchJudgeReq
   };
 }
 
-describe("runImplicitMemBenchMilestone (#407, #397 조각 3/3)", () => {
+describe("runPreferenceRegressionMilestone (#407, #397 조각 3/3)", () => {
   it("defers every judge call to the batch client instead of streamFn, and scores from batch results", async () => {
     const harness = fakeHarness();
     const batchClient = fakeBatchClient();
@@ -219,7 +219,7 @@ describe("runImplicitMemBenchMilestone (#407, #397 조각 3/3)", () => {
       throw new Error("streamFn must not be called for judging — that's the batch client's job");
     };
 
-    const report = await runImplicitMemBenchMilestone({
+    const report = await runPreferenceRegressionMilestone({
       model: model(),
       streamFn,
       batchApiKey: "test-api-key",
@@ -276,7 +276,7 @@ describe("runImplicitMemBenchMilestone (#407, #397 조각 3/3)", () => {
         ),
     };
 
-    const report = await runImplicitMemBenchMilestone({
+    const report = await runPreferenceRegressionMilestone({
       model: model(),
       streamFn: async () => {
         throw new Error("unused");
@@ -312,7 +312,7 @@ describe("runImplicitMemBenchMilestone (#407, #397 조각 3/3)", () => {
     const harness = fakeHarness();
     const batchClient = fakeBatchClient();
 
-    const report = await runImplicitMemBenchMilestone({
+    const report = await runPreferenceRegressionMilestone({
       model: model(),
       streamFn: async () => {
         throw new Error("streamFn must not be called for judging — that's the batch client's job");
@@ -335,7 +335,7 @@ describe("runImplicitMemBenchMilestone (#407, #397 조각 3/3)", () => {
     const harness = fakeHarness();
     const batchClient = fakeBatchClient();
 
-    const report = await runImplicitMemBenchMilestone({
+    const report = await runPreferenceRegressionMilestone({
       model: model(),
       streamFn: async () => {
         throw new Error("streamFn must not be called for judging — that's the batch client's job");
@@ -363,7 +363,7 @@ describe("runImplicitMemBenchMilestone (#407, #397 조각 3/3)", () => {
   });
 });
 
-describe("runImplicitMemBenchMilestone episode cache (#423)", () => {
+describe("runPreferenceRegressionMilestone episode cache (#423)", () => {
   let cacheDir: string;
   let workRoot: string;
   let memorizeRoot: string;
@@ -386,7 +386,7 @@ describe("runImplicitMemBenchMilestone episode cache (#423)", () => {
     const scenario = fixtureScenario("cache-s1");
 
     async function run(episodeStreamFn: StreamFn & { calls: number }) {
-      return runImplicitMemBenchMilestone({
+      return runPreferenceRegressionMilestone({
         model: m,
         streamFn: episodeStreamFn,
         batchApiKey: "test-api-key",
