@@ -7,4 +7,4 @@ docs/inherited/
 
 # #405: FileLlmCallCacheStore.set()이 그대로 써내는 LLM 캐시 픽스처 — `pnpm bench:pr-smoke:record`로
 # 재생성될 때마다 프리티어 포맷을 다시 맞춰야 하는 부담을 만들지 않도록, 머신이 쓴 그대로 커밋한다.
-packages/mori/src/bench/implicit-mem-bench/pr-smoke-fixtures/
+packages/mori/src/bench/preference-regression/pr-smoke-fixtures/
