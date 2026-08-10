@@ -11,26 +11,26 @@ import {
 import { BENCH_AXES, type BenchAxis } from "../axes.js";
 import { FileLlmCallCacheStore, sweepOrphanCacheTmpFiles } from "../cache/file-cache-store.js";
 import { createCostLedger, type CostLedger, type CostReport } from "../cost-ledger.js";
-import { IMPLICIT_MEM_BENCH_SCENARIOS, type ImplicitMemBenchScenario } from "./scenarios.js";
+import { PREFERENCE_REGRESSION_SCENARIOS, type PreferenceRegressionScenario } from "./scenarios.js";
 import {
   buildJudgePrompt,
   computeAxisRates,
   parseJudgeVerdict,
   RE_QUESTION_META_QUESTION,
-  runImplicitMemBenchEpisode,
+  runPreferenceRegressionEpisode,
   ZERO_USAGE,
   type CreateKernelFn,
   type CreateSessionFn,
   type EpisodeResult,
-  type ImplicitMemBenchCondition,
-  type ImplicitMemBenchReport,
+  type PreferenceRegressionCondition,
+  type PreferenceRegressionReport,
   type ScenarioRunResult,
 } from "./runner.js";
 import { scoreBehavioralAdaptation, type LlmJudge } from "./scorer.js";
 
 /**
  * 마일스톤 풀런 — #397의 3계층 케이든스 중 "Batch API 경유" 층 (#407, #397 조각 3/3). #387의
- * "맥락 세션 주입 → consolidation → 세션 사망 → 후속 세션" 에피소드 실행(`runImplicitMemBenchEpisode`)
+ * "맥락 세션 주입 → consolidation → 세션 사망 → 후속 세션" 에피소드 실행(`runPreferenceRegressionEpisode`)
  * 은 그대로 재사용하되, 채점(judge)만 2단계로 재구성한다:
  *
  * (a) 시나리오 × 조건의 모든 에피소드를 끝까지 실행해 `followUpOutput`을 모은다 — judge 호출은
@@ -38,20 +38,20 @@ import { scoreBehavioralAdaptation, type LlmJudge } from "./scorer.js";
  * (b) 모인 모든 판정 프롬프트(루브릭의 `llm-judge` 기준 + 계기판 재질문 메타 질문)를 하나의
  *     배치로 묶어 제출 → 폴링 → 완료되면 결과를 회수해 점수를 채운다.
  *
- * `runImplicitMemBench`(실시간 슬라이스, #405·#406)와 갈라지는 지점은 이 judge 호출 경로뿐이다
+ * `runPreferenceRegression`(실시간 슬라이스, #405·#406)와 갈라지는 지점은 이 judge 호출 경로뿐이다
  * — 세션 턴(맥락 주입·후속 프롬프트) 자체는 순차 종속이라 배치화 대상이 아니다(각 턴이 이전
  * 턴의 모델 출력에 의존하므로 사전에 전체 요청을 알아야 하는 Batch API와 안 맞는다).
  */
 
 function rubricCustomId(
   scenarioId: string,
-  condition: ImplicitMemBenchCondition,
+  condition: PreferenceRegressionCondition,
   criterionId: string,
 ): string {
   return `rubric::${scenarioId}::${condition}::${criterionId}`;
 }
 
-function reQuestionCustomId(scenarioId: string, condition: ImplicitMemBenchCondition): string {
+function reQuestionCustomId(scenarioId: string, condition: PreferenceRegressionCondition): string {
   return `re-question::${scenarioId}::${condition}`;
 }
 
@@ -61,7 +61,7 @@ function reQuestionCustomId(scenarioId: string, condition: ImplicitMemBenchCondi
  * 다시 스코어러 안으로 넣기 위해 `LlmJudge` 인터페이스를 깨지 않는 유일한 방법이다(#407 완료
  * 조건: "기존 LlmJudge 인터페이스를 깨지 않는 선에서 구현"). */
 function createBatchReplayJudge(
-  scenario: ImplicitMemBenchScenario,
+  scenario: PreferenceRegressionScenario,
   episode: EpisodeResult,
   resultsById: ReadonlyMap<string, BatchJudgeResult>,
   costLedger: CostLedger,
@@ -101,11 +101,11 @@ function createBatchReplayJudge(
   };
 }
 
-/** `ImplicitMemBenchReport`를 깨지 않고 확장한다 — `batchFailures`가 비어있지 않으면 이 리포트의
+/** `PreferenceRegressionReport`를 깨지 않고 확장한다 — `batchFailures`가 비어있지 않으면 이 리포트의
  * 점수는 신뢰할 수 없다(일부 judge 배치 항목이 만료·취소·오류로 죽어 "불만족"으로 채점됐다는
  * 뜻). 마일스톤 풀런은 게이트 판정에 쓰는 최고 신뢰도 측정이라, 이 정보 없이는 인프라 실패가
  * "모델이 못 했다"로 조용히 리포트에 섞여 들어간다 (#407 owner 수정요청). */
-export interface MilestoneReport extends ImplicitMemBenchReport {
+export interface MilestoneReport extends PreferenceRegressionReport {
   batchFailures: readonly { customId: string; error: string }[];
   /** judge 채점이 요구한 **논리** 요청 수. 0이면 judge 채점 대상이 하나도 없었다는 뜻이다
    * (루브릭에 `llm-judge` 기준이 없거나 조건이 전부 `memory-off`, #416). 캐시 히트도 포함하므로
@@ -123,7 +123,7 @@ export interface MilestoneBatchOptions {
   streamFn: StreamFn;
   /** Batch API(judge 채점 패스) 인증용 Anthropic API 키. */
   batchApiKey: string;
-  /** #372 캐시 스토어 디렉터리 — `runImplicitMemBench`(runner.ts)와 같은 역할이지만 여기서는
+  /** #372 캐시 스토어 디렉터리 — `runPreferenceRegression`(runner.ts)와 같은 역할이지만 여기서는
    * 에피소드 실행(phase (a))과 judge 배치 제출(phase (b)) 양쪽을 모두 경유하게 한다(#423).
    * 호출자(`milestone-cli.ts`)가 `#422`의 `resolveBenchCacheDir`로 영속 경로를 골라 넘긴다 —
    * `workRoot`/`memorizeRoot`와 달리 실행마다 새로 만들면 안 된다(재실행이 전액 재과금된다). */
@@ -131,16 +131,16 @@ export interface MilestoneBatchOptions {
   /** 배치 judge 호출에 쓸 모델 id. 기본값 `model.id`. */
   batchModel?: string;
   batchSystemPrompt?: string;
-  /** 시나리오 × 조건마다 하위 디렉터리 하나씩 격리해 쓰는 스크래치 루트 — `runImplicitMemBench`
+  /** 시나리오 × 조건마다 하위 디렉터리 하나씩 격리해 쓰는 스크래치 루트 — `runPreferenceRegression`
    * (runner.ts)의 `workRoot` 문서와 같은 이유로 호출마다 비어있는 새 디렉터리여야 한다. */
   workRoot: string;
-  /** `MEMORIZE_ROOT`를 이 실행 동안만 격리 값으로 바꾼다 — `runImplicitMemBench`의 `memorizeRoot`
+  /** `MEMORIZE_ROOT`를 이 실행 동안만 격리 값으로 바꾼다 — `runPreferenceRegression`의 `memorizeRoot`
    * 문서와 같다. */
   memorizeRoot: string;
   env?: NodeJS.ProcessEnv;
   credentialStore?: CredentialStore;
-  scenarios?: readonly ImplicitMemBenchScenario[];
-  conditions?: readonly ImplicitMemBenchCondition[];
+  scenarios?: readonly PreferenceRegressionScenario[];
+  conditions?: readonly PreferenceRegressionCondition[];
   createSession?: CreateSessionFn;
   createKernel?: CreateKernelFn;
   /** 테스트 시드: 실 `AnthropicBatchClient` 대신 이 구현을 쓴다. */
@@ -150,19 +150,19 @@ export interface MilestoneBatchOptions {
 }
 
 /**
- * `IMPLICIT_MEM_BENCH_SCENARIOS`(기본) 전체를 조건별로 실행하고, judge 채점만 Batch API를 거쳐
+ * `PREFERENCE_REGRESSION_SCENARIOS`(기본) 전체를 조건별로 실행하고, judge 채점만 Batch API를 거쳐
  * 계기판 리포트를 낸다. 완료 조건(#407)에 요구된 대로, 마일스톤 풀런 스크립트
  * (`milestone-cli.ts`)가 실시간 `streamFn`이 아니라 이 함수가 만드는 `AnthropicBatchClient`를
  * 통해서만 judge를 호출한다는 것을 이 파일이 코드로 보장한다.
  *
- * `runImplicitMemBench`와 마찬가지로 동시 호출 불가 — 실행 동안 `process.env.MEMORIZE_ROOT`를
+ * `runPreferenceRegression`와 마찬가지로 동시 호출 불가 — 실행 동안 `process.env.MEMORIZE_ROOT`를
  * 프로세스 전역으로 바꿔 두고 `finally`에서 복원한다.
  */
-export async function runImplicitMemBenchMilestone(
+export async function runPreferenceRegressionMilestone(
   options: MilestoneBatchOptions,
 ): Promise<MilestoneReport> {
   const env = options.env ?? process.env;
-  const scenarios = options.scenarios ?? IMPLICIT_MEM_BENCH_SCENARIOS;
+  const scenarios = options.scenarios ?? PREFERENCE_REGRESSION_SCENARIOS;
   const conditions = options.conditions ?? (["memory-on", "memory-off"] as const);
   const costLedger = createCostLedger();
 
@@ -196,7 +196,7 @@ export async function runImplicitMemBenchMilestone(
         const root = path.join(options.workRoot, scenario.id, condition);
         await fs.mkdir(root, { recursive: true });
         episodes.push(
-          await runImplicitMemBenchEpisode({
+          await runPreferenceRegressionEpisode({
             scenario,
             condition,
             root,

@@ -1,5 +1,5 @@
 /**
- * ImplicitMemBench(arXiv 2604.08064) 행동 적응 스코어러 (#343 조각 1/4). 시나리오
+ * 선호 유지 회귀 검사(preference regression) 행동 적응 스코어러 (#343 조각 1/4). 시나리오
  * (scenarios.ts)의 후속 세션 출력이 그 시나리오의 `impliedPreference`를 반영했는지 루브릭
  * 기준별로 판정한다. `deterministic` 기준은 이 자리에서 즉시 평가하고, `llm-judge` 기준은
  * 호출자가 주입한 `LlmJudge`로 위임한다 — judge 모델은 호출 지점(#387의 러너 배선)에서
@@ -49,7 +49,7 @@ export interface ScenarioScore {
 }
 
 /** `scoreBehavioralAdaptation`이 필요로 하는 시나리오의 최소 형태 — `scenarios.ts`의
- * `ImplicitMemBenchScenario`를 그대로 받되, 이 모듈이 그 파일을 import하지 않아도 되도록
+ * `PreferenceRegressionScenario`를 그대로 받되, 이 모듈이 그 파일을 import하지 않아도 되도록
  * 구조적 타입으로 뽑아둔다(양방향 import 없이 axes→reader→runner와 같은 단방향 의존을 유지). */
 export interface ScoredScenario {
   id: string;

@@ -10,13 +10,13 @@ import type { RunCliDeps } from "../../cli/types.js";
 import type { CreateMoriSessionResult, MoriSessionTurn } from "../../session.js";
 import { BENCH_AXES } from "../axes.js";
 import { createCostLedger } from "../cost-ledger.js";
-import type { ImplicitMemBenchScenario } from "./scenarios.js";
+import type { PreferenceRegressionScenario } from "./scenarios.js";
 import {
   type CreateKernelFn,
   type CreateSessionFn,
   createReaderLlmJudge,
-  runImplicitMemBench,
-  runImplicitMemBenchScenario,
+  runPreferenceRegression,
+  runPreferenceRegressionScenario,
 } from "./runner.js";
 
 function model(): Model<Api> {
@@ -71,7 +71,7 @@ function fakeJudgeStreamFn(): StreamFn & { calls: number } {
   return fn as unknown as StreamFn & { calls: number };
 }
 
-function fixtureScenario(id: string): ImplicitMemBenchScenario {
+function fixtureScenario(id: string): PreferenceRegressionScenario {
   return {
     id,
     title: `fixture-${id}`,
@@ -150,7 +150,7 @@ function fakeHarness(
     deps: RunCliDeps,
   ): Promise<CreateMoriSessionResult> => {
     // `createKernel` for this session id always runs immediately before `createSession` in
-    // `runImplicitMemBenchScenario`, so the last id it saw is this session's id.
+    // `runPreferenceRegressionScenario`, so the last id it saw is this session's id.
     const sessionId = lastSessionId;
     if (!sessionId) throw new Error("fakeHarness: createSession called before createKernel");
     return Promise.resolve({
@@ -186,7 +186,7 @@ function fakeHarness(
   };
 }
 
-describe("runImplicitMemBenchScenario (#387)", () => {
+describe("runPreferenceRegressionScenario (#387)", () => {
   it("memory-on: runs context turns before the follow-up, closes both sessions, and detects injection", async () => {
     const harness = fakeHarness({
       context: fakeKernel({ injects: false }),
@@ -196,7 +196,7 @@ describe("runImplicitMemBenchScenario (#387)", () => {
     const scoringJudge = { judge: () => Promise.resolve(true) };
     const reQuestionJudge = { judge: () => Promise.resolve(true) };
 
-    const result = await runImplicitMemBenchScenario({
+    const result = await runPreferenceRegressionScenario({
       scenario: fixtureScenario("s1"),
       condition: "memory-on",
       root: "/tmp/fixture-root",
@@ -242,7 +242,7 @@ describe("runImplicitMemBenchScenario (#387)", () => {
       },
     };
 
-    const result = await runImplicitMemBenchScenario({
+    const result = await runPreferenceRegressionScenario({
       scenario: fixtureScenario("s2"),
       condition: "memory-off",
       root: "/tmp/fixture-root-off",
@@ -279,7 +279,7 @@ describe("runImplicitMemBenchScenario (#387)", () => {
     const costLedger = createCostLedger();
 
     await expect(
-      runImplicitMemBenchScenario({
+      runPreferenceRegressionScenario({
         scenario: fixtureScenario("s3"),
         condition: "memory-on",
         root: "/tmp/fixture-root-fail",
@@ -311,7 +311,7 @@ describe("runImplicitMemBenchScenario (#387)", () => {
     const costLedger = createCostLedger();
 
     await expect(
-      runImplicitMemBenchScenario({
+      runPreferenceRegressionScenario({
         scenario: fixtureScenario("s4"),
         condition: "memory-on",
         root: "/tmp/fixture-root-fail-close",
@@ -344,15 +344,15 @@ describe("createReaderLlmJudge (#387)", () => {
   });
 });
 
-describe("runImplicitMemBench (#387)", () => {
+describe("runPreferenceRegression (#387)", () => {
   let cacheDir: string;
   let workRoot: string;
   let memorizeRoot: string;
 
   beforeEach(async () => {
-    cacheDir = await mkdtemp(join(tmpdir(), "mori-implicit-mem-bench-cache-"));
-    workRoot = await mkdtemp(join(tmpdir(), "mori-implicit-mem-bench-work-"));
-    memorizeRoot = await mkdtemp(join(tmpdir(), "mori-implicit-mem-bench-store-"));
+    cacheDir = await mkdtemp(join(tmpdir(), "mori-preference-regression-cache-"));
+    workRoot = await mkdtemp(join(tmpdir(), "mori-preference-regression-work-"));
+    memorizeRoot = await mkdtemp(join(tmpdir(), "mori-preference-regression-store-"));
   });
 
   afterEach(async () => {
@@ -373,7 +373,7 @@ describe("runImplicitMemBench (#387)", () => {
     });
 
     async function run(streamFn: StreamFn & { calls: number }) {
-      return runImplicitMemBench({
+      return runPreferenceRegression({
         model: model(),
         streamFn,
         cacheDir,

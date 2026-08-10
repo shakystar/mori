@@ -17,21 +17,38 @@ import { withLlmCallCache, type LlmCallCacheStore } from "../cache/llm-call-cach
 import type { CostLedger, CostReport } from "../cost-ledger.js";
 import { createReader, type Reader } from "../reader.js";
 import { createBenchRunner } from "../runner.js";
-import { IMPLICIT_MEM_BENCH_SCENARIOS, type ImplicitMemBenchScenario } from "./scenarios.js";
+import { PREFERENCE_REGRESSION_SCENARIOS, type PreferenceRegressionScenario } from "./scenarios.js";
 import { scoreBehavioralAdaptation, type LlmJudge, type ScenarioScore } from "./scorer.js";
 
 /**
- * ImplicitMemBench 러너 배선 (#343 조각 2/4, #387). #386의 시나리오(scenarios.ts)·스코어러
- * (scorer.ts)를 #374의 `createBenchRunner` 위에 얹어 "맥락 세션 주입 → consolidation →
- * 세션 사망 → 후속 세션(스토어 전용 읽기) → 스코어러 호출" 흐름을 실행한다. 실제 모델 호출로
- * 진짜 수치를 내는 것은 #388의 몫 — 이 파일은 배선과 리포트 형태까지다.
+ * 선호 유지 회귀 검사(preference regression) 러너 배선 (#343 조각 2/4, #387). #386의
+ * 시나리오(scenarios.ts)·스코어러(scorer.ts)를 #374의 `createBenchRunner` 위에 얹어
+ * "맥락 세션 주입 → consolidation → 세션 사망 → 후속 세션(스토어 전용 읽기) → 스코어러 호출"
+ * 흐름을 실행한다. 실제 모델 호출로 진짜 수치를 내는 것은 #388의 몫 — 이 파일은 배선과
+ * 리포트 형태까지다.
+ *
+ * ## 이것은 논문 벤치가 아니다
+ *
+ * 이 디렉터리는 한때 "ImplicitMemBench"(arXiv 2604.08064)라는 이름을 달고 있었다. 그런데
+ * `scenarios.ts`가 실제로 돌리는 것은 이 저장소가 직접 지은 시나리오 3개
+ * (`tabs-indentation`·`concise-responses`·`pnpm-workflow`)이지, 그 논문이 말하는 300문항
+ * suite가 아니다. 프로토콜(맥락 세션 → 세션 사망 → 후속 세션의 행동 관찰)만 그 논문에서
+ * 빌려왔을 뿐, 문항 자체는 자체 제작이다.
+ *
+ * [2026-08-10 사람 결정](https://github.com/shakystar/mori/issues/343#issuecomment-5236415705)이
+ * 이 사실을 근거로 이 축을 **공개 수치 노림수에서 내부 회귀 검사로 격하**했다 — 값싸게 자주
+ * 돌려 「메모리 증류가 최소한 하네스 기본 압축 요약보다는 낫다」를 확인하는 용도로만 남긴다.
+ * 이 결과는 README·블로그·리더보드 등 **외부로 나가는 수치로 쓰지 않는다.**
+ *
+ * 이름을 되돌리려는 다음 세션은 여기서 멈춰라 — `ImplicitMemBenchScenario` 류의 식별자를
+ * 되살리는 변경은 위 결정과 반대 방향이다.
  */
 
 /** `"memory-off"`는 맥락 세션을 아예 건너뛰고 빈 스토어에서 곧장 `followUpPrompt`를 실행하는
  * 동일 모델 베이스라인 — 같은 흐름(러너 배선, 스코어러 호출)을 그대로 타되 주입할 것이 없다. */
-export type ImplicitMemBenchCondition = "memory-on" | "memory-off";
+export type PreferenceRegressionCondition = "memory-on" | "memory-off";
 
-/** `runImplicitMemBenchMilestone`(milestone.ts, #407)도 재사용한다 — 반복해서 같은 리터럴을
+/** `runPreferenceRegressionMilestone`(milestone.ts, #407)도 재사용한다 — 반복해서 같은 리터럴을
  * 만들면 두 곳이 조용히 갈라질 수 있어서다. */
 export const ZERO_USAGE = sumUsage([]);
 
@@ -61,7 +78,7 @@ function assertTurnOk(turn: MoriSessionTurn, scenarioId: string, where: string):
 }
 
 /** 예/아니오 judge 프롬프트 조립 — 실시간 reader judge(`createReaderLlmJudge`)와 배치 judge
- * (`milestone.ts`의 `runImplicitMemBenchMilestone`)가 같은 문구를 쓴다. 프롬프트가 갈리면 두
+ * (`milestone.ts`의 `runPreferenceRegressionMilestone`)가 같은 문구를 쓴다. 프롬프트가 갈리면 두
  * 경로의 판정 성향이 달라져 milestone 리포트를 실시간 슬라이스(#405, #406)와 비교할 수 없게
  * 된다. */
 export function buildJudgePrompt(question: string, followUpOutput: string): string {
@@ -123,7 +140,7 @@ function defaultCreateKernel(root: string, sessionId: string, env: NodeJS.Proces
 export interface ScenarioRunResult {
   scenarioId: string;
   scenarioTitle: string;
-  condition: ImplicitMemBenchCondition;
+  condition: PreferenceRegressionCondition;
   followUpOutput: string;
   score: ScenarioScore;
   /** 후속 세션 첫 호출에서 `transformContext`가 실제로 뭔가를 주입했는가 — `"memory-off"`에서는
@@ -135,14 +152,14 @@ export interface ScenarioRunResult {
 }
 
 export interface RunEpisodeOptions {
-  scenario: ImplicitMemBenchScenario;
-  condition: ImplicitMemBenchCondition;
+  scenario: PreferenceRegressionScenario;
+  condition: PreferenceRegressionCondition;
   /** 이 시나리오·조건 전용 격리 루트 — 다른 시나리오/조건과 스토어를 절대 공유하지 않는다. */
   root: string;
   env: NodeJS.ProcessEnv;
   streamFn: StreamFn;
   /** #372 캐시 스토어 — 주어지면 세션 턴(맥락 주입·후속 프롬프트)의 `streamFn`을 #372의
-   * `withLlmCallCache`로 감싸 호출한다. `runImplicitMemBench`(위 `ImplicitMemBenchOptions`)는
+   * `withLlmCallCache`로 감싸 호출한다. `runPreferenceRegression`(위 `PreferenceRegressionOptions`)는
    * 이 필드를 넘기지 않는다 — 리더/재질문 판정만 캐시를 거치는 기존 배선을 바꾸지 않기 위해서다
    * (#423 비범위). 마일스톤 풀런(`milestone.ts`, #423)은 에피소드 자체가 재실행마다 전액
    * 재과금되는 것을 막기 위해 이 필드를 채운다. */
@@ -156,7 +173,7 @@ export interface RunEpisodeOptions {
 export interface EpisodeResult {
   scenarioId: string;
   scenarioTitle: string;
-  condition: ImplicitMemBenchCondition;
+  condition: PreferenceRegressionCondition;
   followUpOutput: string;
   /** 후속 세션 첫 호출에서 `transformContext`가 실제로 뭔가를 주입했는가 — `"memory-off"`에서는
    * 항상 `false`다(맥락 세션 자체가 없어 주입할 스토어 내용도 없다). */
@@ -166,12 +183,12 @@ export interface EpisodeResult {
 /** 시나리오 하나 × 조건 하나를 채점 없이 끝까지 실행한다: 맥락 세션 주입 → consolidation →
  * 세션 사망 → 후속 세션. `"memory-off"`는 맥락 단계를 건너뛴다.
  *
- * judge 호출(루브릭 판정·재질문 판정)은 이 함수의 범위 밖이다 — `runImplicitMemBenchScenario`가
- * 이 함수 위에 동기 채점을 바로 얹고(#387), `runImplicitMemBenchMilestone`(#407)은 여러
+ * judge 호출(루브릭 판정·재질문 판정)은 이 함수의 범위 밖이다 — `runPreferenceRegressionScenario`가
+ * 이 함수 위에 동기 채점을 바로 얹고(#387), `runPreferenceRegressionMilestone`(#407)은 여러
  * 에피소드의 followUpOutput을 먼저 모두 모은 뒤 판정 프롬프트를 한 번에 배치 제출한다 — 두
  * 호출자가 "세션을 끝까지 돌린다"는 이 로직을 공유하면서 채점 시점만 달리하기 위해 분리했다.
  */
-export async function runImplicitMemBenchEpisode(
+export async function runPreferenceRegressionEpisode(
   options: RunEpisodeOptions,
 ): Promise<EpisodeResult> {
   const createSession = options.createSession ?? createMoriSession;
@@ -259,16 +276,16 @@ export interface RunScenarioOnceOptions extends RunEpisodeOptions {
   /** 루브릭의 `llm-judge` 기준을 판정하는 judge (`scorer.ts`). */
   scoringJudge: LlmJudge;
   /** 계기판 전용 재질문 메타 질문을 판정하는 judge — 루브릭과 분리된 축(`BENCH_AXES.reQuestionRate`)
-   * 아래 비용이 잡히도록 별도 reader 위에서 온다 (`runImplicitMemBench` 참고). */
+   * 아래 비용이 잡히도록 별도 reader 위에서 온다 (`runPreferenceRegression` 참고). */
   reQuestionJudge: LlmJudge;
 }
 
 /** 시나리오 하나 × 조건 하나를 끝까지 실행하고 곧바로(동기) 채점한다 —
- * `runImplicitMemBenchEpisode` 위에 스코어러 호출을 얹은 것. */
-export async function runImplicitMemBenchScenario(
+ * `runPreferenceRegressionEpisode` 위에 스코어러 호출을 얹은 것. */
+export async function runPreferenceRegressionScenario(
   options: RunScenarioOnceOptions,
 ): Promise<ScenarioRunResult> {
-  const episode = await runImplicitMemBenchEpisode(options);
+  const episode = await runPreferenceRegressionEpisode(options);
 
   const score = await scoreBehavioralAdaptation(
     options.scenario,
@@ -299,7 +316,7 @@ export async function runImplicitMemBenchScenario(
   };
 }
 
-export interface ImplicitMemBenchOptions {
+export interface PreferenceRegressionOptions {
   model: Model<Api>;
   streamFn: StreamFn;
   /** #372 캐시 스토어 디렉터리 — `createBenchRunner`가 한 번 스윕하고, 재질문 axis 전용
@@ -322,17 +339,17 @@ export interface ImplicitMemBenchOptions {
   memorizeRoot: string;
   env?: NodeJS.ProcessEnv;
   credentialStore?: CredentialStore;
-  scenarios?: readonly ImplicitMemBenchScenario[];
-  conditions?: readonly ImplicitMemBenchCondition[];
+  scenarios?: readonly PreferenceRegressionScenario[];
+  conditions?: readonly PreferenceRegressionCondition[];
   systemPrompt?: string;
   createSession?: CreateSessionFn;
   createKernel?: CreateKernelFn;
 }
 
-export interface ImplicitMemBenchReport extends CostReport {
+export interface PreferenceRegressionReport extends CostReport {
   scenarios: readonly ScenarioRunResult[];
   /** discussion #327의 계기판 3축 — 0~1 비율. `reDistillationRate`는 이 프로토콜(매 시나리오
-   * 빈 스토어에서 단발 응고)에서는 항상 0이다(위 `runImplicitMemBenchScenario` 참고). */
+   * 빈 스토어에서 단발 응고)에서는 항상 0이다(위 `runPreferenceRegressionScenario` 참고). */
   axisRates: {
     injectionHitRate: number;
     reDistillationRate: number;
@@ -342,13 +359,13 @@ export interface ImplicitMemBenchReport extends CostReport {
 
 /**
  * `results`(여러 시나리오·조건 실행 결과)에서 discussion #327의 계기판 3축을 계산한다.
- * `runImplicitMemBench`가 단일 실행에 쓰고, #406의 나이틀리/주간 슬라이스가 여러 반복의
+ * `runPreferenceRegression`가 단일 실행에 쓰고, #406의 나이틀리/주간 슬라이스가 여러 반복의
  * 결과를 합친 뒤 같은 계산을 재사용한다 — 비율 계산 로직이 두 곳에서 갈라지지 않게 하는 것이
  * 분리의 유일한 목적이다.
  */
 export function computeAxisRates(
   results: readonly ScenarioRunResult[],
-): ImplicitMemBenchReport["axisRates"] {
+): PreferenceRegressionReport["axisRates"] {
   const onConditionResults = results.filter((r) => r.condition === "memory-on");
   const rate = (hits: number, total: number): number => (total === 0 ? 0 : hits / total);
 
@@ -366,7 +383,7 @@ export function computeAxisRates(
 }
 
 /**
- * `IMPLICIT_MEM_BENCH_SCENARIOS`(기본) 전체를 조건별로 실행하고 계기판 리포트를 낸다.
+ * `PREFERENCE_REGRESSION_SCENARIOS`(기본) 전체를 조건별로 실행하고 계기판 리포트를 낸다.
  * `#374`의 `createBenchRunner` 위에 얹는다 — 오케스트레이션 전체가 이 파일의 유일한 신규
  * 집계 지점이고, `writeCostReport`(cost-ledger.ts)를 그대로 재사용해 JSON으로 낼 수 있다
  * (반환값이 구조적으로 `CostReport`를 만족한다).
@@ -376,11 +393,11 @@ export function computeAxisRates(
  * 동시에(예: `Promise.all`) 부르면 두 호출이 서로의 `MEMORIZE_ROOT`를 덮어써 스토어가
  * 섞인다. 한 프로세스당 한 번만, 순차로 부른다.
  */
-export async function runImplicitMemBench(
-  options: ImplicitMemBenchOptions,
-): Promise<ImplicitMemBenchReport> {
+export async function runPreferenceRegression(
+  options: PreferenceRegressionOptions,
+): Promise<PreferenceRegressionReport> {
   const env = options.env ?? process.env;
-  const scenarios = options.scenarios ?? IMPLICIT_MEM_BENCH_SCENARIOS;
+  const scenarios = options.scenarios ?? PREFERENCE_REGRESSION_SCENARIOS;
   const conditions = options.conditions ?? (["memory-on", "memory-off"] as const);
 
   const previousMemorizeRoot = process.env.MEMORIZE_ROOT;
@@ -421,7 +438,7 @@ export async function runImplicitMemBench(
         const root = path.join(options.workRoot, scenario.id, condition);
         await fs.mkdir(root, { recursive: true });
         results.push(
-          await runImplicitMemBenchScenario({
+          await runPreferenceRegressionScenario({
             scenario,
             condition,
             root,

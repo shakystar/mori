@@ -13,7 +13,7 @@ import { isMainEntry } from "../../cli/entrypoint.js";
 import { unauthenticatedMessage } from "../../cli/messages.js";
 import { resolveBenchCacheDir } from "../cache/bench-cache-dir.js";
 import { writeCostReport } from "../cost-ledger.js";
-import { runImplicitMemBenchMilestone, type MilestoneReport } from "./milestone.js";
+import { runPreferenceRegressionMilestone, type MilestoneReport } from "./milestone.js";
 
 export interface MilestoneCliIO {
   stdout: (chunk: string) => void;
@@ -126,7 +126,7 @@ export function reportMilestoneOutcome(
  * 트리거 인프라는 이 스크립트의 몫이 아니다). 세션 턴(맥락 주입·후속 프롬프트)은
  * `nightly-slice-cli.ts`와 같은 실시간 `streamFn` 경로를 그대로 타지만, judge/reader 채점
  * 패스만 이 스크립트가 만드는 `AnthropicBatchClient`(anthropic-batch-client.ts)를 거친다 —
- * 그 배선은 `runImplicitMemBenchMilestone`(milestone.ts) 안에서 이뤄진다, 이 CLI는 인증
+ * 그 배선은 `runPreferenceRegressionMilestone`(milestone.ts) 안에서 이뤄진다, 이 CLI는 인증
  * 해석과 리포트 기록만 맡는다.
  *
  * 배치 API 인증은 세션 턴과 같은 `anthropic` provider 자격증명을 공유한다 —
@@ -196,7 +196,7 @@ export async function runMilestoneCli(
   const workRoot = await mkdtemp(join(tmpdir(), "mori-milestone-work-"));
   const memorizeRoot = await mkdtemp(join(tmpdir(), "mori-milestone-store-"));
 
-  const report = await runImplicitMemBenchMilestone({
+  const report = await runPreferenceRegressionMilestone({
     model,
     streamFn: models.streamSimple.bind(models),
     batchApiKey: batchAuth.auth.apiKey,
