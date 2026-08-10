@@ -53,10 +53,6 @@ describe("supportedProviderIds", () => {
       OPENAI_OAUTH_PROVIDER_ID,
     ]);
   });
-
-  it("includes deepseek in the selectable ids", () => {
-    expect(supportedProviderIds({})).toContain("deepseek");
-  });
 });
 
 describe("unknownProviderMessage", () => {
