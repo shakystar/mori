@@ -16,6 +16,7 @@ import {
   buildJudgePrompt,
   computeAxisRates,
   parseJudgeVerdict,
+  PREFERENCE_REGRESSION_CONDITIONS,
   RE_QUESTION_META_QUESTION,
   runPreferenceRegressionEpisode,
   ZERO_USAGE,
@@ -108,7 +109,8 @@ function createBatchReplayJudge(
 export interface MilestoneReport extends PreferenceRegressionReport {
   batchFailures: readonly { customId: string; error: string }[];
   /** judge 채점이 요구한 **논리** 요청 수. 0이면 judge 채점 대상이 하나도 없었다는 뜻이다
-   * (루브릭에 `llm-judge` 기준이 없거나 조건이 전부 `memory-off`, #416). 캐시 히트도 포함하므로
+   * (루브릭에 `llm-judge` 기준이 하나도 없고 `"memory-on"` 팔도 안 돌린 경우, #416·#434).
+   * 캐시 히트도 포함하므로
    * 이 값으로 "Batch API를 실제로 탔는가"를 판정하지 마라 — 그것은 `judgeBatchSubmitted`다. */
   judgeBatchRequests: number;
   /** 이번 실행이 **실제로 Batch API에 제출한** judge 요청 수 — 캐시 히트는 빠진다(#423).
@@ -163,7 +165,7 @@ export async function runPreferenceRegressionMilestone(
 ): Promise<MilestoneReport> {
   const env = options.env ?? process.env;
   const scenarios = options.scenarios ?? PREFERENCE_REGRESSION_SCENARIOS;
-  const conditions = options.conditions ?? (["memory-on", "memory-off"] as const);
+  const conditions = options.conditions ?? PREFERENCE_REGRESSION_CONDITIONS;
   const costLedger = createCostLedger();
 
   // #423: sweep once at startup, before the cache dir is read/written — same "runner owns the
@@ -227,6 +229,9 @@ export async function runPreferenceRegressionMilestone(
           prompt: buildJudgePrompt(criterion.question, episode.followUpOutput),
         });
       }
+      // 재질문 판정은 mori 팔에서만 요청한다 — 실시간 슬라이스(runner.ts의 판정 분기)와 같은
+      // 이유이고, `computeAxisRates`의 분모도 그 팔 하나다. 세 팔 전부에 요청을 걸면 어떤
+      // 계기판도 읽지 않을 판정에 배치 슬롯과 토큰을 쓰게 된다.
       if (episode.condition === "memory-on") {
         requests.push({
           customId: reQuestionCustomId(episode.scenarioId, episode.condition),
@@ -268,6 +273,7 @@ export async function runPreferenceRegressionMilestone(
         costLedger.record(BENCH_AXES.reQuestionRate, result.usage);
         reQuestioned = result.error ? false : parseJudgeVerdict(result.text);
       } else {
+        // mori 팔이 아니면 재질문 요청 자체를 안 걸었다(위 수집 루프) — 축은 그래도 채운다.
         costLedger.record(BENCH_AXES.reQuestionRate, ZERO_USAGE);
       }
 

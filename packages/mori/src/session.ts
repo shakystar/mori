@@ -30,6 +30,14 @@ export interface MoriSessionTurn {
   usage: Usage;
 }
 
+/** What a single `MoriSession.compact()` call produced. */
+export interface MoriSessionCompaction {
+  /** The summary the harness's own compaction left in place of the conversation it cut. */
+  summary: string;
+  /** Usage of the LLM call that produced the summary — zero if the provider reported none. */
+  usage: Usage;
+}
+
 /**
  * A programmatic, TTY-free multi-turn mori session (#341, #340 조각 1/5) — the shape a
  * benchmark harness drives an episode through: create once, `prompt()` per turn,
@@ -59,6 +67,28 @@ export interface MoriSession {
    * above (#371).
    */
   consolidate(signal?: AbortSignal): Promise<ExplicitConsolidateOutcome>;
+  /**
+   * Runs the harness's own compaction now and hands back the summary it produced — the same
+   * `AgentHarness.compact()` that `compactIfContextFull` (cli/compaction.ts) fires once the
+   * context window fills, triggered by the caller instead of by the threshold. The compaction
+   * path itself stays entirely pi's: mori declares no summary prompt and no second threshold
+   * of its own (정본 문서 §6.1), and this method adds neither.
+   *
+   * Its one caller is the preference-regression OFF arm (bench/preference-regression/runner.ts,
+   * #434). "What would have survived the session's death if mori were not here?" has exactly
+   * one honest answer — the harness's default compaction summary — and handing that answer to
+   * the follow-up session requires getting it out of the session it was made in.
+   *
+   * Queues behind whatever `prompt()`/`consolidate()`/`close()` call is in flight, same
+   * ordering as `prompt()`: `compact()` requires an idle harness (cli/compaction.ts) and
+   * rejects with `busy` if it lands mid-turn.
+   *
+   * Rejects rather than reporting through `stderr`, unlike the between-turns trigger. That
+   * trigger's failure is benign (the context is merely still too big and the next turn
+   * re-measures), but this caller asked for the summary itself — quietly answering with an
+   * empty one would let the OFF arm report "it saw a compaction summary" when it saw nothing.
+   */
+  compact(): Promise<MoriSessionCompaction>;
   /**
    * Settles queued observations and runs the session-end consolidation trigger. Call once, at
    * episode end, in place of the process exit that does this for the CLI (cli/runtime.ts's
@@ -196,6 +226,19 @@ export async function createMoriSession(
           // (Codex review, PR #350).
           await kernel.drain();
           return consolidateExplicit(kernel, llm, signal);
+        });
+      },
+
+      async compact(): Promise<MoriSessionCompaction> {
+        // `async` for the same reason `consolidate()` is: `assertOpen`'s throw has to reject
+        // the returned promise, not escape synchronously.
+        assertOpen("compact");
+
+        return enqueue(async () => {
+          const result = await agent.compact();
+          // `usage` is optional on `CompactResult` — a provider that reports none must read as
+          // "this cost nothing we can see", not as a missing field the caller has to handle.
+          return { summary: result.summary, usage: result.usage ?? ZERO_USAGE };
         });
       },
 

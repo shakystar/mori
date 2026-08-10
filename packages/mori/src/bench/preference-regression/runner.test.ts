@@ -7,7 +7,11 @@ import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { MoriKernel } from "../../agent/index.js";
 import type { RunCliDeps } from "../../cli/types.js";
-import type { CreateMoriSessionResult, MoriSessionTurn } from "../../session.js";
+import type {
+  CreateMoriSessionResult,
+  MoriSessionCompaction,
+  MoriSessionTurn,
+} from "../../session.js";
 import { BENCH_AXES } from "../axes.js";
 import { createCostLedger } from "../cost-ledger.js";
 import type { PreferenceRegressionScenario } from "./scenarios.js";
@@ -15,6 +19,7 @@ import {
   type CreateKernelFn,
   type CreateSessionFn,
   createReaderLlmJudge,
+  PREFERENCE_REGRESSION_CONDITIONS,
   runPreferenceRegression,
   runPreferenceRegressionScenario,
 } from "./runner.js";
@@ -111,11 +116,17 @@ function fakeKernel(options: { injects: boolean }): MoriKernel {
   };
 }
 
+/** The summary `session.compact()` hands back in these fixtures — the OFF arm's whole
+ * carry-over, so a test can assert it reached (or did not reach) the follow-up context. */
+const FIXTURE_COMPACTION_SUMMARY = "fixture 하네스 압축 요약";
+
 /** Builds a `CreateSessionFn`/`CreateKernelFn` pair driven entirely by test doubles — the real
  * `createMoriSession`/`createMoriKernel` need auth + a real on-disk store, which is out of scope
  * for a wiring-only test of this file's own orchestration. `session.prompt()` still calls the
  * injected `deps.kernel.transformContext` the same way `AgentHarness` would, so
- * `withInjectionProbe`'s wrapping is exercised end to end.
+ * `withInjectionProbe`'s wrapping is exercised end to end — and the messages that call returns
+ * are recorded per session id (`contextFor`), which is how a test sees what an arm actually
+ * carried into the follow-up session's context.
  *
  * `turnOverrides` lets a test make a given session id's `prompt()` return a specific turn (e.g. a
  * `stopReason: "error"` failure) instead of the default success reply — and close counts are
@@ -131,15 +142,18 @@ function fakeHarness(
   closeCount: () => number;
   closeCountFor: (sessionId: "context" | "follow-up") => number;
   kernelCalls: { root: string; sessionId: string }[];
+  compactCount: () => number;
+  contextFor: (sessionId: "context" | "follow-up") => string;
 } {
   const prompts: string[] = [];
   const kernelCalls: { root: string; sessionId: string }[] = [];
   const closesBySessionId: Record<string, number> = {};
-  let lastSessionId: "context" | "follow-up" | undefined;
+  const contextBySessionId: Record<string, string[]> = {};
+  let compacts = 0;
+  let sessionsCreated = 0;
 
   const createKernel: CreateKernelFn = (root, sessionId) => {
     kernelCalls.push({ root, sessionId });
-    lastSessionId = sessionId as "context" | "follow-up";
     const kernel = kernels[sessionId as "context" | "follow-up"];
     if (!kernel) throw new Error(`fakeHarness: no kernel double registered for "${sessionId}"`);
     return kernel;
@@ -149,16 +163,23 @@ function fakeHarness(
     _env: NodeJS.ProcessEnv,
     deps: RunCliDeps,
   ): Promise<CreateMoriSessionResult> => {
-    // `createKernel` for this session id always runs immediately before `createSession` in
-    // `runPreferenceRegressionScenario`, so the last id it saw is this session's id.
-    const sessionId = lastSessionId;
-    if (!sessionId) throw new Error("fakeHarness: createSession called before createKernel");
+    // Creation order, not `createKernel`'s last id: since #434 only the `"memory-on"` arm
+    // builds mori kernels at all, so `createKernel` never fires for the other two — but every
+    // arm creates exactly two sessions, context first, follow-up second. Modulo, not a
+    // one-shot flag, because `runPreferenceRegression` drives many episodes through one
+    // harness double.
+    const sessionId = sessionsCreated++ % 2 === 0 ? "context" : "follow-up";
     return Promise.resolve({
       ok: true,
       session: {
         async prompt(text: string): Promise<MoriSessionTurn> {
           prompts.push(text);
-          await deps.kernel?.transformContext([{ role: "user", content: text, timestamp: 0 }]);
+          const messages: AgentMessage[] = [{ role: "user", content: text, timestamp: 0 }];
+          const transformed = (await deps.kernel?.transformContext(messages)) ?? messages;
+          // `AgentMessage` is a union whose custom variants have no `content` field — the
+          // assertions here only ever ask "does this string appear anywhere in the context",
+          // so serialize the whole list rather than narrowing per variant.
+          (contextBySessionId[sessionId] ??= []).push(JSON.stringify(transformed));
           return (
             turnOverrides[sessionId] ?? {
               text: `reply:${text}`,
@@ -168,6 +189,10 @@ function fakeHarness(
           );
         },
         consolidate: () => Promise.resolve({ kind: "ok" as const }),
+        compact(): Promise<MoriSessionCompaction> {
+          compacts += 1;
+          return Promise.resolve({ summary: FIXTURE_COMPACTION_SUMMARY, usage: usage() });
+        },
         close(): Promise<void> {
           closesBySessionId[sessionId] = (closesBySessionId[sessionId] ?? 0) + 1;
           return Promise.resolve();
@@ -183,6 +208,8 @@ function fakeHarness(
     closeCount: () => Object.values(closesBySessionId).reduce((sum, n) => sum + n, 0),
     closeCountFor: (sessionId) => closesBySessionId[sessionId] ?? 0,
     kernelCalls,
+    compactCount: () => compacts,
+    contextFor: (sessionId) => (contextBySessionId[sessionId] ?? []).join("\n"),
   };
 }
 
@@ -231,8 +258,22 @@ describe("runPreferenceRegressionScenario (#387)", () => {
     expect(report.byAxis[BENCH_AXES.injectionHitRate]?.totalTokens).toBe(0);
   });
 
-  it("memory-off: skips the context phase entirely and never calls the re-question judge", async () => {
-    const harness = fakeHarness({ "follow-up": fakeKernel({ injects: false }) });
+  it("memory-off: runs the context session and carries only the harness compaction summary — zero mori store reads", async () => {
+    // 스토어를 읽으면 세는 커널 더블을 **두 세션 모두**에 등록해 둔다 — OFF 팔이 이 커널을
+    // 한 번도 만들지 않는다는 것이 「스토어 읽기 0건」의 근거다. 팔이 다시 mori 커널을 타도록
+    // 배선이 바뀌면 이 카운터가 0을 넘고 이 테스트가 깨진다 (#434, 이 축 전체의 전제).
+    let storeReads = 0;
+    const countingKernel: MoriKernel = {
+      transformContext: (messages) => {
+        storeReads += 1;
+        return Promise.resolve(messages);
+      },
+      observe: () => {},
+      consolidate: () => Promise.resolve(),
+      resetConversation: () => {},
+      drain: () => Promise.resolve(),
+    };
+    const harness = fakeHarness({ context: countingKernel, "follow-up": countingKernel });
     const costLedger = createCostLedger();
     let reQuestionCalls = 0;
     const reQuestionJudge = {
@@ -257,10 +298,18 @@ describe("runPreferenceRegressionScenario (#387)", () => {
       createKernel: harness.createKernel,
     });
 
-    expect(harness.prompts).toEqual(["follow-up prompt"]);
-    expect(harness.kernelCalls.map((c) => c.sessionId)).toEqual(["follow-up"]);
-    // Only the follow-up session ran (and closed) — no context session at all.
-    expect(harness.closeCount()).toBe(1);
+    // mori 스토어에 닿는 경로가 하나도 열리지 않았다: 커널을 만들지도, 읽지도 않았다.
+    expect(harness.kernelCalls).toEqual([]);
+    expect(storeReads).toBe(0);
+
+    // 그런데도 맥락 세션은 돌았다 — 「맥락 세션을 건너뛰는」 예전 베이스라인이 아니다.
+    expect(harness.prompts).toEqual(["ctx-1", "ctx-2", "follow-up prompt"]);
+    expect(harness.closeCount()).toBe(2);
+
+    // 세션 사망을 건너 남은 것은 하네스 압축 요약 하나뿐이고, 그것이 후속 컨텍스트에 있다.
+    expect(harness.compactCount()).toBe(1);
+    expect(harness.contextFor("follow-up")).toContain(FIXTURE_COMPACTION_SUMMARY);
+
     expect(result.injected).toBe(false);
     expect(result.reQuestioned).toBeUndefined();
     expect(reQuestionCalls).toBe(0);
@@ -269,6 +318,68 @@ describe("runPreferenceRegressionScenario (#387)", () => {
     const report = costLedger.report();
     expect(report.byAxis[BENCH_AXES.reQuestionRate]).toBeDefined();
     expect(report.byAxis[BENCH_AXES.reQuestionRate]?.totalTokens).toBe(0);
+  });
+
+  it("oracle: injects impliedPreference into the follow-up context", async () => {
+    const harness = fakeHarness({});
+    const scenario = fixtureScenario("s-oracle");
+
+    const result = await runPreferenceRegressionScenario({
+      scenario,
+      condition: "oracle",
+      root: "/tmp/fixture-root-oracle",
+      env: {},
+      streamFn: async () => {
+        throw new Error("unused");
+      },
+      costLedger: createCostLedger(),
+      scoringJudge: { judge: () => Promise.resolve(true) },
+      reQuestionJudge: {
+        judge: () => Promise.reject(new Error("re-question judge must not run off the mori arm")),
+      },
+      createSession: harness.createSession,
+      createKernel: harness.createKernel,
+    });
+
+    expect(harness.contextFor("follow-up")).toContain(scenario.impliedPreference);
+    // 천장 팔도 mori 스토어는 안 쓴다 — 이월되는 것은 정답 라벨 하나다.
+    expect(harness.kernelCalls).toEqual([]);
+    expect(harness.compactCount()).toBe(0);
+    expect(result.injected).toBe(false);
+  });
+
+  it("memory-on and memory-off never leak impliedPreference into the follow-up context", async () => {
+    // 예외가 ORACLE 하나뿐임의 회귀 방지 — 라벨이 다른 팔에 새면 그 팔은 기억이 아니라 정답
+    // 공개를 재게 된다 (scenarios.ts의 impliedPreference doc).
+    for (const condition of ["memory-on", "memory-off"] as const) {
+      const harness = fakeHarness({
+        context: fakeKernel({ injects: false }),
+        "follow-up": fakeKernel({ injects: true }),
+      });
+      const scenario = fixtureScenario(`s-leak-${condition}`);
+
+      await runPreferenceRegressionScenario({
+        scenario,
+        condition,
+        root: `/tmp/fixture-root-leak-${condition}`,
+        env: {},
+        streamFn: async () => {
+          throw new Error("unused");
+        },
+        costLedger: createCostLedger(),
+        scoringJudge: { judge: () => Promise.resolve(true) },
+        reQuestionJudge: { judge: () => Promise.resolve(true) },
+        createSession: harness.createSession,
+        createKernel: harness.createKernel,
+      });
+
+      // 먼저 컨텍스트가 실제로 기록됐는지 확인한다 — 빈 문자열이면 아래 not.toContain이
+      // 공허하게 통과해 false-green이 된다.
+      expect(harness.contextFor("context")).toContain("ctx-1");
+      expect(harness.contextFor("follow-up")).toContain("follow-up prompt");
+      expect(harness.contextFor("context")).not.toContain(scenario.impliedPreference);
+      expect(harness.contextFor("follow-up")).not.toContain(scenario.impliedPreference);
+    }
   });
 
   it('a failed turn (stopReason !== "stop") rejects instead of scoring the empty output', async () => {
@@ -361,7 +472,7 @@ describe("runPreferenceRegression (#387)", () => {
     await rm(memorizeRoot, { recursive: true, force: true });
   });
 
-  it("dry-runs both conditions across scenarios with zero real API calls on replay and fills every axis", async () => {
+  it("dry-runs all three conditions across scenarios with zero real API calls on replay and fills every axis", async () => {
     const scenarios = [fixtureScenario("a"), fixtureScenario("b")];
     const harness = fakeHarness({
       get context() {
@@ -390,14 +501,17 @@ describe("runPreferenceRegression (#387)", () => {
     expect(firstStream.calls).toBeGreaterThan(0);
 
     // Structural shape: one result per scenario × condition, every dashboard axis present.
-    expect(firstReport.scenarios).toHaveLength(scenarios.length * 2);
+    expect(firstReport.scenarios).toHaveLength(
+      scenarios.length * PREFERENCE_REGRESSION_CONDITIONS.length,
+    );
     expect(Object.keys(firstReport.axisRates).sort()).toEqual(
       ["injectionHitRate", "reDistillationRate", "reQuestionRate"].sort(),
     );
     for (const axis of Object.values(BENCH_AXES)) {
       expect(firstReport.byAxis[axis]).toBeDefined();
     }
-    // memory-on scenarios injected (fixture kernel), memory-off never does.
+    // memory-on scenarios injected (fixture kernel); the other two arms build no mori kernel
+    // and are not in this axis's denominator at all.
     expect(firstReport.axisRates.injectionHitRate).toBe(1);
     expect(firstReport.axisRates.reDistillationRate).toBe(0);
 

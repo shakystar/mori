@@ -14,6 +14,7 @@ import {
   resolveSliceRepeatsPerScenario,
   runNightlySlice,
 } from "./nightly-slice.js";
+import { PREFERENCE_REGRESSION_CONDITIONS } from "./runner.js";
 import type { CreateKernelFn, CreateSessionFn } from "./runner.js";
 import type { PreferenceRegressionScenario } from "./scenarios.js";
 
@@ -96,28 +97,25 @@ function fakeKernel(options: { injects: boolean }): MoriKernel {
 }
 
 /** Fake session/kernel harness — always injects on the follow-up session, mirroring
- * runner.test.ts's fixture. `createKernel` records every `(root, sessionId)` it was called
- * with so a test can assert repeats land in distinct roots. */
+ * runner.test.ts's fixture. `sessionRoots` records the scratch root of every session created
+ * so a test can assert repeats land in distinct roots. It reads that off `deps.root` rather
+ * than off `createKernel`: since #434 only the `"memory-on"` arm builds a mori kernel at all,
+ * so `createKernel` no longer sees every (scenario, condition, repeat) combination. */
 function fakeHarness(): {
   createSession: CreateSessionFn;
   createKernel: CreateKernelFn;
-  kernelCalls: { root: string; sessionId: string }[];
+  sessionRoots: string[];
 } {
-  const kernelCalls: { root: string; sessionId: string }[] = [];
-  let lastSessionId: "context" | "follow-up" | undefined;
+  const sessionRoots: string[] = [];
 
-  const createKernel: CreateKernelFn = (root, sessionId) => {
-    kernelCalls.push({ root, sessionId });
-    lastSessionId = sessionId as "context" | "follow-up";
-    return fakeKernel({ injects: sessionId === "follow-up" });
-  };
+  const createKernel: CreateKernelFn = (_root, sessionId) =>
+    fakeKernel({ injects: sessionId === "follow-up" });
 
   const createSession: CreateSessionFn = (
     _env: NodeJS.ProcessEnv,
     deps: RunCliDeps,
   ): Promise<CreateMoriSessionResult> => {
-    const sessionId = lastSessionId;
-    if (!sessionId) throw new Error("fakeHarness: createSession called before createKernel");
+    sessionRoots.push(deps.root ?? "");
     return Promise.resolve({
       ok: true,
       session: {
@@ -126,12 +124,13 @@ function fakeHarness(): {
           return { text: `reply:${text}`, stopReason: "stop", usage: usage() };
         },
         consolidate: () => Promise.resolve({ kind: "ok" as const }),
+        compact: () => Promise.resolve({ summary: "fixture compaction summary", usage: usage() }),
         close: () => Promise.resolve(),
       },
     });
   };
 
-  return { createSession, createKernel, kernelCalls };
+  return { createSession, createKernel, sessionRoots };
 }
 
 describe("resolveSliceRepeatsPerScenario (#406)", () => {
@@ -188,14 +187,17 @@ describe("runNightlySlice (#406)", () => {
     });
 
     expect(report.repeatsPerScenario).toBe(2);
-    // 2 scenarios × 2 conditions × 2 repeats.
-    expect(report.scenarios).toHaveLength(8);
+    // 2 scenarios × 3 conditions × 2 repeats.
+    expect(report.scenarios).toHaveLength(
+      scenarios.length * PREFERENCE_REGRESSION_CONDITIONS.length * 2,
+    );
 
     // Every (scenario, condition, repeat) combination gets its own scratch root — context and
     // follow-up legitimately share one root within a combination (that's how injection works),
     // but no repeat reuses another repeat's root.
-    const roots = harness.kernelCalls.map((c) => c.root);
-    expect(new Set(roots).size).toBe(scenarios.length * 2 /* conditions */ * 2 /* repeats */);
+    expect(new Set(harness.sessionRoots).size).toBe(
+      scenarios.length * PREFERENCE_REGRESSION_CONDITIONS.length * 2 /* repeats */,
+    );
 
     // memory-on scenarios always inject (fixture kernel) — axisRates aggregate across every
     // repeat, not just the last one.
@@ -264,7 +266,7 @@ describe("runNightlySlice (#406)", () => {
     });
 
     expect(report.repeatsPerScenario).toBe(1);
-    // 1 scenario × 2 conditions × 1 repeat.
-    expect(report.scenarios).toHaveLength(2);
+    // 1 scenario × 3 conditions × 1 repeat.
+    expect(report.scenarios).toHaveLength(PREFERENCE_REGRESSION_CONDITIONS.length);
   });
 });
