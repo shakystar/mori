@@ -7,6 +7,7 @@ import {
   type Provider,
 } from "@earendil-works/pi-ai";
 import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
+import { deepseekProvider } from "@earendil-works/pi-ai/providers/deepseek";
 import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
 import { openaiCodexProvider } from "@earendil-works/pi-ai/providers/openai-codex";
 import { experimentalOpenAiOAuthEnabled } from "../auth/experimental.js";
@@ -51,6 +52,12 @@ function envAuthContext(env: NodeJS.ProcessEnv): AuthContext {
  * selectable/loginable id list from this same function, so a provider can never be
  * unregistered yet selectable, or vice versa.
  *
+ * `deepseek` is registered unconditionally, same as anthropic and openai: it is an API-key
+ * provider (`DEEPSEEK_API_KEY`, no `auth.oauth`), so it does not fall under the OAuth-leak
+ * concern that makes `openai-codex` conditional below — there is no login/list/lookup
+ * surface an unconditional registration could leak it into that it wouldn't already
+ * legitimately appear on.
+ *
  * `openai-codex` (pi-ai's ChatGPT-subscription provider, OAuth-only) is appended *only*
  * when the experimental gate is on. With the gate off it is never constructed, so it
  * cannot surface in a provider list, a model lookup, or a `mori login` target — the
@@ -58,7 +65,11 @@ function envAuthContext(env: NodeJS.ProcessEnv): AuthContext {
  * back out at each surface.
  */
 export function moriProviders(env: NodeJS.ProcessEnv): readonly Provider[] {
-  const providers: Provider[] = [apiKeyOnlyAnthropicProvider(), openaiProvider()];
+  const providers: Provider[] = [
+    apiKeyOnlyAnthropicProvider(),
+    openaiProvider(),
+    deepseekProvider(),
+  ];
   if (experimentalOpenAiOAuthEnabled(env)) {
     providers.push(openaiCodexProvider());
   }

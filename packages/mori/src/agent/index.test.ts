@@ -152,7 +152,11 @@ describe("createMoriModels", () => {
     const models = createMoriModels({}, new InMemoryCredentialStore());
 
     expect(models.getProvider(OPENAI_OAUTH_PROVIDER_ID)).toBeUndefined();
-    expect(models.getProviders().map((provider) => provider.id)).toEqual(["anthropic", "openai"]);
+    expect(models.getProviders().map((provider) => provider.id)).toEqual([
+      "anthropic",
+      "openai",
+      "deepseek",
+    ]);
     expect(models.getModels().some((model) => model.provider === OPENAI_OAUTH_PROVIDER_ID)).toBe(
       false,
     );

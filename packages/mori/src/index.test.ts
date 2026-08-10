@@ -778,7 +778,7 @@ describe("runCli", () => {
 
         expect(exitCode).toBe(1);
         expect(io.err()).toContain("알 수 없는 프로바이더");
-        expect(io.err()).toContain("지원하는 프로바이더: anthropic, openai\n");
+        expect(io.err()).toContain("지원하는 프로바이더: anthropic, openai, deepseek\n");
         expect(io.out()).toBe("");
       });
 

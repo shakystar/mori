@@ -63,7 +63,8 @@ mori resolves credentials in this order:
 
 1. A credential stored by a prior `mori login` (at `$XDG_CONFIG_HOME/mori/credentials.json`,
    or `~/.config/mori/credentials.json`, written `0600`).
-2. The provider's API key environment variable — `ANTHROPIC_API_KEY` or `OPENAI_API_KEY`.
+2. The provider's API key environment variable — `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or
+   `DEEPSEEK_API_KEY`.
 
 If neither is available, `mori` exits immediately with an error naming both options — no
 network round trip is attempted first.
@@ -82,8 +83,8 @@ strips that capability out of the provider it registers.
 
 ### Provider and model selection
 
-mori supports two providers by default: `anthropic` (default) and `openai`. Both go through
-their own API key (see Authentication above).
+mori supports three providers by default: `anthropic` (default), `openai`, and `deepseek`.
+All three go through their own API key (see Authentication above).
 
 By default mori uses the anthropic model `claude-sonnet-4-6`. Override the model — and
 optionally the provider — with `MORI_MODEL`:
@@ -95,6 +96,9 @@ MORI_MODEL=claude-opus-5 mori "hi"
 # a different provider: "<provider>/<model>"
 export OPENAI_API_KEY=sk-...
 MORI_MODEL=openai/gpt-5.4 mori "hi"
+
+export DEEPSEEK_API_KEY=sk-...
+MORI_MODEL=deepseek/deepseek-v4-flash mori "hi"
 ```
 
 Rule: if `MORI_MODEL` contains a `/`, everything before it is the provider id and
