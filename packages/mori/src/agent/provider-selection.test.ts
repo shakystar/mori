@@ -39,18 +39,23 @@ describe("resolveProviderSelection", () => {
 });
 
 describe("supportedProviderIds", () => {
-  it("offers only the two API-key providers when the experimental gate is unset", () => {
+  it("offers only the API-key providers when the experimental gate is unset", () => {
     // #44 hard constraint 1: with no configuration at all, the experimental
     // subscription-OAuth provider must not exist as far as the user can tell.
-    expect(supportedProviderIds({})).toEqual(["anthropic", "openai"]);
+    expect(supportedProviderIds({})).toEqual(["anthropic", "openai", "deepseek"]);
   });
 
   it("adds the experimental OpenAI OAuth provider once the gate is set to 1", () => {
     expect(supportedProviderIds({ [EXPERIMENTAL_OPENAI_OAUTH_ENV]: "1" })).toEqual([
       "anthropic",
       "openai",
+      "deepseek",
       OPENAI_OAUTH_PROVIDER_ID,
     ]);
+  });
+
+  it("includes deepseek in the selectable ids", () => {
+    expect(supportedProviderIds({})).toContain("deepseek");
   });
 });
 
@@ -65,7 +70,7 @@ describe("unknownProviderMessage", () => {
 
   it("keeps the gated-off experimental provider out of the supported list it prints", () => {
     expect(unknownProviderMessage(OPENAI_OAUTH_PROVIDER_ID, {})).toContain(
-      "지원하는 프로바이더: anthropic, openai\n",
+      "지원하는 프로바이더: anthropic, openai, deepseek\n",
     );
   });
 });
