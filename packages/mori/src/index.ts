@@ -18,6 +18,7 @@ import type {
   CreateMoriSessionResult,
   ExplicitConsolidateOutcome,
   MoriSession,
+  MoriSessionCompaction,
   MoriSessionTurn,
 } from "./session.js";
 
@@ -27,6 +28,7 @@ export type {
   CreateMoriSessionResult,
   ExplicitConsolidateOutcome,
   MoriSession,
+  MoriSessionCompaction,
   MoriSessionTurn,
 };
 
