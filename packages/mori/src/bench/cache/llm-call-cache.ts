@@ -103,6 +103,16 @@ function dropMessageTimestamps(context: Context) {
  * that a real (non-scratch) directory made into the same key, which is the same expensive
  * direction of error `dropMessageTimestamps`'s narrow scope is protecting against above.
  *
+ * Constraint on `volatilePaths` entries: matching happens on `serialized`, which is already
+ * `stableStringify`'s JSON-escaped text, not the raw pre-serialization string — a caller-declared
+ * path containing a character JSON escapes (e.g. a literal backslash) won't `split` cleanly out of
+ * that escaped text, so the substitution silently no-ops and the raw path leaks into the key
+ * instead of failing loudly. Every current caller (`preference-regression/milestone.ts`,
+ * `runner.ts`) passes POSIX `mkdtemp` absolute paths, which never contain such characters, so this
+ * hasn't manifested — but it would resurface silently the first time a caller reuses this on
+ * paths from a non-POSIX source (e.g. Windows CI). Not handled here: escape-aware matching has no
+ * caller to justify it yet.
+ *
  * Longest paths are substituted first so a shorter path that is itself a prefix of a longer one
  * (e.g. `workRoot` vs a `workRoot/scenario/condition` subdirectory under it) can't partially
  * consume the longer match and leave a stray fragment of it in the key.
