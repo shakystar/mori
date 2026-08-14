@@ -125,7 +125,7 @@ function fakeHarness(): {
         },
         consolidate: () => Promise.resolve({ kind: "ok" as const }),
         compact: () => Promise.resolve({ summary: "fixture compaction summary", usage: usage() }),
-        close: () => Promise.resolve(),
+        close: () => Promise.resolve({ usage: usage() }),
       },
     });
   };

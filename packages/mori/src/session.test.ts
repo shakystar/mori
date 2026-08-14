@@ -6,6 +6,7 @@ import type {
   Usage,
 } from "@earendil-works/pi-ai";
 import { createAssistantMessageEventStream, InMemoryCredentialStore } from "@earendil-works/pi-ai";
+import type { ConsolidateCallOptions, ConsolidatorLlm } from "@mori/kernel";
 import { describe, expect, it } from "vitest";
 import type { MoriKernel } from "./agent/index.js";
 import { createMoriSession } from "./session.js";
@@ -113,8 +114,15 @@ function gatedProvider(reply: { text: string; usage?: Usage }) {
  * lets a test hold a `consolidate()` trigger "in flight" on purpose, the same way a gated
  * provider stream holds a `prompt()` turn open, to check what a concurrent `close()` does
  * while it waits.
+ *
+ * `onUsageReply` (#449) makes this double stand in for a real kernel's own `onUsage` firing —
+ * a caller-supplied `opts.onUsage` (the `ConsolidateCallOptions` seam `consolidateGuarded`
+ * forwards from `close()`) gets called with this value on every `consolidate()` call, the same
+ * way a real kernel forwards its extractor's usage.
  */
-function spyKernel(options: { gateFirstConsolidate?: Promise<void> } = {}): MoriKernel & {
+function spyKernel(
+  options: { gateFirstConsolidate?: Promise<void>; onUsageReply?: Usage } = {},
+): MoriKernel & {
   consolidateCalls: number;
   drainCalls: number;
   calls: string[];
@@ -131,13 +139,14 @@ function spyKernel(options: { gateFirstConsolidate?: Promise<void> } = {}): Mori
       spy.drainCalls++;
       spy.calls.push("drain");
     },
-    async consolidate() {
+    async consolidate(_llm?: ConsolidatorLlm, opts?: ConsolidateCallOptions) {
       if (options.gateFirstConsolidate && !gated) {
         gated = true;
         await options.gateFirstConsolidate;
       }
       spy.consolidateCalls++;
       spy.calls.push("consolidate");
+      if (options.onUsageReply) opts?.onUsage?.(options.onUsageReply);
     },
   };
   return spy;
@@ -219,6 +228,46 @@ describe("createMoriSession (#341)", () => {
     expect(kernel.calls).toEqual(["drain", "consolidate", "drain", "consolidate"]);
   });
 
+  it("close() surfaces the session-end boundary's own distillation usage when a consolidator model is configured (#449)", async () => {
+    const distillationUsage = usage({ input: 100, output: 40, totalTokens: 140 });
+    const kernel = spyKernel({ onUsageReply: distillationUsage });
+    const provider = scriptedProvider([{ text: "ok" }]);
+
+    const result = await createMoriSession(
+      { ...ENV, MORI_CONSOLIDATE_MODEL: "anthropic/claude-x" },
+      { credentialStore: new InMemoryCredentialStore(), streamFn: provider.streamFn, kernel },
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    await result.session.prompt("turn one");
+    const closed = await result.session.close();
+
+    // Before #449, close() resolved `void` and this usage reached no caller at all — a bench
+    // cost ledger recording `close().usage` (runner.ts) had nothing to record.
+    expect(closed).toEqual({ usage: distillationUsage });
+  });
+
+  it("close() reports zero distillation usage when no consolidator model is configured (#449)", async () => {
+    const kernel = spyKernel();
+    const provider = scriptedProvider([{ text: "ok" }]);
+
+    const result = await createMoriSession(ENV, {
+      credentialStore: new InMemoryCredentialStore(),
+      streamFn: provider.streamFn,
+      kernel,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    const closed = await result.session.close();
+
+    // consolidateOnSessionEnd's `if (!llm) return` never reaches the extractor, so no
+    // `onUsage` fires and the sum over zero usages is the zero value, not undefined.
+    expect(closed).toEqual({ usage: usage() });
+    expect(kernel.consolidateCalls).toBe(0);
+  });
+
   it("skips consolidate() as a no-op when MORI_CONSOLIDATE_MODEL is unset", async () => {
     const kernel = spyKernel();
     const provider = scriptedProvider([{ text: "ok" }]);
@@ -251,8 +300,10 @@ describe("createMoriSession (#341)", () => {
     // Fired concurrently, not awaited one after the other: both must observe the same
     // drain()/session-end settle rather than the second racing ahead of the first's cleanup.
     const [first, second] = await Promise.all([result.session.close(), result.session.close()]);
-    expect(first).toBeUndefined();
-    expect(second).toBeUndefined();
+    // Same settle, not just equal values (#449) — a second caller must see the exact object
+    // the first close() produced, not a freshly recomputed one.
+    expect(first).toBe(second);
+    expect(first).toEqual({ usage: usage() });
     expect(kernel.drainCalls).toBe(1);
 
     await expect(result.session.prompt("too late")).rejects.toThrow(/close/);
