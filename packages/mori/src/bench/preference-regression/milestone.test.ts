@@ -10,7 +10,7 @@ import {
   type Model,
   type Usage,
 } from "@earendil-works/pi-ai";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { MoriKernel } from "../../agent/index.js";
 import type { RunCliDeps } from "../../cli/types.js";
 import type { CreateMoriSessionResult, MoriSessionTurn } from "../../session.js";
@@ -27,6 +27,28 @@ import {
 } from "./runner.js";
 import type { PreferenceRegressionScenario } from "./scenarios.js";
 import { runPreferenceRegressionMilestone } from "./milestone.js";
+
+/** #445가 실제로 발견된 경로(milestone/batch phase (a))가 `runPreferenceRegressionEpisode`에
+ * 넘기는 `volatilePaths`를 붙잡는다 — `withLlmCallCache`/키 계산까지 내려가지 않고, 배선 자체
+ * (어떤 값이 어떤 인자로 갔는지)만 본다. `importOriginal`로 다른 export는 그대로 두고
+ * `runPreferenceRegressionEpisode`만 실제 구현에 위임하는 스파이로 감싼다
+ * (identity-publish-race.test.ts의 `vi.mock` + `importOriginal` 선례). */
+const runnerHooks = vi.hoisted(() => ({
+  volatilePathsSeen: [] as (readonly string[] | undefined)[],
+}));
+
+vi.mock("./runner.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./runner.js")>();
+  return {
+    ...actual,
+    runPreferenceRegressionEpisode: (
+      options: Parameters<typeof actual.runPreferenceRegressionEpisode>[0],
+    ) => {
+      runnerHooks.volatilePathsSeen.push(options.volatilePaths);
+      return actual.runPreferenceRegressionEpisode(options);
+    },
+  };
+});
 
 function model(): Model<Api> {
   return {
@@ -416,5 +438,55 @@ describe("runPreferenceRegressionMilestone episode cache (#423)", () => {
     const secondStream = fakeEpisodeStreamFn();
     await run(secondStream);
     expect(secondStream.calls).toBe(0);
+  });
+});
+
+describe("runPreferenceRegressionMilestone volatilePaths wiring (#445 회귀 방지, #342 완료 조건 2)", () => {
+  let cacheDir: string;
+  let workRoot: string;
+  let memorizeRoot: string;
+
+  beforeEach(async () => {
+    // Other describe blocks above also drive runPreferenceRegressionMilestone (hence
+    // runPreferenceRegressionEpisode) before this one runs — clear their entries so this test
+    // only sees its own call.
+    runnerHooks.volatilePathsSeen.length = 0;
+    cacheDir = await mkdtemp(join(tmpdir(), "mori-milestone-volatile-cache-"));
+    workRoot = await mkdtemp(join(tmpdir(), "mori-milestone-volatile-work-"));
+    memorizeRoot = await mkdtemp(join(tmpdir(), "mori-milestone-volatile-store-"));
+  });
+
+  afterEach(async () => {
+    await rm(cacheDir, { recursive: true, force: true });
+    await rm(workRoot, { recursive: true, force: true });
+    await rm(memorizeRoot, { recursive: true, force: true });
+  });
+
+  it("passes both the per-episode scratch root and memorizeRoot, unmodified, as volatilePaths (#447 fixed the values; this pins the wiring that feeds them)", async () => {
+    const harness = fakeHarness();
+    const batchClient = fakeBatchClient();
+    const scenario = fixtureScenario("volatile-s1");
+
+    await runPreferenceRegressionMilestone({
+      model: model(),
+      streamFn: async () => {
+        throw new Error("streamFn must not be called for judging — that's the batch client's job");
+      },
+      batchApiKey: "test-api-key",
+      cacheDir,
+      workRoot,
+      memorizeRoot,
+      scenarios: [scenario],
+      conditions: ["memory-on"],
+      batchClient,
+      createSession: harness.createSession,
+      createKernel: harness.createKernel,
+    });
+
+    expect(runnerHooks.volatilePathsSeen).toHaveLength(1);
+    // Matches milestone.ts's own `path.join(options.workRoot, scenario.id, condition)` — the
+    // episode's per-scenario/condition scratch root, not workRoot itself.
+    const expectedEpisodeRoot = join(workRoot, scenario.id, "memory-on");
+    expect(runnerHooks.volatilePathsSeen[0]).toEqual([expectedEpisodeRoot, memorizeRoot]);
   });
 });
