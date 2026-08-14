@@ -311,6 +311,13 @@ export interface RunEpisodeOptions {
    * (#423 비범위). 마일스톤 풀런(`milestone.ts`, #423)은 에피소드 자체가 재실행마다 전액
    * 재과금되는 것을 막기 위해 이 필드를 채운다. */
   cacheStore?: LlmCallCacheStore;
+  /** #445 — absolute per-run scratch roots (this episode's `root` above, and
+   * `PreferenceRegressionOptions.memorizeRoot`/`MilestoneBatchOptions.memorizeRoot` when the
+   * caller has one) that a tool result's *content* can echo verbatim even though replaying the
+   * same (model, prompt, params) call under a fresh root is still the same call — see
+   * `llm-call-cache.ts`'s `normalizeVolatilePaths` for why. Only read when `cacheStore` is also
+   * given; a `cacheStore`-less run never computes a cache key at all. */
+  volatilePaths?: readonly string[];
   credentialStore?: CredentialStore;
   costLedger: CostLedger;
   createSession?: CreateSessionFn;
@@ -355,7 +362,7 @@ export async function runPreferenceRegressionEpisode(
   const createSession = options.createSession ?? createMoriSession;
   const createKernel = options.createKernel ?? defaultCreateKernel;
   const streamFn = options.cacheStore
-    ? withLlmCallCache(options.streamFn, options.cacheStore)
+    ? withLlmCallCache(options.streamFn, options.cacheStore, undefined, options.volatilePaths)
     : options.streamFn;
   const baseDeps: RunCliDeps = {
     streamFn,

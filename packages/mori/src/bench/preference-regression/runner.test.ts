@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentMessage, StreamFn } from "@earendil-works/pi-agent-core";
 import type { Api, AssistantMessage, Model, Usage } from "@earendil-works/pi-ai";
-import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
+import { contentText, createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { MoriKernel } from "../../agent/index.js";
 import type { RunCliDeps } from "../../cli/types.js";
@@ -13,6 +13,7 @@ import type {
   MoriSessionTurn,
 } from "../../session.js";
 import { BENCH_AXES } from "../axes.js";
+import { FileLlmCallCacheStore } from "../cache/file-cache-store.js";
 import { createCostLedger } from "../cost-ledger.js";
 import type { PreferenceRegressionScenario } from "./scenarios.js";
 import { createMoriKernel, moriStoreExistsForId } from "../../kernel/index.js";
@@ -23,6 +24,7 @@ import {
   createReaderLlmJudge,
   PREFERENCE_REGRESSION_CONDITIONS,
   runPreferenceRegression,
+  runPreferenceRegressionEpisode,
   runPreferenceRegressionScenario,
 } from "./runner.js";
 
@@ -601,5 +603,165 @@ describe("runPreferenceRegressionScenario — 빈손 retrieval의 가시성 (#44
     // 아니라 «잰 것이 없었다»로도 통과해 버린다.
     expect(result.condition).toBe("memory-on");
     expect(computeAxisRates([result]).injectionHitRate).toBe(0);
+  });
+});
+
+/** A `StreamFn` double that answers every call with a fixed reply and counts its own
+ * invocations — lets a test observe whether an episode's session turns actually reach the
+ * provider or replay from cache (mirrors milestone.test.ts's `fakeEpisodeStreamFn`, #423/#445). */
+function fakeEpisodeStreamFn(): StreamFn & { calls: number } {
+  let calls = 0;
+  const fn: StreamFn = async (m) => {
+    calls += 1;
+    const message: AssistantMessage = {
+      role: "assistant",
+      content: [{ type: "text", text: "episode reply" }],
+      api: m.api,
+      provider: m.provider,
+      model: m.id,
+      usage: usage(),
+      stopReason: "stop",
+      timestamp: 0,
+    };
+    const stream = createAssistantMessageEventStream();
+    stream.push({ type: "start", partial: message });
+    stream.push({ type: "done", reason: "stop", message });
+    stream.end(message);
+    return stream;
+  };
+  Object.defineProperty(fn, "calls", { get: () => calls });
+  return fn as unknown as StreamFn & { calls: number };
+}
+
+/**
+ * `CreateSessionFn` double whose `prompt()` actually calls `deps.streamFn` (unlike
+ * `fakeHarness` above, whose `prompt()` never touches it) and folds `root` into the `Context`
+ * as a `ToolResultMessage` shaped exactly like what `bash`'s `pwd` produces
+ * (`tools/bash.ts`/`tools/bash-exec.ts`, and `agent/index.test.ts`'s "threads the injected root
+ * to both the path guard and bash's cwd") — the mechanism #445's `volatilePaths` normalizes.
+ * `compact()` is included for the `"memory-off"` condition's session-death carry-over.
+ */
+function toolRootEchoingHarness(
+  m: Model<Api>,
+  root: string,
+): { createSession: CreateSessionFn; createKernel: CreateKernelFn } {
+  const createKernel: CreateKernelFn = () => {
+    throw new Error("fixture: createKernel should not be called for a store-free condition");
+  };
+  const createSession: CreateSessionFn = (
+    _env: NodeJS.ProcessEnv,
+    deps: RunCliDeps,
+  ): Promise<CreateMoriSessionResult> =>
+    Promise.resolve({
+      ok: true,
+      session: {
+        async prompt(text: string): Promise<MoriSessionTurn> {
+          await deps.kernel?.transformContext([{ role: "user", content: text, timestamp: 0 }]);
+          if (!deps.streamFn) throw new Error("fixture: streamFn missing");
+          const stream = await deps.streamFn(m, {
+            messages: [
+              { role: "user", content: text, timestamp: 0 },
+              {
+                role: "toolResult",
+                toolCallId: "call-0",
+                toolName: "bash",
+                content: [{ type: "text", text: `${root}\n[exit code 0]` }],
+                isError: false,
+                timestamp: 0,
+              },
+            ],
+          });
+          const message = await stream.result();
+          return {
+            text: contentText(message.content),
+            stopReason: message.stopReason,
+            usage: message.usage,
+          };
+        },
+        consolidate: () => Promise.resolve({ kind: "ok" as const }),
+        compact: () => Promise.resolve({ summary: "unused fixture summary", usage: usage() }),
+        close: () => Promise.resolve(),
+      },
+    });
+  return { createSession, createKernel };
+}
+
+describe("runPreferenceRegressionEpisode cache + volatilePaths (#445)", () => {
+  let cacheDir: string;
+  let rootA: string;
+  let rootB: string;
+
+  beforeEach(async () => {
+    cacheDir = await mkdtemp(join(tmpdir(), "mori-445-episode-cache-"));
+    rootA = await mkdtemp(join(tmpdir(), "mori-445-episode-root-a-"));
+    rootB = await mkdtemp(join(tmpdir(), "mori-445-episode-root-b-"));
+  });
+
+  afterEach(async () => {
+    await rm(cacheDir, { recursive: true, force: true });
+    await rm(rootA, { recursive: true, force: true });
+    await rm(rootB, { recursive: true, force: true });
+  });
+
+  it("hits cache across two runs under different scratch roots once each run declares its own root as a volatilePath", async () => {
+    const m = model();
+    const scenario = fixtureScenario("vol-hit");
+    const cacheStore = new FileLlmCallCacheStore(cacheDir);
+
+    async function run(root: string, episodeStreamFn: StreamFn & { calls: number }) {
+      const harness = toolRootEchoingHarness(m, root);
+      return runPreferenceRegressionEpisode({
+        scenario,
+        condition: "memory-off",
+        root,
+        env: {},
+        streamFn: episodeStreamFn,
+        cacheStore,
+        volatilePaths: [root],
+        costLedger: createCostLedger(),
+        createSession: harness.createSession,
+        createKernel: harness.createKernel,
+      });
+    }
+
+    const firstStream = fakeEpisodeStreamFn();
+    await run(rootA, firstStream);
+    // Two context turns + one follow-up turn for this fixture scenario.
+    expect(firstStream.calls).toBe(3);
+
+    const secondStream = fakeEpisodeStreamFn();
+    await run(rootB, secondStream);
+    expect(secondStream.calls).toBe(0);
+  });
+
+  // Reverse-direction guard: the hit above comes from `volatilePaths` normalizing the roots
+  // out, not from the two runs' contexts already coinciding for some other reason.
+  it("misses cache across two runs under different scratch roots when volatilePaths is omitted", async () => {
+    const m = model();
+    const scenario = fixtureScenario("vol-miss");
+    const cacheStore = new FileLlmCallCacheStore(cacheDir);
+
+    async function run(root: string, episodeStreamFn: StreamFn & { calls: number }) {
+      const harness = toolRootEchoingHarness(m, root);
+      return runPreferenceRegressionEpisode({
+        scenario,
+        condition: "memory-off",
+        root,
+        env: {},
+        streamFn: episodeStreamFn,
+        cacheStore,
+        costLedger: createCostLedger(),
+        createSession: harness.createSession,
+        createKernel: harness.createKernel,
+      });
+    }
+
+    const firstStream = fakeEpisodeStreamFn();
+    await run(rootA, firstStream);
+    expect(firstStream.calls).toBe(3);
+
+    const secondStream = fakeEpisodeStreamFn();
+    await run(rootB, secondStream);
+    expect(secondStream.calls).toBe(3);
   });
 });
