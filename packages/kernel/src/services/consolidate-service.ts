@@ -2112,6 +2112,13 @@ export interface ConsolidateParams {
    * treat them as stored" branch of the offset-advance check below (#139).
    */
   segmentRetention?: PruneOptions;
+  /**
+   * #449: forwarded verbatim to the extraction call as {@link ConsolidatorLlmCallOptions.onUsage}
+   * — see that field's own doc for why this stays opaque (`unknown`) rather than a typed usage
+   * shape. Only reaches the extractor when this boundary actually calls one (llm-backed,
+   * non-empty window) — a noop boundary or a rule-based extractor never fires it.
+   */
+  onUsage?: (usage: unknown) => void;
 }
 
 /**
@@ -2523,7 +2530,10 @@ export async function consolidate(params: ConsolidateParams): Promise<Consolidat
           ...(bounded.transcriptTail ? { transcriptTail: bounded.transcriptTail } : {}),
           existingMemories: bounded.existingMemories,
         },
-        extractionSignal ? { signal: extractionSignal } : undefined,
+        {
+          ...(extractionSignal ? { signal: extractionSignal } : {}),
+          ...(params.onUsage ? { onUsage: params.onUsage } : {}),
+        },
       );
     } catch (error) {
       // A request the lock's signal killed rejects with whatever the transport

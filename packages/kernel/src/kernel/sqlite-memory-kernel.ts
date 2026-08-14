@@ -807,6 +807,7 @@ export class SqliteMemoryKernel<M, E> implements MemoryKernel<M, E> {
         ...(this.options.sessionId ? { sessionId: this.options.sessionId } : {}),
         ...(boundary ? { boundary } : {}),
         ...(opts?.signal ? { signal: opts.signal } : {}),
+        ...(opts?.onUsage ? { onUsage: opts.onUsage } : {}),
         // #158: the second, independent cancellation source — see
         // `ConsolidateParams.lockSignal` for how the two combine and why they
         // reject with different errors.
