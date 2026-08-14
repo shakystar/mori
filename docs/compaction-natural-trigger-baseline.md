@@ -4,7 +4,15 @@
 > 그 시점의 실측이며 오늘의 코드를 보증하지 않는다. **갱신하지 않는다** — 낡으면 새 문서가
 > 대체(supersede)한다.
 
-[#442](https://github.com/shakystar/mori/issues/442)의 결과 문서다 — `packages/mori/src/cli/compaction-baseline.test.ts`(새 시험)의 실측을 기록한다.
+[#442](https://github.com/shakystar/mori/issues/442)의 결과 문서다 — `packages/mori/src/cli/compaction.test.ts`의
+`describe("compactIfContextFull", …)`에 속한 `"retains the recent file path across a
+naturally-triggered compaction"` / `"loses the older decision once it falls past the retained
+tail"` 두 시험의 실측을 기록한다.
+
+트리거 기법(`OVER_THRESHOLD` 주입·`LONG_REPLY_CHARS`)은 같은 `describe` 블록의 기존 자연
+발화 시험(`"shrinks the next turn's context to the summary plus the retained tail once
+compaction fires"`, #413)에서 그대로 가져왔다. 이 문서가 더하는 것은 #7의 완료 조건 문구에
+맞춘 결정/경로 회상 프레이밍과, 컷포인트·잘려나간 메시지 수·요약 전문의 기록이다.
 
 ## 결론
 
@@ -25,10 +33,11 @@ model.contextWindow - DEFAULT_COMPACTION_SETTINGS.reserveTokens`.
   `reserveTokens = 16384` → 발화 임계는 컨텍스트 토큰 `983,616` 초과.
 - **도달 방법: 임계 주입** (이슈가 권한 저비용 경로). 실제 창을 채우는 대신, 세 번째 턴의
   provider 응답에 `usage.totalTokens = 10,000,000`을 스크립트로 보고시켜 `shouldCompact`가
-  그 턴 직후 참을 반환하게 만들었다 — `compaction.test.ts`가 이미 쓰는 동일한 기법
-  (`OVER_THRESHOLD`)이다. 컨텍스트 자체는 `session.compact()`를 직접 부르지 않았다:
+  그 턴 직후 참을 반환하게 만들었다 — 같은 파일의 기존 자연 발화 시험이 이미 쓰는 동일한
+  기법(`OVER_THRESHOLD`)이다. 컨텍스트 자체는 `session.compact()`를 직접 부르지 않았다:
   `compactIfContextFull(agent, onError)`을 매 턴 뒤 호출해, 그 함수 내부의 임계 판정이 스스로
-  `agent.compact()`를 부르게 했다(`rg -n 'compact\(\)' packages/mori/src/cli/compaction-baseline.test.ts` = 0건).
+  `agent.compact()`를 부르게 했다(`rg -n '\.compact\(' packages/mori/src/cli/compaction.test.ts` = 0건 —
+  파일에 다른 시험의 이름·주석에 등장하는 "compact()"라는 글자는 있지만 실제 메서드 호출은 없다).
 - `retainedTail`이 실제로 무언가를 남기게 하려면(=컷할 이력이 있으려면) 턴 응답 하나가
   `keepRecentTokens`(20,000 토큰 ≈ 80,000자, pi의 chars/4 어림)를 혼자 넘어서야 한다 — 그래서
   각 턴 본문을 84,000자로 채웠다(`LONG_REPLY_CHARS`, 역시 `compaction.test.ts`와 동일 상수).
@@ -81,7 +90,7 @@ COMPACTED-SUMMARY
 | 결정 1건 (`결정: 세션 저장소를 SQLite에서 Postgres로 옮긴다`) | 턴1 (요약 대상 구간)            | **아니오** — 사라짐         |
 | 파일 경로 1건 (`packages/mori/src/session.ts`)                | 턴3 (압축 직전 최근 구간, tail) | **예** — verbatim 유지      |
 
-대응 시험: `compaction-baseline.test.ts`의
+대응 시험: `compaction.test.ts`의 `describe("compactIfContextFull", …)` 안
 `"retains the recent file path across a naturally-triggered compaction"`(경로) /
 `"loses the older decision once it falls past the retained tail"`(결정) — 각 사실당 시험
 하나, 총 2건.

@@ -47,6 +47,15 @@ function usage(totalTokens: number): Usage {
 const OVER_THRESHOLD = usage(10_000_000);
 const UNDER_THRESHOLD = usage(100);
 
+/** The decision fact planted in turn 1 — old enough by turn 4 that only the compaction
+ * summary (not the retained tail) could still carry it. */
+const PLANTED_DECISION = "결정: 세션 저장소를 SQLite에서 Postgres로 옮긴다";
+
+/** The file-path fact planted in turn 3 — the turn whose reported usage crosses the
+ * threshold, so it is the most recent content once compaction fires and lands in
+ * `retainedTail`. */
+const PLANTED_FILE_PATH = "packages/mori/src/session.ts";
+
 interface ScriptedTurn {
   text: string;
   usage: Usage;
@@ -150,6 +159,40 @@ function textOf(context: Context): string {
     .join("\n");
 }
 
+/**
+ * Plants a decision fact (turn 1) and a file-path fact (turn 3), then re-asks for both on
+ * turn 4 — same trigger technique as this describe block's
+ * "shrinks the next turn's context to the summary plus the retained tail once compaction
+ * fires" test, framed to match #7's completion criteria ("decision + file path recall across
+ * a naturally-triggered compaction"). The cut point, message count, and the summary text this
+ * scripted provider produces are recorded in docs/compaction-natural-trigger-baseline.md (#442).
+ */
+async function runRecallScenario() {
+  const provider = scriptedProvider([
+    { text: `${PLANTED_DECISION}\n${"x".repeat(LONG_REPLY_CHARS)} TURN-1`, usage: UNDER_THRESHOLD },
+    { text: `${"x".repeat(LONG_REPLY_CHARS)} TURN-2`, usage: UNDER_THRESHOLD },
+    {
+      text: `${PLANTED_FILE_PATH}\n${"x".repeat(LONG_REPLY_CHARS)} TURN-3`,
+      usage: OVER_THRESHOLD,
+    },
+    { text: "OK", usage: UNDER_THRESHOLD },
+  ]);
+  const agent = agentOn(spyKernel(), provider.streamFn);
+  const errors: string[] = [];
+
+  for (const prompt of ["one", "two", "three"]) {
+    await agent.prompt(prompt);
+    await compactIfContextFull(agent, (message) => errors.push(message));
+  }
+  await agent.prompt("그때 어떤 결정을 내렸고 어떤 파일을 다뤘는지 알려줘.");
+
+  expect(errors).toEqual([]);
+  return {
+    beforeCompaction: provider.turnRequests[2]!,
+    afterCompaction: provider.turnRequests[3]!,
+  };
+}
+
 describe("compactIfContextFull", () => {
   it("shrinks the next turn's context to the summary plus the retained tail once compaction fires", async () => {
     // The only observable definition of "compaction is switched on": what the provider is
@@ -242,5 +285,24 @@ describe("compactIfContextFull", () => {
 
     expect(last.stopReason).toBe("stop");
     expect(kernel.boundaries).toEqual([]);
+  });
+
+  it("retains the recent file path across a naturally-triggered compaction", async () => {
+    const { afterCompaction } = await runRecallScenario();
+
+    // Confirms the trigger actually fired (not just "nothing changed, so nothing was lost").
+    expect(textOf(afterCompaction)).toContain("COMPACTED-SUMMARY");
+    expect(textOf(afterCompaction)).toContain(PLANTED_FILE_PATH);
+  });
+
+  it("loses the older decision once it falls past the retained tail", async () => {
+    const { beforeCompaction, afterCompaction } = await runRecallScenario();
+
+    // It was there before the boundary…
+    expect(textOf(beforeCompaction)).toContain(PLANTED_DECISION);
+    // …and isn't after: today's fixed-placeholder summarizer carries no content of its own,
+    // so anything the deterministic retained-tail cut doesn't keep verbatim is gone. A real
+    // summarizer's fidelity for this case is not what this scripted baseline measures.
+    expect(textOf(afterCompaction)).not.toContain(PLANTED_DECISION);
   });
 });
