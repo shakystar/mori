@@ -15,7 +15,9 @@ import type {
 import { BENCH_AXES } from "../axes.js";
 import { createCostLedger } from "../cost-ledger.js";
 import type { PreferenceRegressionScenario } from "./scenarios.js";
+import { createMoriKernel, moriStoreExistsForId } from "../../kernel/index.js";
 import {
+  computeAxisRates,
   type CreateKernelFn,
   type CreateSessionFn,
   createReaderLlmJudge,
@@ -528,5 +530,76 @@ describe("runPreferenceRegression (#387)", () => {
     const secondStream = fakeJudgeStreamFn();
     await run(secondStream);
     expect(secondStream.calls).toBe(0);
+  });
+});
+
+/**
+ * #446 — 주입 적중률 33.3%의 원인은 「retrieval이 못 찾았다」가 아니라 「찾아갈 스토어가
+ * 없었다」였다. 진단 정본은 `docs/bench/injection-miss-diagnosis-2026-08-14.md`.
+ *
+ * 이 describe만 커널 더블(`fakeKernel`) 대신 **진짜** `createMoriKernel`을 쓴다. 더블은
+ * `injects: true|false`를 그냥 선언하므로, 여기서 재는 것 — 캡처가 0건이면 스토어가 생기지
+ * 않고 그래서 주입이 빌 수밖에 없다는 인과 — 을 구조적으로 표현할 수 없다. 세션 쪽은
+ * 더블 그대로다: `fakeHarness`의 `prompt()`는 `kernel.observe`를 한 번도 부르지 않는데,
+ * 그것이 정확히 이 이슈가 실측한 상황(맥락 세션이 대화만 하고 쓰기·셸 도구를 안 쓴다)이다.
+ */
+describe("runPreferenceRegressionScenario — 빈손 retrieval의 가시성 (#446)", () => {
+  let root: string;
+  let memorizeRoot: string;
+  let previousMemorizeRoot: string | undefined;
+
+  beforeEach(async () => {
+    root = await mkdtemp(join(tmpdir(), "mori-injection-miss-work-"));
+    memorizeRoot = await mkdtemp(join(tmpdir(), "mori-injection-miss-store-"));
+    // `path-resolver`가 스레드로 전달된 env가 아니라 `process.env`에서 직접 읽는다
+    // (`PreferenceRegressionOptions.memorizeRoot`의 같은 이유) — 이 테스트는
+    // `runPreferenceRegression`을 거치지 않으므로 그 격리를 여기서 직접 건다.
+    previousMemorizeRoot = process.env.MEMORIZE_ROOT;
+    process.env.MEMORIZE_ROOT = memorizeRoot;
+  });
+
+  afterEach(async () => {
+    if (previousMemorizeRoot === undefined) delete process.env.MEMORIZE_ROOT;
+    else process.env.MEMORIZE_ROOT = previousMemorizeRoot;
+    await rm(root, { recursive: true, force: true });
+    await rm(memorizeRoot, { recursive: true, force: true });
+  });
+
+  it("memory-on: a context session that captures nothing leaves the follow-up with an empty store, and the report says so instead of swallowing it", async () => {
+    const followUpKernel = createMoriKernel({ root, sessionId: "follow-up", env: {} });
+    const harness = fakeHarness({
+      context: createMoriKernel({ root, sessionId: "context", env: {} }),
+      "follow-up": followUpKernel,
+    });
+
+    const result = await runPreferenceRegressionScenario({
+      scenario: fixtureScenario("no-capture"),
+      condition: "memory-on",
+      root,
+      env: {},
+      streamFn: async () => {
+        throw new Error("streamFn should not be called directly by the fake harness");
+      },
+      costLedger: createCostLedger(),
+      scoringJudge: { judge: () => Promise.resolve(true) },
+      reQuestionJudge: { judge: () => Promise.resolve(true) },
+      createSession: harness.createSession,
+      createKernel: harness.createKernel,
+    });
+
+    // 스토어는 첫 capture가 만든다(`ensureGenesis`). 캡처가 0건이면 파일 자체가 없고,
+    // `transformContext`는 `projectStoreExists` 게이트에서 반환한다 — 임계·예산 판정에
+    // 도달하지 못하므로 (c)와 구별된다. 후속 세션 커널이 **실제로 연 그 id**로 묻는다
+    // (`moriStoreExistsForId`, #230): `moriStoreExists(root)`는 디스크에서 identity를 다시
+    // 풀기 때문에, 엉뚱한 id를 조회해도 똑같이 false가 나와 단언이 공허해질 수 있다.
+    expect(moriStoreExistsForId(followUpKernel.projectId)).toBe(false);
+    expect(result.injected).toBe(false);
+    // 그리고 그 사실이 계기판에 남는다. 이 팔이 아무것도 못 받은 회차가 조용히 지나가면
+    // ON−OFF 델타가 「기억의 이득」이 아니라 「주입이 있었는지」를 재게 된다 (#401 실측).
+    // `condition`을 먼저 못박는 이유는 `computeAxisRates`의 분모가 ON 팔 하나여서다 — ON이
+    // 아닌 결과만 넣으면 분모가 0이 되고 `rate()`가 0을 돌려주므로, 이 단언이 «주입이 없었다»가
+    // 아니라 «잰 것이 없었다»로도 통과해 버린다.
+    expect(result.condition).toBe("memory-on");
+    expect(computeAxisRates([result]).injectionHitRate).toBe(0);
   });
 });
