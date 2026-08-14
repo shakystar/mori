@@ -210,6 +210,12 @@ export async function runPreferenceRegressionMilestone(
             env,
             streamFn: options.streamFn,
             cacheStore,
+            // #445: `root` and `memorizeRoot` are both fresh `mkdtemp` scratch roots (docs on
+            // `MilestoneBatchOptions.workRoot`/`memorizeRoot` above) that a tool result's
+            // content can echo verbatim (`bash`'s `pwd`, or `env` surfacing `MEMORIZE_ROOT`) —
+            // without normalizing them out, a phase (a) rerun against the same `cacheDir`
+            // would miss on every episode whose tool round trip happened to touch either.
+            volatilePaths: [root, options.memorizeRoot],
             ...(options.credentialStore ? { credentialStore: options.credentialStore } : {}),
             costLedger,
             ...(options.createSession ? { createSession: options.createSession } : {}),
