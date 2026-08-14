@@ -270,4 +270,57 @@ describe("llmCallCacheKey", () => {
     const b = llmCallCacheKey(model({ id: "claude-opus-4-6" }), context());
     expect(a).not.toBe(b);
   });
+
+  // #445: the per-run varying component turned out to be each message's own `timestamp`
+  // (stamped with wall-clock `Date.now()` by pi-agent-core on a real `MoriSession.prompt()`
+  // turn — see `dropTimestamps`'s doc, llm-call-cache.ts), not the `workRoot`/`memorizeRoot`
+  // `mkdtemp` scratch paths #401 first suspected.
+  it("is the same key across two 'runs' whose messages differ only in timestamp", () => {
+    const runOne = context({
+      messages: [
+        { role: "user", content: "hello", timestamp: 1_000 },
+        {
+          role: "assistant",
+          content: [{ type: "text", text: "hi there" }],
+          api: "anthropic-messages",
+          provider: "anthropic",
+          model: "claude-sonnet-4-6",
+          usage: USAGE,
+          stopReason: "stop",
+          timestamp: 1_500,
+        },
+      ],
+    });
+    const runTwo = context({
+      messages: [
+        { role: "user", content: "hello", timestamp: 9_999_000 },
+        {
+          role: "assistant",
+          content: [{ type: "text", text: "hi there" }],
+          api: "anthropic-messages",
+          provider: "anthropic",
+          model: "claude-sonnet-4-6",
+          usage: USAGE,
+          stopReason: "stop",
+          timestamp: 9_999_500,
+        },
+      ],
+    });
+
+    expect(llmCallCacheKey(model(), runOne)).toBe(llmCallCacheKey(model(), runTwo));
+  });
+
+  // Reverse-direction guard: dropping `timestamp` must not swallow an actual difference in
+  // what the model saw or produced.
+  it("still differs when message content differs, timestamps aside", () => {
+    const a = llmCallCacheKey(
+      model(),
+      context({ messages: [{ role: "user", content: "hello", timestamp: 1_000 }] }),
+    );
+    const b = llmCallCacheKey(
+      model(),
+      context({ messages: [{ role: "user", content: "goodbye", timestamp: 1_000 }] }),
+    );
+    expect(a).not.toBe(b);
+  });
 });

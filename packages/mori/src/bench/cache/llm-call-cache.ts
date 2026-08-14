@@ -43,6 +43,39 @@ function modelIdentity(model: Model<Api>) {
   return { provider: model.provider, id: model.id, api: model.api };
 }
 
+/**
+ * Strips `timestamp` recursively before hashing (#445). Every `Message` variant `Context`
+ * carries (`UserMessage`/`AssistantMessage`/`ToolResultMessage`, pi-ai's `types.ts`) has a
+ * `timestamp: number` field, and a real `MoriSession.prompt()` turn stamps it with wall-clock
+ * `Date.now()` — pi-agent-core's own `agent.js` (user prompt → `Message`) and `agent-loop.js`
+ * (assistant/tool-result messages) do this, not mori's code, so nothing in this repo controls
+ * it. None of that affects what the model is asked to produce, so a call replayed on a later
+ * run must not miss merely because wall-clock time moved between the two runs.
+ *
+ * This is the actual cause of #401's gate-condition-1 failure (observed in PR #444, cut into
+ * this issue as #445): reproduced with a stub provider (`session.ts`'s `createMoriSession` +
+ * a scripted `StreamFn`, no real API call) driving the same one-turn prompt through two
+ * `MoriSession`s a few milliseconds apart — the two resulting `Context.messages` differ in
+ * exactly one field, `messages[0].timestamp` (e.g. `1786736513577` vs `1786736513654`), and
+ * that alone was enough to flip `llmCallCacheKey`'s hash. The `workRoot`/`memorizeRoot`
+ * per-run `mkdtemp` scratch paths #401 first suspected were ruled out instead: every tool
+ * mori's default toolset emits (`tools/index.ts`) describes "the working root" generically in
+ * its schema and never interpolates the literal path into anything that reaches `Context`.
+ */
+function dropTimestamps(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(dropTimestamps);
+  if (value !== null && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    const out: Record<string, unknown> = {};
+    for (const key of Object.keys(record)) {
+      if (key === "timestamp") continue;
+      out[key] = dropTimestamps(record[key]);
+    }
+    return out;
+  }
+  return value;
+}
+
 /** Deterministic serialization: object keys are sorted so two calls built with the same
  * literal content but different key-insertion order still hash to the same cache key. */
 function stableStringify(value: unknown): string {
@@ -58,8 +91,9 @@ function stableStringify(value: unknown): string {
 }
 
 /** The full (모델, 프롬프트, 파라미터) cache key, hashed to a fixed-length id suitable for a
- * filename. "프롬프트" is the full `Context` (system prompt, messages, tools) — anything in
- * it changes what the model sees, so all of it is load-bearing. */
+ * filename. "프롬프트" is the full `Context` (system prompt, messages, tools) — everything in
+ * it is load-bearing except each message's own `timestamp`, dropped by `dropTimestamps` above
+ * because it carries wall-clock time rather than anything the model sees. */
 export function llmCallCacheKey(
   model: Model<Api>,
   context: Context,
@@ -67,7 +101,7 @@ export function llmCallCacheKey(
 ): string {
   const keyed = {
     model: modelIdentity(model),
-    context,
+    context: dropTimestamps(context),
     params: generationParams(options),
   };
   return createHash("sha256").update(stableStringify(keyed)).digest("hex");
