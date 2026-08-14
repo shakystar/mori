@@ -42,7 +42,16 @@ function fixtureReport(
     // 걸리므로, 그 상태는 전용 케이스에서만 만든다.
     killSwitch: killSwitch ?? {
       threshold: KILL_SWITCH_GAP_THRESHOLD,
-      scenarios: [{ scenarioId: "s1", oracleScore: 1, offScore: 0, gap: 1, invalid: false }],
+      scenarios: [
+        {
+          scenarioId: "s1",
+          oracleScore: 1,
+          offScore: 0,
+          gap: 1,
+          sampleSizes: { oracle: 1, off: 1 },
+          invalid: false,
+        },
+      ],
       invalid: false,
     },
   };
@@ -115,7 +124,16 @@ describe("reportNightlySliceOutcome (#416: 0건 그린 구멍)", () => {
     const code = reportNightlySliceOutcome(
       fixtureReport([fixtureScenarioResult()], {
         threshold: KILL_SWITCH_GAP_THRESHOLD,
-        scenarios: [{ scenarioId: "s1", oracleScore: 0.5, offScore: 0.5, gap: 0, invalid: true }],
+        scenarios: [
+          {
+            scenarioId: "s1",
+            oracleScore: 0.5,
+            offScore: 0.5,
+            gap: 0,
+            sampleSizes: { oracle: 1, off: 1 },
+            invalid: true,
+          },
+        ],
         invalid: true,
       }),
       "bench-reports/out.json",

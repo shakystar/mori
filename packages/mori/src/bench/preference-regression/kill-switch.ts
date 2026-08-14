@@ -23,6 +23,12 @@ export interface KillSwitchScenarioVerdict {
   /** `oracleScore - offScore`. 음수면 OFF가 ORACLE을 앞섰다는 뜻이고, 그 경우도 임계값 미만과
    * 마찬가지로 무효다 — 정답을 준 팔이 못 준 팔보다 못하다면 그 자체가 채점 신뢰성 문제다. */
   gap: number;
+  /** 각 팔의 평균에 쓰인 표본 수. 어긋나면 gap이 표본 불균형의 산물일 수 있다 — 반복 실행에서
+   * 한 팔의 일부 회차만 실패해 스킵되면 서로 다른 크기의 표본끼리 평균이 비교되고, 그때
+   * "간격이 임계값을 넘었다/못 넘었다"는 판정이 실제 신호가 아니라 불균형의 산물일 수 있다.
+   * 판정 자체는 이 값으로 바꾸지 않는다(무엇이 옳은 보정인지 이 데이터만으로는 정할 수 없다) —
+   * 리포트에 남겨 사후 진단이 가능하게만 한다. */
+  sampleSizes: { oracle: number; off: number };
   invalid: boolean;
 }
 
@@ -45,10 +51,13 @@ function scoreFor(
   results: readonly ScenarioRunResult[],
   scenarioId: string,
   condition: PreferenceRegressionCondition,
-): number | undefined {
+): { mean: number; sampleSize: number } | undefined {
   const matches = results.filter((r) => r.scenarioId === scenarioId && r.condition === condition);
   if (matches.length === 0) return undefined;
-  return matches.reduce((sum, r) => sum + r.score.score, 0) / matches.length;
+  return {
+    mean: matches.reduce((sum, r) => sum + r.score.score, 0) / matches.length,
+    sampleSize: matches.length,
+  };
 }
 
 /**
@@ -63,16 +72,17 @@ export function computeKillSwitchReport(results: readonly ScenarioRunResult[]): 
 
   const scenarios: KillSwitchScenarioVerdict[] = [];
   for (const scenarioId of scenarioIds) {
-    const oracleScore = scoreFor(results, scenarioId, "oracle");
-    const offScore = scoreFor(results, scenarioId, "memory-off");
-    if (oracleScore === undefined || offScore === undefined) continue;
+    const oracle = scoreFor(results, scenarioId, "oracle");
+    const off = scoreFor(results, scenarioId, "memory-off");
+    if (oracle === undefined || off === undefined) continue;
 
-    const gap = oracleScore - offScore;
+    const gap = oracle.mean - off.mean;
     scenarios.push({
       scenarioId,
-      oracleScore,
-      offScore,
+      oracleScore: oracle.mean,
+      offScore: off.mean,
       gap,
+      sampleSizes: { oracle: oracle.sampleSize, off: off.sampleSize },
       invalid: gap < KILL_SWITCH_GAP_THRESHOLD,
     });
   }

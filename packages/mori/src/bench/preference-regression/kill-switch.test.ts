@@ -29,7 +29,14 @@ describe("computeKillSwitchReport (#435)", () => {
 
     expect(report.threshold).toBe(KILL_SWITCH_GAP_THRESHOLD);
     expect(report.scenarios).toEqual([
-      { scenarioId: "s1", oracleScore: 0.5, offScore: 0.5, gap: 0, invalid: true },
+      {
+        scenarioId: "s1",
+        oracleScore: 0.5,
+        offScore: 0.5,
+        gap: 0,
+        sampleSizes: { oracle: 1, off: 1 },
+        invalid: true,
+      },
     ]);
     expect(report.invalid).toBe(true);
   });
@@ -48,8 +55,30 @@ describe("computeKillSwitchReport (#435)", () => {
 
     // oracle mean = (0 + 9*1)/10 = 0.9, off mean = 0 → gap = 0.9, well above threshold.
     expect(report.scenarios).toEqual([
-      { scenarioId: "s1", oracleScore: 0.9, offScore: 0, gap: 0.9, invalid: false },
+      {
+        scenarioId: "s1",
+        oracleScore: 0.9,
+        offScore: 0,
+        gap: 0.9,
+        sampleSizes: { oracle: 10, off: 10 },
+        invalid: false,
+      },
     ]);
     expect(report.invalid).toBe(false);
+  });
+
+  it("records each arm's sample size so an unbalanced gap is diagnosable after the fact (owner review, PR #444)", () => {
+    // ORACLE ran 10 repeats, OFF only 2 — the gap here is real (1.0 vs 0.0) but a reader of the
+    // report cannot tell balanced from unbalanced averages unless the counts are carried along.
+    const results: ScenarioRunResult[] = [
+      ...Array.from({ length: 10 }, () => fixtureResult("oracle", 1)),
+      ...Array.from({ length: 2 }, () => fixtureResult("memory-off", 0)),
+    ];
+
+    const report = computeKillSwitchReport(results);
+
+    expect(report.scenarios[0]?.sampleSizes).toEqual({ oracle: 10, off: 2 });
+    // 표본 불균형은 기록만 한다 — 판정은 여전히 gap으로만 선다.
+    expect(report.scenarios[0]?.invalid).toBe(false);
   });
 });
