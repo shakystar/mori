@@ -270,4 +270,113 @@ describe("llmCallCacheKey", () => {
     const b = llmCallCacheKey(model({ id: "claude-opus-4-6" }), context());
     expect(a).not.toBe(b);
   });
+
+  // #445: the per-run varying component turned out to be each message's own `timestamp`
+  // (stamped with wall-clock `Date.now()` by pi-agent-core on a real `MoriSession.prompt()`
+  // turn — see `dropMessageTimestamps`'s doc, llm-call-cache.ts).
+  it("is the same key across two 'runs' whose messages differ only in timestamp", () => {
+    const runOne = context({
+      messages: [
+        { role: "user", content: "hello", timestamp: 1_000 },
+        {
+          role: "assistant",
+          content: [{ type: "text", text: "hi there" }],
+          api: "anthropic-messages",
+          provider: "anthropic",
+          model: "claude-sonnet-4-6",
+          usage: USAGE,
+          stopReason: "stop",
+          timestamp: 1_500,
+        },
+      ],
+    });
+    const runTwo = context({
+      messages: [
+        { role: "user", content: "hello", timestamp: 9_999_000 },
+        {
+          role: "assistant",
+          content: [{ type: "text", text: "hi there" }],
+          api: "anthropic-messages",
+          provider: "anthropic",
+          model: "claude-sonnet-4-6",
+          usage: USAGE,
+          stopReason: "stop",
+          timestamp: 9_999_500,
+        },
+      ],
+    });
+
+    expect(llmCallCacheKey(model(), runOne)).toBe(llmCallCacheKey(model(), runTwo));
+  });
+
+  // Reverse-direction guard: dropping `timestamp` must not swallow an actual difference in
+  // what the model saw or produced.
+  it("still differs when message content differs, timestamps aside", () => {
+    const a = llmCallCacheKey(
+      model(),
+      context({ messages: [{ role: "user", content: "hello", timestamp: 1_000 }] }),
+    );
+    const b = llmCallCacheKey(
+      model(),
+      context({ messages: [{ role: "user", content: "goodbye", timestamp: 1_000 }] }),
+    );
+    expect(a).not.toBe(b);
+  });
+
+  // PR #447 review round 2 (P2/#445 item 2): `dropMessageTimestamps` only strips each
+  // message's own top-level `timestamp`, not any key named `timestamp` anywhere in the tree —
+  // a `timestamp` living inside a tool result's structured `details` (`ToolResultMessage`'s
+  // `TDetails = any`) still changes the key, so two calls whose tool actually returned
+  // different data can't be folded into the same cache entry.
+  it("still differs when a `timestamp` nested inside a tool result's details differs, top-level message timestamps aside", () => {
+    const toolResult = (detailsTimestamp: number) => ({
+      role: "toolResult" as const,
+      toolCallId: "call-1",
+      toolName: "bash",
+      content: [{ type: "text" as const, text: "exit code 0" }],
+      details: { ok: true, timestamp: detailsTimestamp },
+      isError: false,
+      timestamp: 5_000,
+    });
+
+    const a = llmCallCacheKey(model(), context({ messages: [toolResult(111)] }));
+    const b = llmCallCacheKey(model(), context({ messages: [toolResult(222)] }));
+    expect(a).not.toBe(b);
+  });
+
+  // #445 item 1 (owner rework round 2): a per-run scratch root (`workRoot`/`memorizeRoot`)
+  // reaches `Context` not through a field named `timestamp` but through a tool result's
+  // *content* — `bash`'s cwd is pinned to it, so a command as ordinary as `pwd` embeds the
+  // literal path verbatim (proven by `agent/index.test.ts`'s "threads the injected root to
+  // both the path guard and bash's cwd"). Two runs under different scratch roots must still
+  // hit the same cache entry once the caller declares those roots as `volatilePaths`.
+  it("is the same key across two 'runs' whose tool-result content differs only in the volatile scratch root", () => {
+    const rootA = "/tmp/mori-bench-x9f2a/s1/on";
+    const rootB = "/tmp/mori-bench-9k41c/s1/on";
+    const toolResultAt = (root: string) => ({
+      role: "toolResult" as const,
+      toolCallId: "call-1",
+      toolName: "bash",
+      content: [{ type: "text" as const, text: `${root}\n[exit code 0]` }],
+      details: { ok: true, command: "pwd", stdout: `${root}\n`, exitCode: 0 },
+      isError: false,
+      timestamp: 5_000,
+    });
+
+    const runOne = context({
+      messages: [{ role: "user", content: "where are we", timestamp: 1_000 }, toolResultAt(rootA)],
+    });
+    const runTwo = context({
+      messages: [{ role: "user", content: "where are we", timestamp: 1_000 }, toolResultAt(rootB)],
+    });
+
+    const keyOne = llmCallCacheKey(model(), runOne, { volatilePaths: [rootA] });
+    const keyTwo = llmCallCacheKey(model(), runTwo, { volatilePaths: [rootB] });
+    expect(keyOne).toBe(keyTwo);
+
+    // Reverse-direction guard: without declaring the roots, the two runs are genuinely
+    // different serialized keys — the equality above comes from the normalization, not from
+    // the two contexts already being equal by coincidence.
+    expect(llmCallCacheKey(model(), runOne)).not.toBe(llmCallCacheKey(model(), runTwo));
+  });
 });
