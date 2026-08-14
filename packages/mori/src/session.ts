@@ -38,6 +38,19 @@ export interface MoriSessionCompaction {
   usage: Usage;
 }
 
+/** What a single `MoriSession.close()` call produced (#449). */
+export interface MoriSessionClose {
+  /**
+   * Usage of the session-end consolidation boundary's own distillation LLM call — zero when
+   * consolidation is unconfigured, the boundary was a no-op (nothing to distill), or the
+   * boundary failed before the extraction call (`consolidateOnSessionEnd` swallows that
+   * failure, same as before this field existed). This is the number PR #448 §5-a found
+   * missing from every ledger: `close()`'s session-end distillation call previously landed
+   * in no caller's cost accounting at all.
+   */
+  usage: Usage;
+}
+
 /**
  * A programmatic, TTY-free multi-turn mori session (#341, #340 조각 1/5) — the shape a
  * benchmark harness drives an episode through: create once, `prompt()` per turn,
@@ -107,8 +120,13 @@ export interface MoriSession {
    * that arrives mid-turn (the caller never awaited `prompt()` before calling it — an episode
    * timeout/abort path, not a bug) waits behind that turn instead of draining around it. A turn's
    * late-arriving observation is never silently unsettled at episode end.
+   *
+   * Resolves with the session-end boundary's own usage (#449, `MoriSessionClose`) — before
+   * this, the distillation LLM call `close()` makes internally spent tokens no caller could
+   * see. Every concurrent/repeat caller gets the SAME `MoriSessionClose`, matching the
+   * "shares the same underlying settle" guarantee above.
    */
-  close(): Promise<void>;
+  close(): Promise<MoriSessionClose>;
 }
 
 export type CreateMoriSessionResult =
@@ -147,7 +165,7 @@ export async function createMoriSession(
   // In-flight/settled close(), not a boolean: a second call — concurrent or later — must
   // observe the *same* settle as the first, not a premature "done" while drain()/session-end
   // are still running (owner review, PR #350).
-  let closePromise: Promise<void> | undefined;
+  let closePromise: Promise<MoriSessionClose> | undefined;
 
   function assertOpen(method: string): void {
     if (closePromise) {
@@ -242,7 +260,7 @@ export async function createMoriSession(
         });
       },
 
-      close(): Promise<void> {
+      close(): Promise<MoriSessionClose> {
         // Assigning the promise synchronously — before any `await` runs — is what makes this
         // safe under concurrency: a second `close()` that arrives before the first has settled
         // still sees `closePromise` already set (there is no gap where two calls could each
@@ -257,7 +275,17 @@ export async function createMoriSession(
           // Same ordering as runPrompt's finally (cli/runtime.ts): drain queued observations
           // before the session-end trigger, so the boundary sees everything this episode did.
           await kernel.drain();
-          await consolidateOnSessionEnd(kernel, sessionEndLlm(llm, projectId), stderr);
+          // Usage capture (#449): `consolidateGuarded` (cli/consolidation.ts) serializes every
+          // boundary on this kernel onto one chain, so no OTHER trigger's extraction call can
+          // be in flight while this one runs — accumulating every `onUsage` firing during this
+          // one `consolidateOnSessionEnd` call is therefore exactly this boundary's own usage,
+          // never another boundary's. `sumUsage` (not last-write) because nothing in the
+          // extractor contract promises exactly one `complete()` call per boundary.
+          const usages: Usage[] = [];
+          await consolidateOnSessionEnd(kernel, sessionEndLlm(llm, projectId), stderr, (usage) => {
+            usages.push(usage);
+          });
+          return { usage: sumUsage(usages) };
         });
         return closePromise;
       },
