@@ -294,6 +294,8 @@ export interface ScenarioRunResult {
   /** 후속 출력이 이미 확립된 습관을 재질문했는가 — mori 팔(`"memory-on"`) 밖에서는
    * `undefined`다. 이유는 `runPreferenceRegressionScenario`의 판정 분기 주석 참고. */
   reQuestioned: boolean | undefined;
+  /** `EpisodeResult.compactionSummary` 그대로 — `"memory-off"`가 아니면 `undefined`. */
+  compactionSummary: string | undefined;
 }
 
 export interface RunEpisodeOptions {
@@ -323,6 +325,10 @@ export interface EpisodeResult {
   /** 후속 세션 첫 호출에서 **mori retrieval**이 실제로 뭔가를 주입했는가 — `"memory-off"`·
    * `"oracle"`에서는 항상 `false`다 (`ScenarioRunResult.injected` 참고). */
   injected: boolean;
+  /** `"memory-off"` 팔이 이월한 하네스 압축 요약 원문 — 다른 두 팔에서는 항상 `undefined`다.
+   * 리포트가 그 팔의 이월물을 실물로 보여줄 수 있는 유일한 자리라 여기서 표면화한다(#401 완료
+   * 조건: 「OFF 팔의 압축 요약 실물을 리포트에 남긴다」). */
+  compactionSummary: string | undefined;
 }
 
 /** 시나리오 하나 × 조건 하나를 채점 없이 끝까지 실행한다: 맥락 세션 주입 → 세션 사망 →
@@ -441,6 +447,7 @@ export async function runPreferenceRegressionEpisode(
     condition: options.condition,
     followUpOutput: turn.text,
     injected,
+    compactionSummary,
   };
 }
 
@@ -486,6 +493,7 @@ export async function runPreferenceRegressionScenario(
     score,
     injected: episode.injected,
     reQuestioned,
+    compactionSummary: episode.compactionSummary,
   };
 }
 

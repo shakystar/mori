@@ -248,6 +248,8 @@ describe("runPreferenceRegressionScenario (#387)", () => {
     expect(result.reQuestioned).toBe(true);
     expect(result.followUpOutput).toBe("reply:follow-up prompt");
     expect(result.score.score).toBe(1);
+    // Only the "memory-off" arm carries a compaction summary.
+    expect(result.compactionSummary).toBeUndefined();
 
     // BENCH_AXES.cost recorded once per turn (2 context + 1 follow-up).
     const report = costLedger.report();
@@ -314,6 +316,9 @@ describe("runPreferenceRegressionScenario (#387)", () => {
     expect(result.reQuestioned).toBeUndefined();
     expect(reQuestionCalls).toBe(0);
 
+    // The report surfaces the OFF arm's carry-over verbatim (#401 완료 조건).
+    expect(result.compactionSummary).toBe(FIXTURE_COMPACTION_SUMMARY);
+
     // Still populated (zero-cost) even though the judge never ran.
     const report = costLedger.report();
     expect(report.byAxis[BENCH_AXES.reQuestionRate]).toBeDefined();
@@ -346,6 +351,7 @@ describe("runPreferenceRegressionScenario (#387)", () => {
     expect(harness.kernelCalls).toEqual([]);
     expect(harness.compactCount()).toBe(0);
     expect(result.injected).toBe(false);
+    expect(result.compactionSummary).toBeUndefined();
   });
 
   it("memory-on and memory-off never leak impliedPreference into the follow-up context", async () => {

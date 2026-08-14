@@ -2,6 +2,7 @@ import path from "node:path";
 import type { Api, CredentialStore, Model } from "@earendil-works/pi-ai";
 import type { StreamFn } from "@earendil-works/pi-agent-core";
 import { createCostLedger, type CostReport } from "../cost-ledger.js";
+import { computeKillSwitchReport, type KillSwitchReport } from "./kill-switch.js";
 import type { PreferenceRegressionScenario } from "./scenarios.js";
 import {
   computeAxisRates,
@@ -55,6 +56,11 @@ export interface NightlySliceReport extends CostReport {
   repeatsPerScenario: number;
   scenarios: readonly ScenarioRunResult[];
   axisRates: ReturnType<typeof computeAxisRates>;
+  /** ORACLE−OFF 간격 킬 스위치 판정(#435) — milestone.ts의 `MilestoneReport.killSwitch`와 같은
+   * 자리. milestone-cli.ts는 judge 채점에 Anthropic Batch API를 강제하므로(#340 §3) DeepSeek
+   * 등 다른 프로바이더로는 돌릴 수 없다 — 실비용 API 경로에서 이 판정을 실제로 낼 수 있는
+   * 것은 이 리포트뿐이다(#401). */
+  killSwitch: KillSwitchReport;
 }
 
 /**
@@ -109,5 +115,6 @@ export async function runNightlySlice(options: NightlySliceOptions): Promise<Nig
     repeatsPerScenario,
     scenarios: scenarioResults,
     axisRates: computeAxisRates(scenarioResults),
+    killSwitch: computeKillSwitchReport(scenarioResults),
   };
 }

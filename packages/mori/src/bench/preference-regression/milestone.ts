@@ -290,6 +290,7 @@ export async function runPreferenceRegressionMilestone(
         score,
         injected: episode.injected,
         reQuestioned,
+        compactionSummary: episode.compactionSummary,
       });
     }
 

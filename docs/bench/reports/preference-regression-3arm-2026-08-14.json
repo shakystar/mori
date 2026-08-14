@@ -1,0 +1,343 @@
+{
+  "total": {
+    "input": 56668,
+    "output": 25689,
+    "cacheRead": 656768,
+    "cacheWrite": 0,
+    "reasoning": 0,
+    "totalTokens": 739125,
+    "cost": {
+      "input": 0.007933520000000001,
+      "output": 0.007192920000000002,
+      "cacheRead": 0.0018389504,
+      "cacheWrite": 0,
+      "total": 0.0169653904
+    }
+  },
+  "byAxis": {
+    "cost": {
+      "input": 54920,
+      "output": 25680,
+      "cacheRead": 656768,
+      "cacheWrite": 0,
+      "reasoning": 0,
+      "totalTokens": 737368,
+      "cost": {
+        "input": 0.007688800000000002,
+        "output": 0.007190400000000002,
+        "cacheRead": 0.0018389504,
+        "cacheWrite": 0,
+        "total": 0.0167181504
+      }
+    },
+    "injection-hit-rate": {
+      "input": 0,
+      "output": 0,
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "totalTokens": 0,
+      "cost": {
+        "input": 0,
+        "output": 0,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "total": 0
+      }
+    },
+    "re-distillation-rate": {
+      "input": 0,
+      "output": 0,
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "totalTokens": 0,
+      "cost": {
+        "input": 0,
+        "output": 0,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "total": 0
+      }
+    },
+    "re-question-rate": {
+      "input": 1748,
+      "output": 9,
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "reasoning": 0,
+      "totalTokens": 1757,
+      "cost": {
+        "input": 0.00024472000000000003,
+        "output": 0.00000252,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "total": 0.00024724
+      }
+    }
+  },
+  "repeatsPerScenario": 1,
+  "scenarios": [
+    {
+      "scenarioId": "tabs-indentation",
+      "scenarioTitle": "탭 들여쓰기 되돌림",
+      "condition": "memory-off",
+      "followUpOutput": "`concat.ts` 파일을 생성했습니다. 요청하신 요구사항대로 작성했습니다:\n\n- **두 문자열을 이어붙이는** `concat` 함수\n- **빈 문자열 분기 처리**: `a`가 빈 문자열이면 `b`를 반환하고, `b`가 빈 문자열이면 `a`를 반환\n- **블록 본문**으로 작성 (화살표 함수가 아닌 `function` + 중괄호 블록)\n\n```ts\nfunction concat(a: string, b: string): string {\n  if (a === \"\") {\n    return b;\n  }\n\n  if (b === \"\") {\n    return a;\n  }\n\n  return a + b;\n}\n```\n\n사용 예시:\n- `concat(\"\", \"world\")` → `\"world\"`\n- `concat(\"hello\", \"\")` → `\"hello\"`\n- `concat(\"hello\", \" world\")` → `\"hello world\"`",
+      "score": {
+        "scenarioId": "tabs-indentation",
+        "criteria": [
+          {
+            "id": "uses-tab-indentation",
+            "description": "들여쓰기가 있는 모든 줄이 탭 문자로 시작한다 (스페이스 인덴트 없음)",
+            "kind": "deterministic",
+            "satisfied": false
+          },
+          {
+            "id": "matches-formatting-habits",
+            "description": "전반적 포맷팅이 이전 세션에서 관찰된 사용자 습관과 일치하는가",
+            "kind": "llm-judge",
+            "satisfied": false
+          }
+        ],
+        "score": 0
+      },
+      "injected": false,
+      "compactionSummary": "## Goal\n- Summarize a conversation between a user and an AI assistant (content not provided in this instance).\n\n## Constraints & Preferences\n- (none)\n\n## Progress\n### Done\n- (none)\n\n### In Progress\n- (none)\n\n### Blocked\n- (none)\n\n## Key Decisions\n- (none)\n\n## Next Steps\n1. Retrieve the actual conversation content to summarize.\n\n## Critical Context\n- The `<conversation>` tags in the prompt were empty; no actual conversation data was provided for summarization."
+    },
+    {
+      "scenarioId": "tabs-indentation",
+      "scenarioTitle": "탭 들여쓰기 되돌림",
+      "condition": "memory-on",
+      "followUpOutput": "`concat.ts` 파일을 생성했습니다.\n\n요구사항에 맞춰 구현했습니다:\n\n```typescript\nfunction concat(a: string, b: string): string {\n  if (a === \"\") {\n    return b;\n  }\n  if (b === \"\") {\n    return a;\n  }\n  return a + b;\n}\n```\n\n- **두 문자열 이어붙이기**: 마지막 줄에서 `a + b`로 연결합니다.\n- **빈 문자열 분기**: `a`가 빈 문자열이면 `b`를 그대로, `b`가 빈 문자열이면 `a`를 그대로 반환합니다.\n- **블록 본문**: 중괄호 블록 본문으로 작성했습니다. (화살표 함수의 표현식 간결형이 아님)",
+      "score": {
+        "scenarioId": "tabs-indentation",
+        "criteria": [
+          {
+            "id": "uses-tab-indentation",
+            "description": "들여쓰기가 있는 모든 줄이 탭 문자로 시작한다 (스페이스 인덴트 없음)",
+            "kind": "deterministic",
+            "satisfied": false
+          },
+          {
+            "id": "matches-formatting-habits",
+            "description": "전반적 포맷팅이 이전 세션에서 관찰된 사용자 습관과 일치하는가",
+            "kind": "llm-judge",
+            "satisfied": false
+          }
+        ],
+        "score": 0
+      },
+      "injected": false,
+      "reQuestioned": false
+    },
+    {
+      "scenarioId": "tabs-indentation",
+      "scenarioTitle": "탭 들여쓰기 되돌림",
+      "condition": "oracle",
+      "followUpOutput": "TypeScript로 `concat` 함수를 작성했습니다.\n\n```ts\nfunction concat(a: string, b: string): string {\n\tif (a === '') {\n\t\treturn b;\n\t}\n\tif (b === '') {\n\t\treturn a;\n\t}\n\treturn a + b;\n}\n```\n\n요청하신 내용을 반영했습니다.\n\n- **탭 문자 들여쓰기**: 이전 세션에서 선호하신 대로 모든 들여쓰기를 탭으로 처리했습니다.\n- **빈 문자열 분기**: 둘 중 한쪽이 빈 문자열(`''`)이면 다른 쪽을 그대로 반환하도록 `if` 분기를 넣었습니다. (둘 다 빈 문자열이면 첫 번째 분기에서 `b`가 반환되는데, 이때 `b`도 빈 문자열이라 결과적으로 빈 문자열이 됩니다.)\n- **블록 본문**: 화살표 함수가 아닌 블록 본문을 가진 함수 선언으로 작성했습니다.",
+      "score": {
+        "scenarioId": "tabs-indentation",
+        "criteria": [
+          {
+            "id": "uses-tab-indentation",
+            "description": "들여쓰기가 있는 모든 줄이 탭 문자로 시작한다 (스페이스 인덴트 없음)",
+            "kind": "deterministic",
+            "satisfied": true
+          },
+          {
+            "id": "matches-formatting-habits",
+            "description": "전반적 포맷팅이 이전 세션에서 관찰된 사용자 습관과 일치하는가",
+            "kind": "llm-judge",
+            "satisfied": true
+          }
+        ],
+        "score": 1
+      },
+      "injected": false
+    },
+    {
+      "scenarioId": "concise-responses",
+      "scenarioTitle": "군더더기 없는 답변 선호",
+      "condition": "memory-off",
+      "followUpOutput": "# TypeScript 유니언 타입 vs 인터섹션 타입\n\n간단하게 정리하면:\n\n## 유니언 타입 (`|`)\n**\"~이거나 ~이거나\"** — 여러 타입 중 **하나**.\n\n```typescript\ntype Result = string | number;\n\nlet a: Result = \"hello\";  // OK\nlet b: Result = 42;        // OK\n```\n\n- 값을 쓸 때는 여러 타입 중 아무거나 하나 허용\n- 읽을 때는 **공통 속성만** 접근 가능\n- 위 예시에서 `a.toUpperCase()`는 에러 (number일 수도 있으므로)\n\n## 인터섹션 타입 (`&`)\n**\"~이면서 ~이면서\"** — 여러 타입을 **모두 합친** 것.\n\n```typescript\ntype Person = { name: string };\ntype Employee = { id: number };\n\ntype EmployeePerson = Person & Employee;\n\nlet e: EmployeePerson = { name: \"Mori\", id: 123 }; // 두 속성 모두 필요\n```\n\n- 모든 타입의 속성을 **전부** 가져야 함\n- 객체에서는 각 타입의 속성을 합침\n\n---\n\n## 비유로 생각하면\n\n| | 유니언 (`\\|`) | 인터섹션 (`&`) |\n|---|---|---|\n| 집합 개념 | **합집합** (둘 중 하나) | **교집합** (둘 다 해당) |\n| 객체 속성 수 | 각각의 속성 중 선택 | 모든 속성을 병합 |\n\n> ⚠️ 주의: 집합 개념에서 유니언이 \"합집합\"인 건 값의 **허용 범위** 얘기고, 인터섹션 타입이 \"교집합\"인 건 **타입의 구조**를 합치는 얘기라 다소 헷갈릴 수 있습니다.\n\n## 활용 예시\n\n```typescript\n// 유니언: 상황에 따라 다른 처리 (타입 가드와 함께)\nfunction print(value: string | number) {\n  if (typeof value === \"string\") {\n    console.log(value.toUpperCase());\n  } else {\n    console.log(value.toFixed(2));\n  }\n}\n\n// 인터섹션: 여러 기능을 조합\ntype WithTimestamps = { createdAt: Date; updatedAt: Date };\ntype Auditable = WithTimestamps & { createdBy: string };\n```\n\n특정 부분을 더 자세히 알고 싶으면 말씀해주세요!",
+      "score": {
+        "scenarioId": "concise-responses",
+        "criteria": [
+          {
+            "id": "short-response",
+            "description": "응답이 200자 이하다",
+            "kind": "deterministic",
+            "satisfied": false
+          },
+          {
+            "id": "no-preamble",
+            "description": "서두 사설 없이 바로 핵심 결론부터 시작하는가",
+            "kind": "llm-judge",
+            "satisfied": true
+          }
+        ],
+        "score": 0.5
+      },
+      "injected": false,
+      "compactionSummary": "## Goal\nThe conversation is empty. There is no user request or task to accomplish.\n\n## Constraints & Preferences\n- (none)\n\n## Progress\n### Done\n- (none)\n\n### In Progress\n- (none)\n\n### Blocked\n- No conversation content provided to summarize.\n\n## Key Decisions\n- (none)\n\n## Next Steps\n1. Await user input or a new conversation to summarize.\n\n## Critical Context\n- The provided `<conversation>` block contains no messages, so there is no context to preserve."
+    },
+    {
+      "scenarioId": "concise-responses",
+      "scenarioTitle": "군더더기 없는 답변 선호",
+      "condition": "memory-on",
+      "followUpOutput": "유니언(Union) 타입과 인터섹션(Intersection) 타입은 TypeScript에서 타입을 결합하는 두 가지 핵심 방식입니다. 집합 이론적으로 살펴보면 정반대의 개념이에요.\n\n## 유니언 타입 (`|`)\n\n**\"OR\"** 의 의미 — 여러 타입 중 **하나**가 될 수 있음.\n\n```typescript\ntype Result = string | number;\n\nconst a: Result = \"hello\"; // ✅\nconst b: Result = 42;       // ✅\n// const c: Result = true;  // ❌ 오류\n```\n\n- 값은 **제시된 타입 중 적어도 하나**를 만족해야 함\n- 타입 자체(변수에도 적용 가능): `string | number | undefined`\n- 주로 \"여러 가능한 경우\"를 표현할 때 사용\n\n```typescript\nfunction process(input: string | number | null) {\n  if (input === null) {\n    // ...\n  } else if (typeof input === \"string\") {\n    // string으로 좁혀짐\n  } else {\n    // number로 좁혀짐\n  }\n}\n```\n\n## 인터섹션 타입 (`&`)\n\n**\"AND\"** 의 의미 — 모든 타입의 성질을 **동시에** 가짐.\n\n```typescript\ntype Person = { name: string };\ntype Employee = { salary: number };\n\ntype Staff = Person & Employee;\n\nconst staff: Staff = {\n  name: \"Alice\",      // ✅\n  salary: 50000,      // ✅\n};\n// 이름이나 급여 중 하나라도 빠지면 ❌\n```\n\n- 값은 **모든 타입**을 동시에 만족해야 함\n- 주로 여러 타입을 **결합**해서 하나의 객체로 만들 때 사용\n\n```typescript\ntype A = { a: number };\ntype B = { b: string };\ntype AB = A & B; // { a: number; b: string }\n```\n\n## 핵심 차이 요약\n\n| | 유니언 (`\\|`) | 인터섹션 (`&`) |\n|---|---|---|\n| 의미 | OR (하나만) | AND (모두) |\n| 값이 만족해야 하는 것 | 타입 중 **하나** | **모든** 타입 |\n| 객체 예시 | `{a} \\| {b}` → 둘 중 하나만 가짐 | `{a} & {b}` → 둘 다 가짐 |\n| 사용처 | 여러 가능한 경우 | 타입 결합·확장 |\n\n---\n\n### 주의할 점\n\n1. **객체에서 인터섹션 구현**: 예를 들어 아래처럼 하려면 인터섹션으로는 안 되고 별도 타입을 만들어야 해요.\n```typescript\ntype Admin = { role: string };\ntype User = { name: string };\n\n// 집합적으로는 아래가 논리적으로 맞지만, 객체에선 `&` 사용 권장\ntype AdminUser = Admin & User; // 구체적인 두 요구를 동시 충족해야 함\n```\n\n2. **원시 타입에서 인터섹션**: 대부분 `never` 타입이 됨.\n```typescript\ntype X = string & number; // never (둘 다 만족 불가)\n```\n\n3. **함수 시그니처와 함께 쓸 때 동작이 다름**: 유니언은 함수 오버로드처럼, 인터섹션은 합성 함수처럼 동작하기도 해요.\n\n실무에서는 **\"하나의 선택지\"면 유니언**, **\"여러 속성을 합쳐야\"하면 인터섹션**을 쓰면 됩니다. 더 궁금한 점 있으면 편하게 물어보세요!",
+      "score": {
+        "scenarioId": "concise-responses",
+        "criteria": [
+          {
+            "id": "short-response",
+            "description": "응답이 200자 이하다",
+            "kind": "deterministic",
+            "satisfied": false
+          },
+          {
+            "id": "no-preamble",
+            "description": "서두 사설 없이 바로 핵심 결론부터 시작하는가",
+            "kind": "llm-judge",
+            "satisfied": false
+          }
+        ],
+        "score": 0
+      },
+      "injected": false,
+      "reQuestioned": false
+    },
+    {
+      "scenarioId": "concise-responses",
+      "scenarioTitle": "군더더기 없는 답변 선호",
+      "condition": "oracle",
+      "followUpOutput": "유니언(합집합): `A | B` — A 또는 B 중 하나의 타입.\n\n인터섹션(교집합): `A & B` — A와 B의 모든 속성을 가진 타입.\n\n```ts\ntype A = { a: number };\ntype B = { b: string };\n\n// 유니언: 둘 중 하나\nconst u: A | B = { a: 1 };  // OK\nconst u2: A | B = { b: \"x\" }; // OK\n\n// 인터섹션: 둘 다\nconst i: A & B = { a: 1, b: \"x\" }; // 필수\n```",
+      "score": {
+        "scenarioId": "concise-responses",
+        "criteria": [
+          {
+            "id": "short-response",
+            "description": "응답이 200자 이하다",
+            "kind": "deterministic",
+            "satisfied": false
+          },
+          {
+            "id": "no-preamble",
+            "description": "서두 사설 없이 바로 핵심 결론부터 시작하는가",
+            "kind": "llm-judge",
+            "satisfied": true
+          }
+        ],
+        "score": 0.5
+      },
+      "injected": false
+    },
+    {
+      "scenarioId": "pnpm-workflow",
+      "scenarioTitle": "패키지 매니저 pnpm 습관",
+      "condition": "memory-off",
+      "followUpOutput": "완료했습니다. 정리하면:\n\n## 설치 명령\n\n```bash\npnpm add lodash\npnpm add -D @types/lodash\n```\n\n`@types/lodash`는 TypeScript에서 타이핑 때문에 필요합니다. 프로젝트가 JS라면 생략해도 됩니다.\n\n## 변경한 파일\n\n1. **`package.json`** — CI에서 쓸 `build`, `test` 스크립트를 추가했습니다. 원래 있던 `start` 스크립트는 그대로 유지했고, `pnpm build`가 `tsconfig.json`을 참조하도록 했는데, 아직 실제 `tsconfig.json`이 없는 상태입니다. 타입스크립트 설정이 이미 별도로 있다면 맞게 조정이 필요할 수 있어요.\n\n2. **`.github/workflows/ci.yml`** — GitHub Actions CI를 새로 생성했습니다. 흐름: 체크아웃 → pnpm/Node 세팅 → 의존성 설치(`--frozen-lockfile`) → 빌드 → 테스트.\n\n## 참고 사항\n\n- **`--frozen-lockfile`**: `pnpm-lock.yaml`이 있어야 정상 동작합니다. 아직 lock 파일이 없다면, 로컬에서 `pnpm add lodash`로 잠금 파일을 먼저 생성해 커밋해 두세요. 그렇지 않으면 CI에서 이 옵션 때문에 설치 단계가 실패합니다.\n- `package.json`에서 `build`를 `tsc`로 바꿔놨는데, 현재 저장소에 TypeScript 설정 파일(`tsconfig.json`)과 실제 진입점(`dist/index.js`를 만드는 빌드)이 없는 상태입니다. 실제로 빌드가 통과하려면 `tsconfig.json` 세팅도 필요합니다.\n\n원하시면 실제로 `pnpm add lodash`를 실행하고 lock 파일까지 만들어 드릴까요?",
+      "score": {
+        "scenarioId": "pnpm-workflow",
+        "criteria": [
+          {
+            "id": "uses-pnpm-command",
+            "description": "설치 명령에 pnpm을 쓰고 npm/yarn 명령은 섞지 않는다",
+            "kind": "deterministic",
+            "satisfied": true
+          },
+          {
+            "id": "ci-step-pnpm-native",
+            "description": "CI 스텝 예시가 pnpm 워크플로우 관례를 따르는가",
+            "kind": "llm-judge",
+            "satisfied": false
+          }
+        ],
+        "score": 0.5
+      },
+      "injected": false,
+      "compactionSummary": "## Goal\nThe conversation is empty—there are no messages between a user and an AI assistant to summarize.\n\n## Constraints & Preferences\n- (none)\n\n## Progress\n### Done\n- (none)\n\n### In Progress\n- (none)\n\n### Blocked\n- No conversation content was provided; there is nothing to summarize.\n\n## Key Decisions\n- **(none)**: No decisions were made in the absence of conversation content.\n\n## Next Steps\n1. Obtain the actual conversation messages to summarize.\n2. Re-run the summarization once conversation content is provided.\n\n## Critical Context\n- The `<conversation>` block in the input contains no messages.\n- (none)"
+    },
+    {
+      "scenarioId": "pnpm-workflow",
+      "scenarioTitle": "패키지 매니저 pnpm 습관",
+      "condition": "memory-on",
+      "followUpOutput": "All working. Let me summarize the state.\n\n## 작업 완료 — lodash 추가됨\n\n이전 세션에서 이미 작업이 끝나 있어서, 필요한 모든 것이 준비되어 있고 실제로 동작까지 확인했습니다.\n\n### 1. 설치 명령\n`package.json`의 `dependencies`에 이미 추가되어 있습니다:\n```json\n\"dependencies\": {\n  \"lodash\": \"^4.18.1\"\n}\n```\n\n새로 추가한 패키지 설치 명령은:\n```bash\n# 의존성을 설치/최신화\ncorepack pnpm install lodash\n\n# 잠긴 lockfile 그대로 설치 (CI에서 사용)\ncorepack pnpm install --frozen-lockfile\n```\n파일이 이미 수정되어 있는 지금 상태를 유지하려면 그냥 `pnpm install --frozen-lockfile` 로 재현할 수 있습니다.\n\n### 2. CI 스텝 예시\n`.github/workflows/ci.yml`에 이미 lodash 검증 스텝이 있습니다:\n```yaml\n- name: Verify lodash\n  run: node --input-type=module -e \"import lodash from 'lodash'; console.log(lodash.chunk([1,2,3,4], 2));\"\n```\n\n### 동작 확인 결과\n```\n[ [ 1, 2 ], [ 3, 4 ] ]\n```\nlodash 임포트와 `chunk()` 기능이 정상 동작하는 것을 확인했습니다. 🎉\n\n---\n\n참고: `package.json`에 정리된 `\"type\": \"module\"` 때문에, 위 CI 검증 스텝은 ESM 방식(`import lodash from 'lodash'`)으로 작성되어 있습니다. CI 워크플로우에도 `pnpm install --frozen-lockfile` → `pnpm build` 순서가 이미 정리되어 있으므로 lodash 사용 준비는 완료된 상태입니다.",
+      "score": {
+        "scenarioId": "pnpm-workflow",
+        "criteria": [
+          {
+            "id": "uses-pnpm-command",
+            "description": "설치 명령에 pnpm을 쓰고 npm/yarn 명령은 섞지 않는다",
+            "kind": "deterministic",
+            "satisfied": true
+          },
+          {
+            "id": "ci-step-pnpm-native",
+            "description": "CI 스텝 예시가 pnpm 워크플로우 관례를 따르는가",
+            "kind": "llm-judge",
+            "satisfied": false
+          }
+        ],
+        "score": 0.5
+      },
+      "injected": true,
+      "reQuestioned": false
+    },
+    {
+      "scenarioId": "pnpm-workflow",
+      "scenarioTitle": "패키지 매니저 pnpm 습관",
+      "condition": "oracle",
+      "followUpOutput": "현재 워킹 루트에는 아무 파일도 없네요. 그대로 안내해 드릴게요.\n\n## 1. 설치 명령 (pnpm)\n\n루트 디렉터리에서 실행하세요.\n\n```bash\n# 프로덕션 의존성으로 추가\npnpm add lodash\n\n# devDependencies로 추가하려면\npnpm add -D lodash\n```\n\nTypeScript 환경이라면 타입을 함께 추가하는 걸 권장합니다.\n\n```bash\npnpm add lodash\npnpm add -D @types/lodash\n```\n\n---\n\n## 2. CI 스텝 예시\n\n`.github/workflows/ci.yml` 에 추가할 수 있는 스텝 예시입니다.\n\n```yaml\nname: CI\n\non:\n  push:\n    branches: [main]\n  pull_request:\n\njobs:\n  install-and-build:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n\n      - name: Setup pnpm\n        uses: pnpm/action-setup@v4\n        with:\n          version: 9\n\n      - name: Setup Node\n        uses: actions/setup-node@v4\n        with:\n          node-version: 20\n          cache: pnpm\n\n      - name: Install dependencies\n        run: pnpm install --frozen-lockfile\n\n      - name: Build\n        run: pnpm build\n```\n\n**포인트:**\n- `pnpm/action-setup` 으로 pnpm 버전을 고정\n- `actions/setup-node` 에 `cache: pnpm` 을 넣어 의존성 캐시 활성화\n- `--frozen-lockfile` 을 사용해 lockfile과 일치하는 의존성만 설치 (CI에서 안정성 확보)\n\n---\n\n필요하시면 프로젝트 구조(예: 프론트엔드/라이브러리)에 맞춰 CI 스텝을 조정해 드릴게요. 현재 루트에 파일이 없는 상황이라, 어느 환경인지 알려주시면 그에 맞춰 더 구체적으로 만들어 드릴 수 있습니다.",
+      "score": {
+        "scenarioId": "pnpm-workflow",
+        "criteria": [
+          {
+            "id": "uses-pnpm-command",
+            "description": "설치 명령에 pnpm을 쓰고 npm/yarn 명령은 섞지 않는다",
+            "kind": "deterministic",
+            "satisfied": true
+          },
+          {
+            "id": "ci-step-pnpm-native",
+            "description": "CI 스텝 예시가 pnpm 워크플로우 관례를 따르는가",
+            "kind": "llm-judge",
+            "satisfied": true
+          }
+        ],
+        "score": 1
+      },
+      "injected": false
+    }
+  ],
+  "axisRates": {
+    "injectionHitRate": 0.3333333333333333,
+    "reDistillationRate": 0,
+    "reQuestionRate": 0
+  },
+  "killSwitch": {
+    "threshold": 0.25,
+    "scenarios": [
+      {
+        "scenarioId": "tabs-indentation",
+        "oracleScore": 1,
+        "offScore": 0,
+        "gap": 1,
+        "invalid": false
+      },
+      {
+        "scenarioId": "concise-responses",
+        "oracleScore": 0.5,
+        "offScore": 0.5,
+        "gap": 0,
+        "invalid": true
+      },
+      {
+        "scenarioId": "pnpm-workflow",
+        "oracleScore": 1,
+        "offScore": 0.5,
+        "gap": 0.5,
+        "invalid": false
+      }
+    ],
+    "invalid": true
+  }
+}
