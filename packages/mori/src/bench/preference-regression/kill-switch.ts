@@ -37,19 +37,26 @@ export interface KillSwitchReport {
   invalid: boolean;
 }
 
+/** 같은 (시나리오, 조건) 쌍의 점수를 평균한다 — 마일스톤(milestone.ts)은 조건당 결과가 항상
+ * 하나라 평균이 그 값 그대로지만, 나이틀리/주간 슬라이스(nightly-slice.ts)는 `repeatsPerScenario`
+ * 회 반복된 결과가 전부 같은 (시나리오, 조건) 키로 쌓인다. 첫 건만 보면(`.find()`) 반복 10회 중
+ * 1회의 우연한 저점으로 전체가 무효 판정될 수 있다 — 평균이 그 표본 크기를 실제로 쓴다. */
 function scoreFor(
   results: readonly ScenarioRunResult[],
   scenarioId: string,
   condition: PreferenceRegressionCondition,
 ): number | undefined {
-  return results.find((r) => r.scenarioId === scenarioId && r.condition === condition)?.score.score;
+  const matches = results.filter((r) => r.scenarioId === scenarioId && r.condition === condition);
+  if (matches.length === 0) return undefined;
+  return matches.reduce((sum, r) => sum + r.score.score, 0) / matches.length;
 }
 
 /**
- * `results`(여러 시나리오 × 조건 실행 결과)에서 시나리오별·전체 킬 스위치 판정을 계산한다.
- * ORACLE·OFF 두 팔의 점수만 읽는다 — `computeAxisRates`(runner.ts)의 세 축은 분모가
- * `"memory-on"` 팔 하나로 고정돼 있어(#440 이후) 이 계산과 성격이 다르다. 그래서 `axisRates`
- * 자리에 얹지 않고 이 모듈을 따로 둔다(#435 게이트 코멘트).
+ * `results`(여러 시나리오 × 조건 실행 결과, 반복 실행이면 같은 키가 여러 번 나타날 수 있다)에서
+ * 시나리오별·전체 킬 스위치 판정을 계산한다. ORACLE·OFF 두 팔의 점수만 읽는다 —
+ * `computeAxisRates`(runner.ts)의 세 축은 분모가 `"memory-on"` 팔 하나로 고정돼 있어(#440 이후)
+ * 이 계산과 성격이 다르다. 그래서 `axisRates` 자리에 얹지 않고 이 모듈을 따로 둔다(#435 게이트
+ * 코멘트).
  */
 export function computeKillSwitchReport(results: readonly ScenarioRunResult[]): KillSwitchReport {
   const scenarioIds = [...new Set(results.map((r) => r.scenarioId))];
