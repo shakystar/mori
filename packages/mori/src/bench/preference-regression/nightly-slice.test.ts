@@ -211,6 +211,23 @@ describe("runNightlySlice (#406)", () => {
 
     // MEMORIZE_ROOT is restored after every repeat.
     expect(process.env.MEMORIZE_ROOT).toBeUndefined();
+
+    // Every "memory-off" result carries the harness compaction summary the fixture hands back —
+    // the report is the only place that summary is ever exposed (#401).
+    const offResults = report.scenarios.filter((r) => r.condition === "memory-off");
+    expect(offResults.length).toBeGreaterThan(0);
+    for (const result of offResults) {
+      expect(result.compactionSummary).toBe("fixture compaction summary");
+    }
+    // Non-OFF arms never carry a compaction summary.
+    for (const result of report.scenarios.filter((r) => r.condition !== "memory-off")) {
+      expect(result.compactionSummary).toBeUndefined();
+    }
+
+    // The kill switch is computed on this report too, not just the milestone one (#401) — DeepSeek
+    // runs can only go through nightly-slice (milestone-cli.ts is Anthropic-only).
+    expect(report.killSwitch.threshold).toBeGreaterThan(0);
+    expect(report.killSwitch.scenarios.length).toBeGreaterThan(0);
   });
 
   it("reruns against the same cacheDir for free — second call makes zero streamFn calls (#422)", async () => {

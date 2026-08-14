@@ -23,6 +23,12 @@ export interface KillSwitchScenarioVerdict {
   /** `oracleScore - offScore`. 음수면 OFF가 ORACLE을 앞섰다는 뜻이고, 그 경우도 임계값 미만과
    * 마찬가지로 무효다 — 정답을 준 팔이 못 준 팔보다 못하다면 그 자체가 채점 신뢰성 문제다. */
   gap: number;
+  /** 각 팔의 평균에 쓰인 표본 수. 어긋나면 gap이 표본 불균형의 산물일 수 있다 — 반복 실행에서
+   * 한 팔의 일부 회차만 실패해 스킵되면 서로 다른 크기의 표본끼리 평균이 비교되고, 그때
+   * "간격이 임계값을 넘었다/못 넘었다"는 판정이 실제 신호가 아니라 불균형의 산물일 수 있다.
+   * 판정 자체는 이 값으로 바꾸지 않는다(무엇이 옳은 보정인지 이 데이터만으로는 정할 수 없다) —
+   * 리포트에 남겨 사후 진단이 가능하게만 한다. */
+  sampleSizes: { oracle: number; off: number };
   invalid: boolean;
 }
 
@@ -37,35 +43,46 @@ export interface KillSwitchReport {
   invalid: boolean;
 }
 
+/** 같은 (시나리오, 조건) 쌍의 점수를 평균한다 — 마일스톤(milestone.ts)은 조건당 결과가 항상
+ * 하나라 평균이 그 값 그대로지만, 나이틀리/주간 슬라이스(nightly-slice.ts)는 `repeatsPerScenario`
+ * 회 반복된 결과가 전부 같은 (시나리오, 조건) 키로 쌓인다. 첫 건만 보면(`.find()`) 반복 10회 중
+ * 1회의 우연한 저점으로 전체가 무효 판정될 수 있다 — 평균이 그 표본 크기를 실제로 쓴다. */
 function scoreFor(
   results: readonly ScenarioRunResult[],
   scenarioId: string,
   condition: PreferenceRegressionCondition,
-): number | undefined {
-  return results.find((r) => r.scenarioId === scenarioId && r.condition === condition)?.score.score;
+): { mean: number; sampleSize: number } | undefined {
+  const matches = results.filter((r) => r.scenarioId === scenarioId && r.condition === condition);
+  if (matches.length === 0) return undefined;
+  return {
+    mean: matches.reduce((sum, r) => sum + r.score.score, 0) / matches.length,
+    sampleSize: matches.length,
+  };
 }
 
 /**
- * `results`(여러 시나리오 × 조건 실행 결과)에서 시나리오별·전체 킬 스위치 판정을 계산한다.
- * ORACLE·OFF 두 팔의 점수만 읽는다 — `computeAxisRates`(runner.ts)의 세 축은 분모가
- * `"memory-on"` 팔 하나로 고정돼 있어(#440 이후) 이 계산과 성격이 다르다. 그래서 `axisRates`
- * 자리에 얹지 않고 이 모듈을 따로 둔다(#435 게이트 코멘트).
+ * `results`(여러 시나리오 × 조건 실행 결과, 반복 실행이면 같은 키가 여러 번 나타날 수 있다)에서
+ * 시나리오별·전체 킬 스위치 판정을 계산한다. ORACLE·OFF 두 팔의 점수만 읽는다 —
+ * `computeAxisRates`(runner.ts)의 세 축은 분모가 `"memory-on"` 팔 하나로 고정돼 있어(#440 이후)
+ * 이 계산과 성격이 다르다. 그래서 `axisRates` 자리에 얹지 않고 이 모듈을 따로 둔다(#435 게이트
+ * 코멘트).
  */
 export function computeKillSwitchReport(results: readonly ScenarioRunResult[]): KillSwitchReport {
   const scenarioIds = [...new Set(results.map((r) => r.scenarioId))];
 
   const scenarios: KillSwitchScenarioVerdict[] = [];
   for (const scenarioId of scenarioIds) {
-    const oracleScore = scoreFor(results, scenarioId, "oracle");
-    const offScore = scoreFor(results, scenarioId, "memory-off");
-    if (oracleScore === undefined || offScore === undefined) continue;
+    const oracle = scoreFor(results, scenarioId, "oracle");
+    const off = scoreFor(results, scenarioId, "memory-off");
+    if (oracle === undefined || off === undefined) continue;
 
-    const gap = oracleScore - offScore;
+    const gap = oracle.mean - off.mean;
     scenarios.push({
       scenarioId,
-      oracleScore,
-      offScore,
+      oracleScore: oracle.mean,
+      offScore: off.mean,
       gap,
+      sampleSizes: { oracle: oracle.sampleSize, off: off.sampleSize },
       invalid: gap < KILL_SWITCH_GAP_THRESHOLD,
     });
   }

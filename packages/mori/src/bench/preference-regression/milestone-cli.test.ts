@@ -23,6 +23,7 @@ function fixtureScenarioResult(): ScenarioRunResult {
     score: { scenarioId: "s1", criteria: [], score: 1 },
     injected: true,
     reQuestioned: true,
+    compactionSummary: undefined,
   };
 }
 
@@ -114,7 +115,16 @@ describe("reportMilestoneOutcome (#407 owner 수정요청, #416)", () => {
     const report = fixtureReport({
       killSwitch: {
         threshold: KILL_SWITCH_GAP_THRESHOLD,
-        scenarios: [{ scenarioId: "s1", oracleScore: 0.5, offScore: 0.5, gap: 0, invalid: true }],
+        scenarios: [
+          {
+            scenarioId: "s1",
+            oracleScore: 0.5,
+            offScore: 0.5,
+            gap: 0,
+            sampleSizes: { oracle: 1, off: 1 },
+            invalid: true,
+          },
+        ],
         invalid: true,
       },
     });
