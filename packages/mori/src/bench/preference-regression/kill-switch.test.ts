@@ -14,6 +14,7 @@ function fixtureResult(
     score: { scenarioId: "s1", criteria: [], score },
     injected: false,
     reQuestioned: undefined,
+    compactionSummary: undefined,
   };
 }
 

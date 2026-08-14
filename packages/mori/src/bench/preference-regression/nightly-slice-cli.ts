@@ -69,11 +69,19 @@ function parseArgs(argv: string[]): ParsedArgs {
   };
 }
 
-/** 리포트를 기록하고, `report.scenarios.length === 0`이면 stderr에 사유를 남기고 0이 아닌 종료
- * 코드를 반환한다 — 그렇지 않으면 대상 0건이 "측정했고 문제 없었다"와 구별되지 않는 그린으로
- * 새어 나간다(PR 스모크 층의 #405 선례와 같은 회귀, #416). auth 해석과 분리해 둔 이유는 이
- * 판정 로직만 순수 함수로 직접 테스트하기 위해서다(milestone-cli.ts의 `reportMilestoneOutcome`
- * 선례를 따른다). */
+/** 리포트를 기록하고 종료 코드를 정한다.
+ *
+ * 1. `report.scenarios.length === 0`이면 — 대상 0건이 "측정했고 문제 없었다"와 구별되지 않는
+ *    그린으로 새어 나간다(PR 스모크 층의 #405 선례와 같은 회귀, #416).
+ * 2. `report.killSwitch.invalid`이면 — ORACLE(정답을 통째로 준 팔)과 OFF(하네스 압축 요약만
+ *    받은 팔)의 점수 간격이 임계값(kill-switch.ts) 미만인 시나리오가 하나라도 있으면, 그
+ *    시나리오는 "정답을 알아도 점수가 안 오른다"는 뜻이라 그 위에서 잰 mori 점수가 아무것도
+ *    말하지 못한다(#435, milestone-cli.ts `reportMilestoneOutcome`의 4번째 가드와 같은 판정).
+ *    재실행으로 바뀌는 판정이 아니다 — 시나리오가 잴 수 있는 물건이 아니라는 뜻이므로, 이
+ *    호출자는 재시도 대신 이 회차의 관측 결과로 보고해야 한다(#401).
+ *
+ * auth 해석과 분리해 둔 이유는 이 판정 로직만 순수 함수로 직접 테스트하기 위해서다(milestone-cli.ts의
+ * `reportMilestoneOutcome` 선례를 따른다). */
 export function reportNightlySliceOutcome(
   report: NightlySliceReport,
   out: string,
@@ -86,6 +94,15 @@ export function reportNightlySliceOutcome(
   );
   if (report.scenarios.length === 0) {
     io.stderr("mori bench: 실행된 시나리오가 0건이다 — 가드가 헛돈 것이므로 실패로 처리한다.\n");
+    return 1;
+  }
+  if (report.killSwitch.invalid) {
+    const invalidScenarios = report.killSwitch.scenarios.filter((s) => s.invalid);
+    io.stderr(
+      `mori bench: 킬 스위치 발동 — ORACLE−OFF 간격이 임계값(${String(report.killSwitch.threshold)}) ` +
+        `미만인 시나리오 ${String(invalidScenarios.length)}건: ` +
+        `${invalidScenarios.map((s) => `${s.scenarioId}(gap=${String(s.gap)})`).join(", ")}\n`,
+    );
     return 1;
   }
   return 0;
