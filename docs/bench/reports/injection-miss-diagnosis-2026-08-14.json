@@ -1,0 +1,106 @@
+{
+  "issue": 446,
+  "measuredAt": "2026-08-14",
+  "model": "deepseek/deepseek-v4-flash",
+  "scope": "memory-on 팔만, 시나리오당 1회. 계측 방법은 docs/bench/injection-miss-diagnosis-2026-08-14.md 부록 참고.",
+  "fieldNotes": {
+    "passedHarnessCaptureFilter": "mori 쪽 필터(createAgentEventObserver, packages/mori/src/kernel/index.ts)가 capture 후보로 넘긴 호출 수. 커널의 2차 필터(evaluateCapture, capture-service.ts)는 이보다 더 좁다 — 그 결과가 eventTypes의 observation.captured다.",
+    "candidateEventCount": "후속 세션 첫 transformContext 시점에 스토어에 있던 이벤트 총수. \"store-missing\"은 스토어 자체가 없어 조회 대상이 0이라는 뜻이다.",
+    "returnedCandidates": "buildMemoryContext가 그 쿼리로 돌려준 채널별 후보. null은 스토어가 없어 retrieval이 실행조차 되지 않았다는 뜻이다."
+  },
+  "probes": [
+    {
+      "scenarioId": "tabs-indentation",
+      "condition": "memory-on",
+      "projectId": "proj_f1c1908a9c160dc4",
+      "contextSession": {
+        "toolExecutionEnd": 1,
+        "toolCallsByVerdict": {
+          "list_dir:read-only": {
+            "calls": 1,
+            "passedHarnessCaptureFilter": 0
+          }
+        },
+        "passedHarnessCaptureFilterTotal": 0
+      },
+      "followUpRetrieval": {
+        "storeExisted": false,
+        "candidateEventCount": "store-missing",
+        "eventTypes": {},
+        "query": "두 문자열을 이어붙이는 concat 함수를 TypeScript로 짜줘. 둘 중 한쪽이 빈 문자열이면 다른 쪽을 그대로 반환하도록 분기도 넣고, 함수는 블록 본문으로 작성해줘.",
+        "turnId": "1:1786740220452",
+        "returnedCandidates": null,
+        "droppedByInjectionBudget": null,
+        "emptyContext": null
+      },
+      "injected": false
+    },
+    {
+      "scenarioId": "concise-responses",
+      "condition": "memory-on",
+      "projectId": "proj_269821062b9599d2",
+      "contextSession": {
+        "toolExecutionEnd": 0,
+        "toolCallsByVerdict": {},
+        "passedHarnessCaptureFilterTotal": 0
+      },
+      "followUpRetrieval": {
+        "storeExisted": false,
+        "candidateEventCount": "store-missing",
+        "eventTypes": {},
+        "query": "TypeScript에서 유니언 타입과 인터섹션 타입의 차이가 뭐야?",
+        "turnId": "1:1786740331907",
+        "returnedCandidates": null,
+        "droppedByInjectionBudget": null,
+        "emptyContext": null
+      },
+      "injected": false
+    },
+    {
+      "scenarioId": "pnpm-workflow",
+      "condition": "memory-on",
+      "projectId": "proj_9b0572ec4908ddd3",
+      "contextSession": {
+        "toolExecutionEnd": 61,
+        "toolCallsByVerdict": {
+          "list_dir:read-only": {
+            "calls": 3,
+            "passedHarnessCaptureFilter": 0
+          },
+          "read_file:read-only": {
+            "calls": 1,
+            "passedHarnessCaptureFilter": 0
+          },
+          "bash:shell": {
+            "calls": 55,
+            "passedHarnessCaptureFilter": 53
+          },
+          "edit_file:write": {
+            "calls": 2,
+            "passedHarnessCaptureFilter": 0
+          }
+        },
+        "passedHarnessCaptureFilterTotal": 53
+      },
+      "followUpRetrieval": {
+        "storeExisted": true,
+        "candidateEventCount": 12,
+        "eventTypes": {
+          "project.created": 1,
+          "observation.captured": 9,
+          "memory.injected": 2
+        },
+        "query": "새 패키지 lodash를 추가하고 싶은데, 설치 명령이랑 CI 스텝 예시를 하나 만들어줘.",
+        "turnId": "1:1786740829446",
+        "returnedCandidates": {
+          "consolidatedMemories": [],
+          "rawSegments": 0,
+          "recentObservations": 9
+        },
+        "droppedByInjectionBudget": [],
+        "emptyContext": false
+      },
+      "injected": true
+    }
+  ]
+}
