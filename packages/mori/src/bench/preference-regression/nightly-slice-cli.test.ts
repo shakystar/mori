@@ -37,9 +37,12 @@ function fixtureReport(
     repeatsPerScenario: 10,
     scenarios,
     axisRates: { injectionHitRate: 0, reDistillationRate: 0, reQuestionRate: 0 },
+    // 기본값은 **판정이 실제로 선** 회차다 — ORACLE·OFF가 둘 다 돌아 간격이 임계값을 넘긴
+    // 시나리오 1건. `scenarios: []`(판정 0건)를 기본값으로 두면 그 자체가 아래 0건 가드에
+    // 걸리므로, 그 상태는 전용 케이스에서만 만든다.
     killSwitch: killSwitch ?? {
       threshold: KILL_SWITCH_GAP_THRESHOLD,
-      scenarios: [],
+      scenarios: [{ scenarioId: "s1", oracleScore: 1, offScore: 0, gap: 1, invalid: false }],
       invalid: false,
     },
   };
@@ -84,6 +87,26 @@ describe("reportNightlySliceOutcome (#416: 0건 그린 구멍)", () => {
 
     expect(code).toBe(1);
     expect(stderr.join("")).toContain("실행된 시나리오가 0건이다");
+  });
+
+  it("returns 1 when scenarios ran but the kill switch judged none of them (#401)", () => {
+    const { stderr, io } = fakeIo();
+
+    // 시나리오는 돌았는데 킬 스위치 판정은 0건 — ORACLE·OFF가 함께 실행된 시나리오가 없어
+    // `computeKillSwitchReport`가 전부 건너뛴 모양이다. `invalid`는 `some([])`라 `false`이므로,
+    // 가드가 없으면 이 회차가 그린으로 새어 나간다.
+    const code = reportNightlySliceOutcome(
+      fixtureReport([fixtureScenarioResult()], {
+        threshold: KILL_SWITCH_GAP_THRESHOLD,
+        scenarios: [],
+        invalid: false,
+      }),
+      "bench-reports/out.json",
+      io,
+    );
+
+    expect(code).toBe(1);
+    expect(stderr.join("")).toContain("킬 스위치가 판정한 시나리오가 0건이다");
   });
 
   it("returns 1 and surfaces the invalid scenarios on stderr when the kill switch fires (#435)", () => {

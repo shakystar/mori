@@ -79,6 +79,12 @@ function parseArgs(argv: string[]): ParsedArgs {
  *    말하지 못한다(#435, milestone-cli.ts `reportMilestoneOutcome`의 4번째 가드와 같은 판정).
  *    재실행으로 바뀌는 판정이 아니다 — 시나리오가 잴 수 있는 물건이 아니라는 뜻이므로, 이
  *    호출자는 재시도 대신 이 회차의 관측 결과로 보고해야 한다(#401).
+ * 3. `report.killSwitch.scenarios`가 비어 있으면 — 시나리오는 돌았는데 킬 스위치가 판정한
+ *    시나리오가 0건이면, ORACLE·OFF 두 팔이 함께 실행된 시나리오가 없어서
+ *    `computeKillSwitchReport`가 전부 건너뛴 것이다(kill-switch.ts의 `continue`). 그때
+ *    `invalid`는 `some()`이라 `false`가 되므로, 이 가드가 없으면 **판정을 한 번도 못 한 회차가
+ *    그린으로 나간다** — 2번 가드가 통째로 꺼진 채 통과하는 것과 같다(#401). 1번 가드와
+ *    분리해 두는 이유는 세는 대상이 다르기 때문이다: 1번은 실행 결과 건수, 이것은 판정 건수다.
  *
  * auth 해석과 분리해 둔 이유는 이 판정 로직만 순수 함수로 직접 테스트하기 위해서다(milestone-cli.ts의
  * `reportMilestoneOutcome` 선례를 따른다). */
@@ -94,6 +100,14 @@ export function reportNightlySliceOutcome(
   );
   if (report.scenarios.length === 0) {
     io.stderr("mori bench: 실행된 시나리오가 0건이다 — 가드가 헛돈 것이므로 실패로 처리한다.\n");
+    return 1;
+  }
+  if (report.killSwitch.scenarios.length === 0) {
+    io.stderr(
+      "mori bench: 킬 스위치가 판정한 시나리오가 0건이다 — ORACLE·OFF 두 팔이 모두 실행된 " +
+        "시나리오가 하나도 없다는 뜻이라 판정 자체가 서지 않았다. 무판정을 그린으로 내보내지 " +
+        "않는다.\n",
+    );
     return 1;
   }
   if (report.killSwitch.invalid) {
