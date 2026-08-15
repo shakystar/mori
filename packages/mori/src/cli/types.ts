@@ -1,4 +1,4 @@
-import type { StreamFn } from "@earendil-works/pi-agent-core";
+import type { Session, StreamFn } from "@earendil-works/pi-agent-core";
 import type { CredentialStore, MutableModels } from "@earendil-works/pi-ai";
 import type { MoriKernel } from "../agent/index.js";
 import type { ReplInputSource } from "./repl-input.js";
@@ -60,4 +60,14 @@ export interface RunCliDeps {
    * real kernel, exactly like every other production path.
    */
   kernel?: MoriKernel;
+  /**
+   * Sibling seam to `kernel` above (#460): the `Session` `prepareAgent` builds the harness on,
+   * in place of a fresh `createHarnessSession()`. Only meaningful together with `kernel` — a
+   * caller that constructs its own `MoriKernel` with a `ConversationSource` bound to a
+   * specific `Session` (`createHarnessConversationSource(session)`, kernel/index.ts) must hand
+   * `prepareAgent` that SAME session here, or the harness would type into a different instance
+   * than the one the kernel's conversation source reads from and the binding would observe
+   * nothing. Unset — the default — is a fresh session, exactly as before this seam existed.
+   */
+  session?: Session;
 }
