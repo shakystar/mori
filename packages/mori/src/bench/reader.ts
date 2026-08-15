@@ -95,6 +95,12 @@ export interface ApiReaderConfig {
    * bucket) to keep reader spend distinguishable from the episode's own turns. */
   costAxis?: BenchAxis;
   systemPrompt?: string;
+  /** #469 — the repeat this reader's calls belong to, folded into the cache key
+   * (`LlmCallCacheKeyScope.repeatIndex`). A bench that repeats a scenario to build a sample must
+   * set this: the judge prompt for repeat 2 is often byte-identical to repeat 1's (the episode
+   * under judgement can produce the same text), and without an index those repeats replay one
+   * stored verdict instead of drawing an independent one. */
+  repeatIndex?: number;
 }
 
 function createApiReader(config: ApiReaderConfig): Reader {
@@ -110,7 +116,12 @@ function createApiReader(config: ApiReaderConfig): Reader {
           config.cacheHooks?.onHit?.(key);
         },
       };
-      const cachedStream = withLlmCallCache(config.streamFn, config.cacheStore, hooks);
+      const cachedStream = withLlmCallCache(
+        config.streamFn,
+        config.cacheStore,
+        hooks,
+        config.repeatIndex === undefined ? undefined : { repeatIndex: config.repeatIndex },
+      );
       const context: Context = {
         ...(config.systemPrompt === undefined ? {} : { systemPrompt: config.systemPrompt }),
         messages: [{ role: "user", content: prompt, timestamp: 0 }],

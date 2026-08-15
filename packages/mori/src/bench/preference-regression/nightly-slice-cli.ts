@@ -2,6 +2,7 @@
 import { mkdir, mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { StreamFn } from "@earendil-works/pi-agent-core";
 import { createMoriModels } from "../../agent/model-wiring.js";
 import {
   resolveProviderSelection,
@@ -93,12 +94,23 @@ export function reportNightlySliceOutcome(
   report: NightlySliceReport,
   out: string,
   io: NightlySliceCliIO,
+  providerCalls?: number,
 ): number {
   io.stdout(
     `mori bench: 나이틀리/주간 슬라이스 완료 — 반복 ${String(report.repeatsPerScenario)}회, ` +
       `시나리오 결과 ${String(report.scenarios.length)}건, 총비용 $${report.total.cost.total.toFixed(4)}, ` +
       `비용 리포트: ${out}\n`,
   );
+  if (providerCalls !== undefined) {
+    // #469 완료 조건 2의 증거 출력. 여기서 세는 것은 **이 CLI가 넘긴 product-path `streamFn`을
+    // 실제로 통과한 호출**이다 — 캐시 적중은 `withLlmCallCache`가 저장된 응답을 재생하고 이
+    // 함수를 부르지 않으므로 세지 않는다. 두 번 연속 돌렸을 때 이 숫자가 어떻게 변하는지가
+    // 「재생이 캐시를 실제로 탔는가」의 관측치다. 세지 **않는** 것 둘: (a) 증류 호출 —
+    // `getConsolidatorLlm`(cli/runtime.ts)이 `models`에서 직접 만드므로 이 `streamFn`을 타지
+    // 않고 캐시도 없다. (b) 에피소드 세션 턴의 캐시 — 이 층은 `cacheStore`를 에피소드에 넘기지
+    // 않는다(runner.ts `RunEpisodeOptions.cacheStore`, #423 비범위)라 매 회차 실호출이다.
+    io.stdout(`mori bench: provider 스트림 호출 ${String(providerCalls)}건 (캐시 적중 제외)\n`);
+  }
   if (report.scenarios.length === 0) {
     io.stderr("mori bench: 실행된 시나리오가 0건이다 — 가드가 헛돈 것이므로 실패로 처리한다.\n");
     return 1;
@@ -183,9 +195,20 @@ export async function runNightlySliceCli(
   const workRoot = await mkdtemp(join(tmpdir(), "mori-nightly-slice-work-"));
   const memorizeRootBase = await mkdtemp(join(tmpdir(), "mori-nightly-slice-store-"));
 
+  // #469 완료 조건 2의 호출 카운터 — 재실행이 캐시를 탔는지를 리포트 밖에서 관측할 수 있는
+  // 유일한 자리다(비용 원장은 캐시 적중 시 저장된 `usage`를 그대로 다시 싣는 경로가 있어
+  // "0건"의 증거로 쓸 수 없다). `reportNightlySliceOutcome`의 주석에 무엇이 이 숫자에서 빠지는지
+  // 적혀 있다.
+  const streamSimple = models.streamSimple.bind(models);
+  let providerCalls = 0;
+  const countingStreamFn: StreamFn = (streamModel, context, streamOptions) => {
+    providerCalls += 1;
+    return streamSimple(streamModel, context, streamOptions);
+  };
+
   const report = await runNightlySlice({
     model,
-    streamFn: models.streamSimple.bind(models),
+    streamFn: countingStreamFn,
     cacheDir,
     workRoot,
     memorizeRootBase,
@@ -195,7 +218,7 @@ export async function runNightlySliceCli(
   });
 
   await writeCostReport(report, args.out);
-  return reportNightlySliceOutcome(report, args.out, io);
+  return reportNightlySliceOutcome(report, args.out, io, providerCalls);
 }
 
 if (isMainEntry(process.argv[1], import.meta.url)) {
