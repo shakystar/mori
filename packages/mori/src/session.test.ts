@@ -532,4 +532,35 @@ describe("MoriSession.compact() (#464, diagnosis: #462)", () => {
       /prompt\(\) after compact\(\{ forceCut: true \}\)/,
     );
   });
+
+  it("two overlapping forceCut compactions that both fail do not permanently lock prompt() — neither ever committed, so a snapshot-per-call restore that clobbers the other call's restore must not leave the lock stuck on (#466 owner review round 3)", async () => {
+    const okReplies = scriptedProvider(CONTEXT_TURNS.map(() => ({ text: "ok" })));
+    let failCalls = 0;
+    const streamFn: StreamFn = (model, context, options) => {
+      if (failCalls > 0) {
+        failCalls -= 1;
+        throw new Error("rate limited");
+      }
+      return okReplies.streamFn(model, context, options);
+    };
+
+    const result = await createMoriSession(ENV, {
+      credentialStore: new InMemoryCredentialStore(),
+      streamFn,
+      kernel: spyKernel(),
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    for (const turn of CONTEXT_TURNS) await result.session.prompt(turn);
+
+    failCalls = 2;
+    const a = result.session.compact({ forceCut: true });
+    const b = result.session.compact({ forceCut: true });
+    await expect(a).rejects.toThrow(/rate limited/);
+    await expect(b).rejects.toThrow(/rate limited/);
+
+    // Neither call ever touched the session's entries, so the session is still alive.
+    await expect(result.session.prompt("한 번 더")).resolves.toMatchObject({ stopReason: "stop" });
+  });
 });

@@ -215,11 +215,18 @@ export async function createMoriSession(
   // observe the *same* settle as the first, not a premature "done" while drain()/session-end
   // are still running (owner review, PR #350).
   let closePromise: Promise<MoriSessionClose> | undefined;
-  // Set once `compact({ forceCut: true })` has run (#464 owner review round 2): that path
-  // never appends the compaction to the session's own entry log (see `compact()`'s
-  // `@remarks`), so a later `prompt()` on this session would silently resend the full
-  // pre-compaction history while believing it had been summarized away.
-  let forceCutUsed = false;
+  // `compact({ forceCut: true })` never appends the compaction to the session's own entry
+  // log (see `compact()`'s `@remarks`), so a later `prompt()` on this session would silently
+  // resend the full pre-compaction history while believing it had been summarized away —
+  // `prompt()` must be locked out for as long as that's true. A single boolean snapshot/restore
+  // around that lock breaks under overlapping forceCut calls (#466 owner review round 3): two
+  // unawaited forceCut calls that both fail restore from each other's snapshots and can leave
+  // the lock stuck on even though neither ever touched the session. The two facts a snapshot
+  // conflated — "a forceCut is in flight" and "a forceCut has actually happened" — are tracked
+  // separately instead, so a settling call can only ever affect its own contribution.
+  let forceCutInFlight = 0;
+  let forceCutCommitted = false;
+  const forceCutLocksPrompt = () => forceCutInFlight > 0 || forceCutCommitted;
 
   function assertOpen(method: string): void {
     if (closePromise) {
@@ -251,7 +258,7 @@ export async function createMoriSession(
     session: {
       async prompt(text: string): Promise<MoriSessionTurn> {
         assertOpen("prompt");
-        if (forceCutUsed) {
+        if (forceCutLocksPrompt()) {
           throw new Error(
             "prompt() after compact({ forceCut: true }): forceCut leaves the session's entries " +
               "unchanged, so this turn would resend the full pre-compaction history. Start a new " +
@@ -312,14 +319,13 @@ export async function createMoriSession(
         // `async` for the same reason `consolidate()` is: `assertOpen`'s throw has to reject
         // the returned promise, not escape synchronously.
         assertOpen("compact");
-        // Set synchronously, before `enqueue` — same reasoning as `closePromise` above: a
+        // Incremented synchronously, before `enqueue` — same reasoning as `closePromise` above: a
         // caller that fires `compact({ forceCut: true })` without awaiting it and immediately
         // calls `prompt()` (no `await` in between) must still have `prompt()`'s own synchronous
-        // guard (below) see this set. Setting it from inside the enqueued callback instead would
+        // guard (above) see this. Incrementing from inside the enqueued callback instead would
         // leave that unawaited-call race open — `prompt()`'s guard runs before its own work is
         // enqueued, so it would run ahead of a `forceCut` branch that hadn't started yet.
-        const forceCutUsedBeforeThisCall = forceCutUsed;
-        if (options?.forceCut) forceCutUsed = true;
+        if (options?.forceCut) forceCutInFlight += 1;
 
         return enqueue(async () => {
           if (!options?.forceCut) {
@@ -353,9 +359,7 @@ export async function createMoriSession(
             // `try` starts here (before `contextMessages()`, not just around the summarizer
             // call) because the completion condition is "forceCut compaction fails", not
             // "the summarizer call fails" — `contextMessages()` (`Session.buildContext()`
-            // internally) is still part of what a forceCut compaction does, so a throw from
-            // it must restore the flag exactly like a summarizer failure does (owner review,
-            // PR #467 round 2).
+            // internally) is still part of what a forceCut compaction does.
             const messages = await agent.contextMessages();
             const summaryResult = await generateSummaryWithUsage(
               messages,
@@ -364,24 +368,17 @@ export async function createMoriSession(
               DEFAULT_COMPACTION_SETTINGS.reserveTokens,
             );
             if (!summaryResult.ok) throw summaryResult.error;
-            // Confirm the lock at the point of success, not just rely on the synchronous set
-            // above — two unawaited `compact({ forceCut: true })` calls on the same session
-            // enqueue back-to-back with their own `forceCutUsedBeforeThisCall` snapshot; if one
-            // fails and restores the flag while the other is still in flight, that restore must
-            // not erase a forceCut that actually happened. Setting it again here means the
-            // surviving success always wins over an unrelated call's restore, whichever order
-            // they settle in.
-            forceCutUsed = true;
+            // A forceCut that actually produced a summary locks `prompt()` for good — no later
+            // failure, on this call or an overlapping one, is allowed to erase that (#466 owner
+            // review round 3).
+            forceCutCommitted = true;
             return { summary: summaryResult.value.text, usage: summaryResult.value.usage };
-          } catch (error) {
-            // #466: if the forceCut compaction fails (network/rate-limit, or any other throw
-            // from the callback above), the session's entries are exactly as untouched as if
-            // `compact()` had never been called, so `prompt()`'s "resend full pre-compaction
-            // history" guard must not apply. Restored to whatever the flag was BEFORE this call
-            // set it, not unconditionally `false` — an earlier successful forceCut compaction
-            // on this same session must stay locked.
-            forceCutUsed = forceCutUsedBeforeThisCall;
-            throw error;
+          } finally {
+            // Exactly one decrement per forceCut call, success or failure — this is what makes
+            // "no forceCut ever committed" converge back to zero even when several overlapping
+            // calls all fail, instead of a single boolean snapshot getting clobbered by whichever
+            // one settles last (#466 owner review round 3).
+            forceCutInFlight -= 1;
           }
         });
       },
