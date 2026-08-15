@@ -283,9 +283,12 @@ function withOnArmFallback(
   fallbackSummary: string,
   onFallback: (used: boolean) => void,
 ): MoriKernel {
+  let decided = false;
   return {
     transformContext: async (messages, signal) => {
       const result = await kernel.transformContext(messages, signal);
+      if (decided) return result;
+      decided = true;
       if (result.length > messages.length) {
         onFallback(false);
         return result;

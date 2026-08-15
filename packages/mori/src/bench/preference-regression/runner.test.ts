@@ -305,6 +305,78 @@ describe("runPreferenceRegressionScenario (#387)", () => {
     expect(computeAxisRates([result]).injectionHitRate).toBe(0);
   });
 
+  it("memory-on: fallback decides once — a follow-up session whose transformContext fires more than once doesn't re-fire onFallback or re-prepend the carry-over (#459, PR #461 owner 수정요청 2)", async () => {
+    // `kernel/index.ts`의 `readTurnQuery` 독스트링이 이미 전제하듯, 한 에피소드 안에서
+    // `transformContext`가 tool-call 루프로 두 번 이상 불릴 수 있다 — `fakeHarness`의
+    // `prompt()`는 호출당 한 번만 부르므로, 이 시나리오는 여기서 직접 두 번 부르는 세션
+    // 더블을 쓴다. `withOnArmFallback`은 `withInjectionProbe`의 `observed` 가드와 같은
+    // "첫 호출에만 판정" 의미론을 지켜야 한다 — 그러지 않으면 둘째 호출에서 캐리오버가
+    // 다시 앞에 붙거나 `fallbackUsed`가 마지막 호출 기준으로 덮어써질 수 있다.
+    const followUpKernel = fakeKernel({ injects: false });
+    const contextKernel = fakeKernel({ injects: false });
+    const transformResults: AgentMessage[][] = [];
+    let sessionsCreated = 0;
+
+    const createKernel: CreateKernelFn = (_root, sessionId) =>
+      sessionId === "context" ? contextKernel : followUpKernel;
+
+    const createSession: CreateSessionFn = (
+      _env: NodeJS.ProcessEnv,
+      deps: RunCliDeps,
+    ): Promise<CreateMoriSessionResult> => {
+      const sessionId = sessionsCreated++ % 2 === 0 ? "context" : "follow-up";
+      return Promise.resolve({
+        ok: true,
+        session: {
+          async prompt(text: string): Promise<MoriSessionTurn> {
+            const messages: AgentMessage[] = [{ role: "user", content: text, timestamp: 0 }];
+            const first = (await deps.kernel?.transformContext(messages)) ?? messages;
+            if (sessionId === "follow-up") {
+              // 같은 세션 턴 안에서 tool-call 루프가 컨텍스트를 다시 재구성하는 상황을 흉내낸다.
+              const second = (await deps.kernel?.transformContext(messages)) ?? messages;
+              transformResults.push(first, second);
+            }
+            return { text: `reply:${text}`, stopReason: "stop", usage: usage() };
+          },
+          consolidate: () => Promise.resolve({ kind: "ok" as const }),
+          compact(): Promise<MoriSessionCompaction> {
+            return Promise.resolve({ summary: FIXTURE_COMPACTION_SUMMARY, usage: usage() });
+          },
+          close(): Promise<MoriSessionClose> {
+            return Promise.resolve({ usage: usage() });
+          },
+        },
+      });
+    };
+
+    const result = await runPreferenceRegressionScenario({
+      scenario: fixtureScenario("s-fallback-twice"),
+      condition: "memory-on",
+      root: "/tmp/fixture-root-fallback-twice",
+      env: {},
+      streamFn: async () => {
+        throw new Error("unused");
+      },
+      costLedger: createCostLedger(),
+      scoringJudge: { judge: () => Promise.resolve(true) },
+      reQuestionJudge: { judge: () => Promise.resolve(true) },
+      createSession,
+      createKernel,
+    });
+
+    expect(transformResults).toHaveLength(2);
+    const [firstCallResult, secondCallResult] = transformResults;
+    // (a) 첫 호출에서만 폴백이 발동해 캐리오버가 앞에 붙는다.
+    expect(JSON.stringify(firstCallResult)).toContain(FIXTURE_COMPACTION_SUMMARY);
+    // (b) 둘째 호출은 캐리오버를 다시 붙이지 않는다 — 내용이 두 번 중복되지 않는다.
+    const secondCallOccurrences = (
+      JSON.stringify(secondCallResult).match(new RegExp(FIXTURE_COMPACTION_SUMMARY, "g")) ?? []
+    ).length;
+    expect(secondCallOccurrences).toBe(0);
+    // (c) `fallbackUsed`는 첫 호출 판정(true)에 고정된다 — 둘째 호출이 다시 덮어쓰지 않는다.
+    expect(result.fallbackUsed).toBe(true);
+  });
+
   it("memory-off: runs the context session and carries only the harness compaction summary — zero mori store reads", async () => {
     // 스토어를 읽으면 세는 커널 더블을 **두 세션 모두**에 등록해 둔다 — OFF 팔이 이 커널을
     // 한 번도 만들지 않는다는 것이 「스토어 읽기 0건」의 근거다. 팔이 다시 mori 커널을 타도록

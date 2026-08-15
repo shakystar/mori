@@ -95,6 +95,26 @@ describe("PREFERENCE_REGRESSION_SCENARIOS (#386)", () => {
     expect(verboseScore.score).toBeLessThan(1);
   });
 
+  it("concise-responses: short-response catches verbose prose stuffed inside a code fence to dodge the prose check (#459, PR #461)", async () => {
+    // PR #461 owner 수정요청 3 — 산문만 재면 펜스 안에 (주석·문자열로) 장황한 설명을 욱여넣어
+    // "간결함" 판정을 우회할 수 있다. 산문은 짧지만 펜스 내용이 상한(600자)을 넘는 응답은
+    // 여전히 걸려야 한다.
+    const scenario = PREFERENCE_REGRESSION_SCENARIOS.find((s) => s.id === "concise-responses");
+    if (!scenario) throw new Error("concise-responses scenario missing");
+
+    const fenceStuffedOutput =
+      "간단히 말하면요.\n\n" +
+      "```ts\n" +
+      "// " +
+      "유니언과 인터섹션의 차이는 사실 꽤 복잡한 이야기인데요, ".repeat(20) +
+      "\n```";
+
+    const score = await scoreBehavioralAdaptation(scenario, fenceStuffedOutput, ALWAYS_TRUE_JUDGE);
+
+    expect(fenceStuffedOutput.replace(/```[\s\S]*?```/g, "").trim().length).toBeLessThanOrEqual(200);
+    expect(score.score).toBeLessThan(1);
+  });
+
   it("pnpm-workflow: scores 1 on pnpm-only output and less than 1 when npm is mixed in", async () => {
     const scenario = PREFERENCE_REGRESSION_SCENARIOS.find((s) => s.id === "pnpm-workflow");
     if (!scenario) throw new Error("pnpm-workflow scenario missing");

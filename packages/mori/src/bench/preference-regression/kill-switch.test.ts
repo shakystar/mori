@@ -15,6 +15,7 @@ function fixtureResult(
     injected: false,
     reQuestioned: undefined,
     compactionSummary: undefined,
+    fallbackUsed: undefined,
   };
 }
 
