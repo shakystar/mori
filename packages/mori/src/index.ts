@@ -19,6 +19,7 @@ import type {
   ExplicitConsolidateOutcome,
   MoriSession,
   MoriSessionCompaction,
+  MoriSessionCompactOptions,
   MoriSessionTurn,
 } from "./session.js";
 
@@ -29,6 +30,7 @@ export type {
   ExplicitConsolidateOutcome,
   MoriSession,
   MoriSessionCompaction,
+  MoriSessionCompactOptions,
   MoriSessionTurn,
 };
 
