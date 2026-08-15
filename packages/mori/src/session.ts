@@ -128,6 +128,12 @@ export interface MoriSession {
    * trigger's failure is benign (the context is merely still too big and the next turn
    * re-measures), but this caller asked for the summary itself — quietly answering with an
    * empty one would let the OFF arm report "it saw a compaction summary" when it saw nothing.
+   *
+   * @remarks
+   * `forceCut: true`는 **세션 엔트리를 갱신하지 않는다** — 요약 텍스트만 만들어 반환할 뿐
+   * `appendCompaction()`도 `session_compact` emit도 하지 않는다. 따라서 이 옵션은
+   * **호출 직후 세션을 버리는 용도(벤치 등)에서만 안전하다.** 압축 후에도 세션을 계속
+   * 쓰려면 옵션 없는 기본 경로(`compact()`)를 써라.
    */
   compact(options?: MoriSessionCompactOptions): Promise<MoriSessionCompaction>;
   /**
@@ -194,6 +200,11 @@ export async function createMoriSession(
   // observe the *same* settle as the first, not a premature "done" while drain()/session-end
   // are still running (owner review, PR #350).
   let closePromise: Promise<MoriSessionClose> | undefined;
+  // Set once `compact({ forceCut: true })` has run (#464 owner review round 2): that path
+  // never appends the compaction to the session's own entry log (see `compact()`'s
+  // `@remarks`), so a later `prompt()` on this session would silently resend the full
+  // pre-compaction history while believing it had been summarized away.
+  let forceCutUsed = false;
 
   function assertOpen(method: string): void {
     if (closePromise) {
@@ -225,6 +236,13 @@ export async function createMoriSession(
     session: {
       async prompt(text: string): Promise<MoriSessionTurn> {
         assertOpen("prompt");
+        if (forceCutUsed) {
+          throw new Error(
+            "prompt() after compact({ forceCut: true }): forceCut leaves the session's entries " +
+              "unchanged, so this turn would resend the full pre-compaction history. Start a new " +
+              "session, or use compact() without forceCut.",
+          );
+        }
 
         return enqueue(async () => {
           // A tool-call loop turns one `prompt()` into several provider round-trips, each
@@ -288,6 +306,13 @@ export async function createMoriSession(
             // handle.
             return { summary: result.summary, usage: result.usage ?? ZERO_USAGE };
           }
+
+          // Marks this session as no longer safe to `prompt()` on (see `forceCutUsed`'s own
+          // comment above) — set on entry to this branch, before the summarization call
+          // itself even starts, so a caller who awaits this `compact()` call before its next
+          // `prompt()` (the ordering `MoriSession`'s own doc assumes throughout) always sees
+          // it set.
+          forceCutUsed = true;
 
           // `forceCut` (#464): `agent.compact()` goes through pi's `prepareCompaction` ->
           // `compact()`, which SPLITS the context into `messagesToSummarize` (older than

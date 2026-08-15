@@ -451,4 +451,23 @@ describe("MoriSession.compact() (#464, diagnosis: #462)", () => {
     expect(compactionRequest).not.toContain("<conversation>\n\n</conversation>");
     expect(compactionRequest).toContain(CONTEXT_TURNS[0]);
   });
+
+  it("prompt() after compact({ forceCut: true }) rejects — forceCut never appends the compaction to the session's own entries, so a later turn would resend the full pre-compaction history unnoticed (#464 owner review round 2)", async () => {
+    const provider = scriptedProvider(CONTEXT_TURNS.map(() => ({ text: "ok" })));
+
+    const result = await createMoriSession(ENV, {
+      credentialStore: new InMemoryCredentialStore(),
+      streamFn: provider.streamFn,
+      kernel: spyKernel(),
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    for (const turn of CONTEXT_TURNS) await result.session.prompt(turn);
+    await result.session.compact({ forceCut: true });
+
+    await expect(result.session.prompt("한 번 더")).rejects.toThrow(
+      /prompt\(\) after compact\(\{ forceCut: true \}\)/,
+    );
+  });
 });
