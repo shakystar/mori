@@ -111,7 +111,9 @@ describe("PREFERENCE_REGRESSION_SCENARIOS (#386)", () => {
 
     const score = await scoreBehavioralAdaptation(scenario, fenceStuffedOutput, ALWAYS_TRUE_JUDGE);
 
-    expect(fenceStuffedOutput.replace(/```[\s\S]*?```/g, "").trim().length).toBeLessThanOrEqual(200);
+    expect(fenceStuffedOutput.replace(/```[\s\S]*?```/g, "").trim().length).toBeLessThanOrEqual(
+      200,
+    );
     expect(score.score).toBeLessThan(1);
   });
 
