@@ -470,4 +470,97 @@ describe("MoriSession.compact() (#464, diagnosis: #462)", () => {
       /prompt\(\) after compact\(\{ forceCut: true \}\)/,
     );
   });
+
+  it("a failed forceCut compaction reverts forceCutUsed — the session's entries were never touched, so a later prompt() is not permanently locked out (#466)", async () => {
+    const okReplies = scriptedProvider(CONTEXT_TURNS.map(() => ({ text: "ok" })));
+    let failNextCall = false;
+    const streamFn: StreamFn = (model, context, options) => {
+      if (failNextCall) {
+        failNextCall = false;
+        throw new Error("rate limited");
+      }
+      return okReplies.streamFn(model, context, options);
+    };
+
+    const result = await createMoriSession(ENV, {
+      credentialStore: new InMemoryCredentialStore(),
+      streamFn,
+      kernel: spyKernel(),
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    for (const turn of CONTEXT_TURNS) await result.session.prompt(turn);
+
+    failNextCall = true;
+    await expect(result.session.compact({ forceCut: true })).rejects.toThrow(/rate limited/);
+
+    // Not the "resend full pre-compaction history" guard rejection — the failed compaction
+    // left forceCutUsed exactly as it was before the call.
+    await expect(result.session.prompt("한 번 더")).resolves.toMatchObject({ stopReason: "stop" });
+  });
+
+  it("a failed forceCut compaction after an earlier successful one does not unlock prompt() — the successful forceCut's lock stays in force regardless of what a later failed call reverts to (#466 owner review round 2)", async () => {
+    const okReplies = scriptedProvider(CONTEXT_TURNS.map(() => ({ text: "ok" })));
+    let failNextCall = false;
+    const streamFn: StreamFn = (model, context, options) => {
+      if (failNextCall) {
+        failNextCall = false;
+        throw new Error("rate limited");
+      }
+      return okReplies.streamFn(model, context, options);
+    };
+
+    const result = await createMoriSession(ENV, {
+      credentialStore: new InMemoryCredentialStore(),
+      streamFn,
+      kernel: spyKernel(),
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    for (const turn of CONTEXT_TURNS) await result.session.prompt(turn);
+
+    await result.session.compact({ forceCut: true });
+
+    failNextCall = true;
+    await expect(result.session.compact({ forceCut: true })).rejects.toThrow(/rate limited/);
+
+    // The second call's failure must restore the flag to what it was BEFORE that call
+    // (already `true`, from the first successful forceCut) — not unconditionally `false`.
+    await expect(result.session.prompt("한 번 더")).rejects.toThrow(
+      /prompt\(\) after compact\(\{ forceCut: true \}\)/,
+    );
+  });
+
+  it("two overlapping forceCut compactions that both fail do not permanently lock prompt() — neither ever committed, so a snapshot-per-call restore that clobbers the other call's restore must not leave the lock stuck on (#466 owner review round 3)", async () => {
+    const okReplies = scriptedProvider(CONTEXT_TURNS.map(() => ({ text: "ok" })));
+    let failCalls = 0;
+    const streamFn: StreamFn = (model, context, options) => {
+      if (failCalls > 0) {
+        failCalls -= 1;
+        throw new Error("rate limited");
+      }
+      return okReplies.streamFn(model, context, options);
+    };
+
+    const result = await createMoriSession(ENV, {
+      credentialStore: new InMemoryCredentialStore(),
+      streamFn,
+      kernel: spyKernel(),
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    for (const turn of CONTEXT_TURNS) await result.session.prompt(turn);
+
+    failCalls = 2;
+    const a = result.session.compact({ forceCut: true });
+    const b = result.session.compact({ forceCut: true });
+    await expect(a).rejects.toThrow(/rate limited/);
+    await expect(b).rejects.toThrow(/rate limited/);
+
+    // Neither call ever touched the session's entries, so the session is still alive.
+    await expect(result.session.prompt("한 번 더")).resolves.toMatchObject({ stopReason: "stop" });
+  });
 });
