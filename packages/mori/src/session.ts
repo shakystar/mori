@@ -349,8 +349,14 @@ export async function createMoriSession(
           // latter was picked because it needs no second carryover format for the tail — the
           // summary itself is guaranteed to cover every context turn, which is what a
           // follow-up session actually needs (#464 요구사항).
-          const messages = await agent.contextMessages();
           try {
+            // `try` starts here (before `contextMessages()`, not just around the summarizer
+            // call) because the completion condition is "forceCut compaction fails", not
+            // "the summarizer call fails" — `contextMessages()` (`Session.buildContext()`
+            // internally) is still part of what a forceCut compaction does, so a throw from
+            // it must restore the flag exactly like a summarizer failure does (owner review,
+            // PR #467 round 2).
+            const messages = await agent.contextMessages();
             const summaryResult = await generateSummaryWithUsage(
               messages,
               agent.models,
@@ -358,14 +364,22 @@ export async function createMoriSession(
               DEFAULT_COMPACTION_SETTINGS.reserveTokens,
             );
             if (!summaryResult.ok) throw summaryResult.error;
+            // Confirm the lock at the point of success, not just rely on the synchronous set
+            // above — two unawaited `compact({ forceCut: true })` calls on the same session
+            // enqueue back-to-back with their own `forceCutUsedBeforeThisCall` snapshot; if one
+            // fails and restores the flag while the other is still in flight, that restore must
+            // not erase a forceCut that actually happened. Setting it again here means the
+            // surviving success always wins over an unrelated call's restore, whichever order
+            // they settle in.
+            forceCutUsed = true;
             return { summary: summaryResult.value.text, usage: summaryResult.value.usage };
           } catch (error) {
-            // #466: the summarizer call above is the only thing a forceCut compaction does —
-            // if it fails (network/rate-limit), the session's entries are exactly as untouched
-            // as if `compact()` had never been called, so `prompt()`'s "resend full
-            // pre-compaction history" guard must not apply. Restored to whatever the flag was
-            // BEFORE this call set it, not unconditionally `false` — an earlier successful
-            // forceCut compaction on this same session must stay locked.
+            // #466: if the forceCut compaction fails (network/rate-limit, or any other throw
+            // from the callback above), the session's entries are exactly as untouched as if
+            // `compact()` had never been called, so `prompt()`'s "resend full pre-compaction
+            // history" guard must not apply. Restored to whatever the flag was BEFORE this call
+            // set it, not unconditionally `false` — an earlier successful forceCut compaction
+            // on this same session must stay locked.
             forceCutUsed = forceCutUsedBeforeThisCall;
             throw error;
           }
