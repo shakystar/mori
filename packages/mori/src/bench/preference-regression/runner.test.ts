@@ -250,6 +250,9 @@ describe("runPreferenceRegressionScenario (#387)", () => {
     expect(harness.closeCount()).toBe(2);
 
     expect(result.injected).toBe(true);
+    // #470: the report must carry what mori retrieval actually injected, not just that it did —
+    // `fakeKernel({ injects: true })` prepends this exact message.
+    expect(result.injectedContent).toBe("[memory] fixture");
     expect(result.reQuestioned).toBe(true);
     expect(result.followUpOutput).toBe("reply:follow-up prompt");
     expect(result.score.score).toBe(1);
@@ -295,6 +298,9 @@ describe("runPreferenceRegressionScenario (#387)", () => {
 
     // retrieval의 원시 신호(injected)는 폴백이 덮어쓰지 않는다 — 여전히 미스로 남는다.
     expect(result.injected).toBe(false);
+    // #470: 폴백이 얹은 이월물은 compactionSummary로 이미 노출되므로 injectedContent에는
+    // 안 잡힌다 — injected가 false면 항상 undefined.
+    expect(result.injectedContent).toBeUndefined();
     expect(result.fallbackUsed).toBe(true);
     // OFF 팔과 같은 머리말 + 같은 요약 내용이 후속 컨텍스트에 얹힌다 — ON ⊇ OFF가 배선상
     // 보장된다는 것의 직접 증거(#459 완료 조건 1).

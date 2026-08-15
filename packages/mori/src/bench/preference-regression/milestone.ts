@@ -295,6 +295,7 @@ export async function runPreferenceRegressionMilestone(
         followUpOutput: episode.followUpOutput,
         score,
         injected: episode.injected,
+        injectedContent: episode.injectedContent,
         reQuestioned,
         compactionSummary: episode.compactionSummary,
         fallbackUsed: episode.fallbackUsed,

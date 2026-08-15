@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { Api, CredentialStore, Model } from "@earendil-works/pi-ai";
-import type { Session, StreamFn } from "@earendil-works/pi-agent-core";
+import type { AgentMessage, Session, StreamFn } from "@earendil-works/pi-agent-core";
 import { createHarnessConversationSource } from "../../agent/harness-conversation-source.js";
 import { createHarnessSession } from "../../agent/harness-session.js";
 import type { MoriKernel } from "../../agent/index.js";
@@ -224,20 +224,39 @@ export function createReaderLlmJudge(reader: Reader): LlmJudge {
   };
 }
 
+/** 주입된 메시지 자체의 텍스트 — `renderContextMessage`(packages/mori/src/kernel/index.ts)가 만드는 메시지는
+ * `content`가 항상 평문 문자열이지만, `MoriKernel`은 다른 `AgentMessage` variant(문자열이 아닌
+ * `content`, 혹은 `content` 필드가 아예 없는 커스텀 variant)도 이론상 돌려줄 수 있다 — 그런
+ * 경우 대충 직렬화해 보여주기보다 "잡지 못했다"는 뜻으로 `undefined`를 낸다. */
+function messageText(message: AgentMessage | undefined): string | undefined {
+  return message && "content" in message && typeof message.content === "string"
+    ? message.content
+    : undefined;
+}
+
 /**
  * `kernel.transformContext`를 감싸 후속 세션의 첫 호출이 실제로 뭔가를 주입했는지
  * (`결과 배열이 입력보다 길어졌는지`) 관측한다 — `SqliteMemoryKernel.transformContext`
  * (kernel/sqlite-memory-kernel.ts)가 주입할 것이 없으면 입력 배열을 그대로 돌려주는 계약에
  * 기댄 로컬 판정으로, 모델 호출 없이 `injection-hit-rate`의 실측치를 낸다.
+ *
+ * 적중 시 `onProbe`에 원문도 함께 건넨다(#470) — mori retrieval은 항상 앞에 메시지 하나를
+ * 붙이므로(`packages/kernel/src/kernel/sqlite-memory-kernel.ts`의 `return [injected, ...messages]`), 적중이면 `result[0]`이
+ * 그 원문이다. 무엇이 주입됐는지 리포트에 남겨야 「주입은 됐는데 왜 행동이 안 바뀌는가」를
+ * 판별할 수 있다 — 적중 여부(boolean)만으로는 내용물을 되짚을 수 없다.
  */
-function withInjectionProbe(kernel: MoriKernel, onProbe: (injected: boolean) => void): MoriKernel {
+function withInjectionProbe(
+  kernel: MoriKernel,
+  onProbe: (injected: boolean, content: string | undefined) => void,
+): MoriKernel {
   let observed = false;
   return {
     transformContext: async (messages, signal) => {
       const result = await kernel.transformContext(messages, signal);
       if (!observed) {
         observed = true;
-        onProbe(result.length > messages.length);
+        const injected = result.length > messages.length;
+        onProbe(injected, injected ? messageText(result[0]) : undefined);
       }
       return result;
     },
@@ -371,6 +390,10 @@ export interface ScenarioRunResult {
    * `"oracle"`에서는 항상 `false`다(두 팔은 mori 커널을 만들지 않는다. 그 팔들이 받는 이월물은
    * `withCarryOver`가 얹는 것이고 이 프로브는 그것을 세지 않는다). */
   injected: boolean;
+  /** `injected`가 true일 때 mori retrieval이 실제로 주입한 원문(#470) — 폴백(`withOnArmFallback`)이
+   * 얹은 이월물은 여기 안 잡힌다(그건 `compactionSummary`로 이미 노출된다). `injected`가 false거나
+   * 주입된 메시지가 평문 `content`를 갖지 않으면(`messageText` 참고) `undefined`다. */
+  injectedContent: string | undefined;
   /** 후속 출력이 이미 확립된 습관을 재질문했는가 — mori 팔(`"memory-on"`) 밖에서는
    * `undefined`다. 이유는 `runPreferenceRegressionScenario`의 판정 분기 주석 참고. */
   reQuestioned: boolean | undefined;
@@ -414,6 +437,8 @@ export interface EpisodeResult {
   /** 후속 세션 첫 호출에서 **mori retrieval**이 실제로 뭔가를 주입했는가 — `"memory-off"`·
    * `"oracle"`에서는 항상 `false`다 (`ScenarioRunResult.injected` 참고). */
   injected: boolean;
+  /** `ScenarioRunResult.injectedContent` 그대로(#470) — mori retrieval이 실제로 주입한 원문. */
+  injectedContent: string | undefined;
   /** 맥락 세션이 만든 하네스 압축 요약 원문 — `"memory-off"`에서는 그대로 후속 세션에
    * 이월되는 것이고, `"memory-on"`에서는 retrieval이 빈손일 때 폴백으로 쓰일 후보다(#459).
    * `"oracle"`에서는 항상 `undefined`다(맥락 세션을 압축할 이유가 없다). 리포트가 두 팔의
@@ -527,12 +552,14 @@ export async function runPreferenceRegressionEpisode(
   // the leniency trap `contextResult.session.close()` above is there to avoid).
   const followUpSession = usesMoriStore ? createHarnessSession() : undefined;
   let injected = false;
+  let injectedContent: string | undefined;
   const probedKernel = withInjectionProbe(
     followUpSession
       ? createKernel(options.root, "follow-up", options.env, followUpSession)
       : createStoreFreeKernel(),
-    (hit) => {
+    (hit, content) => {
       injected = hit;
+      injectedContent = content;
     },
   );
   let fallbackUsed: boolean | undefined;
@@ -586,6 +613,7 @@ export async function runPreferenceRegressionEpisode(
     condition: options.condition,
     followUpOutput: turn.text,
     injected,
+    injectedContent,
     compactionSummary,
     fallbackUsed,
   };
@@ -632,6 +660,7 @@ export async function runPreferenceRegressionScenario(
     followUpOutput: episode.followUpOutput,
     score,
     injected: episode.injected,
+    injectedContent: episode.injectedContent,
     reQuestioned,
     compactionSummary: episode.compactionSummary,
     fallbackUsed: episode.fallbackUsed,
