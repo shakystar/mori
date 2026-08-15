@@ -253,12 +253,16 @@ describe("runPreferenceRegressionScenario (#387)", () => {
     expect(result.reQuestioned).toBe(true);
     expect(result.followUpOutput).toBe("reply:follow-up prompt");
     expect(result.score.score).toBe(1);
-    // Only the "memory-off" arm carries a compaction summary.
-    expect(result.compactionSummary).toBeUndefined();
+    // #459: "memory-on" now also carries the harness compaction summary — it's the fallback
+    // candidate for a follow-up whose retrieval comes up empty — but this follow-up's kernel
+    // double injects organically, so the fallback never fires.
+    expect(result.compactionSummary).toBe(FIXTURE_COMPACTION_SUMMARY);
+    expect(result.fallbackUsed).toBe(false);
 
-    // BENCH_AXES.cost recorded once per turn (2 context + 1 follow-up).
+    // BENCH_AXES.cost recorded once per turn (2 context + 1 follow-up) plus the #459 compaction
+    // call the "memory-on" arm now makes to have a fallback candidate ready.
     const report = costLedger.report();
-    expect(report.byAxis[BENCH_AXES.cost]?.totalTokens).toBe(15 * 3);
+    expect(report.byAxis[BENCH_AXES.cost]?.totalTokens).toBe(15 * 4);
     // #449: close()'s own session-end distillation usage lands in a separate axis, once per
     // session closed (context + follow-up), not folded into BENCH_AXES.cost.
     expect(report.byAxis[BENCH_AXES.sessionEndDistillation]?.totalTokens).toBe(15 * 2);
@@ -266,6 +270,39 @@ describe("runPreferenceRegressionScenario (#387)", () => {
     expect(report.byAxis[BENCH_AXES.injectionHitRate]).toBeDefined();
     expect(report.byAxis[BENCH_AXES.reDistillationRate]).toBeDefined();
     expect(report.byAxis[BENCH_AXES.injectionHitRate]?.totalTokens).toBe(0);
+  });
+
+  it("memory-on: no organic injection falls back to the harness compaction summary, and injectionHitRate does not count the fallback as a hit (#459)", async () => {
+    const harness = fakeHarness({
+      context: fakeKernel({ injects: false }),
+      "follow-up": fakeKernel({ injects: false }),
+    });
+
+    const result = await runPreferenceRegressionScenario({
+      scenario: fixtureScenario("s-fallback"),
+      condition: "memory-on",
+      root: "/tmp/fixture-root-fallback",
+      env: {},
+      streamFn: async () => {
+        throw new Error("unused");
+      },
+      costLedger: createCostLedger(),
+      scoringJudge: { judge: () => Promise.resolve(true) },
+      reQuestionJudge: { judge: () => Promise.resolve(true) },
+      createSession: harness.createSession,
+      createKernel: harness.createKernel,
+    });
+
+    // retrieval의 원시 신호(injected)는 폴백이 덮어쓰지 않는다 — 여전히 미스로 남는다.
+    expect(result.injected).toBe(false);
+    expect(result.fallbackUsed).toBe(true);
+    // OFF 팔과 같은 머리말 + 같은 요약 내용이 후속 컨텍스트에 얹힌다 — ON ⊇ OFF가 배선상
+    // 보장된다는 것의 직접 증거(#459 완료 조건 1).
+    expect(harness.contextFor("follow-up")).toContain(FIXTURE_COMPACTION_SUMMARY);
+
+    // injectionHitRate는 mori retrieval의 실측 적중만 센다 — 폴백 발동을 적중으로 계상하면
+    // #401이 드러낸 진단 신호(33.3%)가 지워진다(#459 완료 조건 3).
+    expect(computeAxisRates([result]).injectionHitRate).toBe(0);
   });
 
   it("memory-off: runs the context session and carries only the harness compaction summary — zero mori store reads", async () => {
@@ -607,6 +644,10 @@ describe("runPreferenceRegressionScenario — 빈손 retrieval의 가시성 (#44
     // 아니라 «잰 것이 없었다»로도 통과해 버린다.
     expect(result.condition).toBe("memory-on");
     expect(computeAxisRates([result]).injectionHitRate).toBe(0);
+    // #459: 진짜 retrieval이 빈손이면 폴백이 발동해 OFF와 같은 하네스 압축 요약을 대신
+    // 얹는다 — «압축 요약조차 없는 맨 세션»이던 #401의 비대칭이 여기서 없어진다.
+    expect(result.fallbackUsed).toBe(true);
+    expect(harness.contextFor("follow-up")).toContain(FIXTURE_COMPACTION_SUMMARY);
   });
 });
 

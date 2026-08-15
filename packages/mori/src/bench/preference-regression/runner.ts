@@ -267,6 +267,62 @@ function withCarryOver(kernel: MoriKernel, carryOver: string): MoriKernel {
   };
 }
 
+/**
+ * `"memory-on"` 전용 폴백 (#459, mori#343 후속 조각 1/2). retrieval이 후속 세션 첫 호출에서
+ * 아무것도 못 주입했으면 — `kernel.transformContext`가 입력을 그대로 돌려주면 — `"memory-off"`
+ * 팔과 **동일한** 하네스 압축 요약을 대신 얹는다. 이로써 ON ⊇ OFF가 배선상 보장된다: retrieval이
+ * 뭔가 찾으면 그걸 쓰고, 못 찾으면 최소한 OFF가 보는 것과 같은 것을 본다 — #401 실측이 드러낸
+ * "무주입 ON이 OFF보다 적게 받는다"는 비대칭이 없어진다.
+ *
+ * `withInjectionProbe` **바깥에** 감는다: `injected`(injection-hit-rate)는 mori retrieval의
+ * 실측 적중만 세야 하고, 이 폴백이 채운 이월물은 그 수치에 섞이면 안 된다 — 폴백 회차를 적중으로
+ * 계상하면 #401이 드러낸 33.3%라는 진단 신호가 지워진다(#459 완료 조건).
+ */
+function withOnArmFallback(
+  kernel: MoriKernel,
+  fallbackSummary: string,
+  onFallback: (used: boolean) => void,
+): MoriKernel {
+  return {
+    transformContext: async (messages, signal) => {
+      const result = await kernel.transformContext(messages, signal);
+      if (result.length > messages.length) {
+        onFallback(false);
+        return result;
+      }
+      onFallback(true);
+      return [
+        {
+          role: "user",
+          content: `${COMPACTION_CARRY_OVER_PREFIX}${fallbackSummary}`,
+          timestamp: 0,
+        },
+        ...result,
+      ];
+    },
+    observe: (event) => kernel.observe(event),
+    consolidate: (llm, opts) => kernel.consolidate(llm, opts),
+    resetConversation: () => kernel.resetConversation(),
+    drain: () => kernel.drain(),
+  };
+}
+
+/** `withOnArmFallback`이 쓸 압축 요약이 비어 있으면 던진다 — `buildFollowUpCarryOver`의
+ * `"memory-off"` 가드와 같은 이유다: 머리말만 얹고 넘어가면 폴백이 "발동했지만 아무것도 못
+ * 줬다"는 조용한 실패가 된다. */
+function requireFallbackSummary(
+  scenario: PreferenceRegressionScenario,
+  compactionSummary: string | undefined,
+): string {
+  if (compactionSummary === undefined || compactionSummary.trim() === "") {
+    throw new Error(
+      `mori bench: 시나리오 "${scenario.id}"의 "memory-on" 팔 폴백에 쓸 하네스 압축 요약이 없다 — ` +
+        `이 팔의 맥락 세션은 압축 요약을 만들어 둔 뒤에야 후속 세션의 무주입 폴백이 가능하다(#459).`,
+    );
+  }
+  return compactionSummary;
+}
+
 export type CreateSessionFn = (
   env: NodeJS.ProcessEnv,
   deps: RunCliDeps,
@@ -294,8 +350,10 @@ export interface ScenarioRunResult {
   /** 후속 출력이 이미 확립된 습관을 재질문했는가 — mori 팔(`"memory-on"`) 밖에서는
    * `undefined`다. 이유는 `runPreferenceRegressionScenario`의 판정 분기 주석 참고. */
   reQuestioned: boolean | undefined;
-  /** `EpisodeResult.compactionSummary` 그대로 — `"memory-off"`가 아니면 `undefined`. */
+  /** `EpisodeResult.compactionSummary` 그대로 — `"oracle"`이면 `undefined`. */
   compactionSummary: string | undefined;
+  /** `EpisodeResult.fallbackUsed` 그대로 — `"memory-off"`·`"oracle"`이면 `undefined`. */
+  fallbackUsed: boolean | undefined;
 }
 
 export interface RunEpisodeOptions {
@@ -332,10 +390,16 @@ export interface EpisodeResult {
   /** 후속 세션 첫 호출에서 **mori retrieval**이 실제로 뭔가를 주입했는가 — `"memory-off"`·
    * `"oracle"`에서는 항상 `false`다 (`ScenarioRunResult.injected` 참고). */
   injected: boolean;
-  /** `"memory-off"` 팔이 이월한 하네스 압축 요약 원문 — 다른 두 팔에서는 항상 `undefined`다.
-   * 리포트가 그 팔의 이월물을 실물로 보여줄 수 있는 유일한 자리라 여기서 표면화한다(#401 완료
-   * 조건: 「OFF 팔의 압축 요약 실물을 리포트에 남긴다」). */
+  /** 맥락 세션이 만든 하네스 압축 요약 원문 — `"memory-off"`에서는 그대로 후속 세션에
+   * 이월되는 것이고, `"memory-on"`에서는 retrieval이 빈손일 때 폴백으로 쓰일 후보다(#459).
+   * `"oracle"`에서는 항상 `undefined`다(맥락 세션을 압축할 이유가 없다). 리포트가 두 팔의
+   * 이월물을 실물로 보여줄 수 있는 유일한 자리라 여기서 표면화한다(#401 완료 조건: 「OFF 팔의
+   * 압축 요약 실물을 리포트에 남긴다」). */
   compactionSummary: string | undefined;
+  /** `"memory-on"` 후속 세션이 retrieval 무주입 폴백을 실제로 썼는가(#459) — `"memory-off"`·
+   * `"oracle"`에서는 항상 `undefined`다(그 팔들에는 폴백 개념 자체가 없다). 폴백 발동 여부가
+   * 에피소드별로 리포트 JSON에 관측되도록 여기서 표면화한다(#459 완료 조건). */
+  fallbackUsed: boolean | undefined;
 }
 
 /** 시나리오 하나 × 조건 하나를 채점 없이 끝까지 실행한다: 맥락 세션 주입 → 세션 사망 →
@@ -394,11 +458,13 @@ export async function runPreferenceRegressionEpisode(
       options.costLedger.record(BENCH_AXES.cost, result.usage);
       assertTurnOk(result, options.scenario.id, "맥락");
     }
-    if (options.condition === "memory-off") {
-      // OFF 팔의 이월물을 여기서 만든다 — 세션이 죽기 전에, 그 세션 자신의 하네스 압축으로.
-      // 임계치를 기다리지 않고 직접 부르는 이유: 이 시나리오들의 맥락 세션은 컨텍스트 창을
-      // 채울 만큼 길지 않아 자동 트리거(`compactIfContextFull`)가 영영 안 걸린다. 압축 경로
-      // 자체는 pi의 기본 그대로다(#7과 별개 축 — 이 조각은 쓰기만 한다).
+    if (options.condition === "memory-off" || options.condition === "memory-on") {
+      // OFF 팔은 이 요약을 그대로 이월하고, ON 팔은 아래에서 retrieval이 빈손일 때만 같은
+      // 요약을 폴백으로 쓴다(#459) — 어느 쪽이든 세션이 죽기 전에, 그 세션 자신의 하네스
+      // 압축으로 만들어 둬야 한다. 임계치를 기다리지 않고 직접 부르는 이유: 이 시나리오들의
+      // 맥락 세션은 컨텍스트 창을 채울 만큼 길지 않아 자동 트리거(`compactIfContextFull`)가
+      // 영영 안 걸린다. 압축 경로 자체는 pi의 기본 그대로다(#7과 별개 축 — 이 조각은 쓰기만
+      // 한다).
       const compaction = await contextResult.session.compact();
       options.costLedger.record(BENCH_AXES.cost, compaction.usage);
       compactionSummary = compaction.summary;
@@ -422,8 +488,19 @@ export async function runPreferenceRegressionEpisode(
       injected = hit;
     },
   );
-  const followUpKernel =
-    carryOver === undefined ? probedKernel : withCarryOver(probedKernel, carryOver);
+  let fallbackUsed: boolean | undefined;
+  let followUpKernel: MoriKernel;
+  if (carryOver !== undefined) {
+    followUpKernel = withCarryOver(probedKernel, carryOver);
+  } else if (options.condition === "memory-on") {
+    const fallbackSummary = requireFallbackSummary(options.scenario, compactionSummary);
+    fallbackUsed = false;
+    followUpKernel = withOnArmFallback(probedKernel, fallbackSummary, (used) => {
+      fallbackUsed = used;
+    });
+  } else {
+    followUpKernel = probedKernel;
+  }
   const followUpResult = await createSession(options.env, { ...baseDeps, kernel: followUpKernel });
   if (!followUpResult.ok) {
     throw new Error(
@@ -459,6 +536,7 @@ export async function runPreferenceRegressionEpisode(
     followUpOutput: turn.text,
     injected,
     compactionSummary,
+    fallbackUsed,
   };
 }
 
@@ -505,6 +583,7 @@ export async function runPreferenceRegressionScenario(
     injected: episode.injected,
     reQuestioned,
     compactionSummary: episode.compactionSummary,
+    fallbackUsed: episode.fallbackUsed,
   };
 }
 
