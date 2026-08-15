@@ -9,6 +9,7 @@ import type { MoriKernel } from "../../agent/index.js";
 import type { RunCliDeps } from "../../cli/types.js";
 import type {
   CreateMoriSessionResult,
+  MoriSessionClose,
   MoriSessionCompaction,
   MoriSessionTurn,
 } from "../../session.js";
@@ -197,9 +198,9 @@ function fakeHarness(
           compacts += 1;
           return Promise.resolve({ summary: FIXTURE_COMPACTION_SUMMARY, usage: usage() });
         },
-        close(): Promise<void> {
+        close(): Promise<MoriSessionClose> {
           closesBySessionId[sessionId] = (closesBySessionId[sessionId] ?? 0) + 1;
-          return Promise.resolve();
+          return Promise.resolve({ usage: usage() });
         },
       },
     });
@@ -258,6 +259,9 @@ describe("runPreferenceRegressionScenario (#387)", () => {
     // BENCH_AXES.cost recorded once per turn (2 context + 1 follow-up).
     const report = costLedger.report();
     expect(report.byAxis[BENCH_AXES.cost]?.totalTokens).toBe(15 * 3);
+    // #449: close()'s own session-end distillation usage lands in a separate axis, once per
+    // session closed (context + follow-up), not folded into BENCH_AXES.cost.
+    expect(report.byAxis[BENCH_AXES.sessionEndDistillation]?.totalTokens).toBe(15 * 2);
     // The zero-cost local probes still populate their axes.
     expect(report.byAxis[BENCH_AXES.injectionHitRate]).toBeDefined();
     expect(report.byAxis[BENCH_AXES.reDistillationRate]).toBeDefined();
@@ -680,7 +684,7 @@ function toolRootEchoingHarness(
         },
         consolidate: () => Promise.resolve({ kind: "ok" as const }),
         compact: () => Promise.resolve({ summary: "unused fixture summary", usage: usage() }),
-        close: () => Promise.resolve(),
+        close: () => Promise.resolve({ usage: usage() }),
       },
     });
   return { createSession, createKernel };

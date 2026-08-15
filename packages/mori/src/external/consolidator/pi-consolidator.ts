@@ -104,6 +104,10 @@ export class PiConsolidatorLlm implements ConsolidatorLlm {
         ...(opts?.signal ? { signal: opts.signal } : {}),
       },
     );
+    // Fired before the stopReason check, not after: a truncated or errored reply still spent
+    // the tokens the provider billed for it (#449) — the same "count it even on failure"
+    // philosophy the bench cost ledger already applies to turns (`runner.ts`).
+    opts?.onUsage?.(result.usage);
     if (result.stopReason !== "stop") {
       if (result.stopReason === "aborted") {
         const error = new Error(result.errorMessage ?? "consolidator LLM request aborted");

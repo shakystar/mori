@@ -62,6 +62,14 @@ export interface ConsolidatorLlmCallOptions {
    * instead of only being observed before it started.
    */
   signal?: AbortSignal;
+  /**
+   * #449: fired once `complete` has a reply, with whatever token/cost accounting the
+   * implementation's own provider call produced. Opaque to the kernel on purpose — usage/cost
+   * is a harness concern (this package has no dependency on any provider SDK, see
+   * `ConsolidatorLlm`'s own doc), so this is a pass-through sink, not a typed kernel field. A
+   * `ConsolidatorLlm` implementation with nothing to report simply never calls it.
+   */
+  onUsage?: (usage: unknown) => void;
 }
 
 /** LLM seam for consolidation. The harness supplies an in-process implementation. */
@@ -110,6 +118,13 @@ export interface ConsolidateCallOptions {
    * boundary retries the same window.
    */
   signal?: AbortSignal;
+  /**
+   * #449: forwarded verbatim to the extraction call's own {@link ConsolidatorLlmCallOptions.onUsage}
+   * — see that field's doc. Only fires if this boundary actually reaches the extractor (an
+   * `llm`-backed one, on a non-empty window); a noop boundary or a rule-based extractor never
+   * calls it.
+   */
+  onUsage?: (usage: unknown) => void;
 }
 
 /**

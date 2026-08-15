@@ -407,7 +407,10 @@ export async function runPreferenceRegressionEpisode(
     // close()의 drain + session-end consolidation이 "세션 사망"이다 — 이 아래에서 여는 후속
     // 세션은 항상 이 시점 이후에 생성되므로, 스토어 전용 읽기만 보고 raw 세션 원문을
     // 재노출받지 않는다(memorize#176 leniency 함정).
-    await contextResult.session.close();
+    const contextClose = await contextResult.session.close();
+    // #449: close()가 낸 세션종료 증류 LLM 호출 자체의 비용. `BENCH_AXES.cost`(맥락 턴 +
+    // 압축)와 구분되는 축에 기록해야 「mori 팔의 증류가 얼마인가」를 원장에서 읽을 수 있다.
+    options.costLedger.record(BENCH_AXES.sessionEndDistillation, contextClose.usage);
   }
 
   const carryOver = buildFollowUpCarryOver(options.condition, options.scenario, compactionSummary);
@@ -434,7 +437,8 @@ export async function runPreferenceRegressionEpisode(
     options.costLedger.record(BENCH_AXES.cost, turn.usage);
     assertTurnOk(turn, options.scenario.id, "후속");
   } finally {
-    await followUpResult.session.close();
+    const followUpClose = await followUpResult.session.close();
+    options.costLedger.record(BENCH_AXES.sessionEndDistillation, followUpClose.usage);
   }
 
   // 로컬 판정(모델 호출 0건)이지만, 매 시나리오마다 기록해 둬야 `injection-hit-rate`가 리포트의

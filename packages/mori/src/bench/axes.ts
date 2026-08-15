@@ -12,6 +12,14 @@ export const BENCH_AXES = {
   reDistillationRate: "re-distillation-rate",
   reQuestionRate: "re-question-rate",
   cost: "cost",
+  /**
+   * #449: `MoriSession.close()`'s own session-end consolidation call — kept OUT of `cost`
+   * on purpose. That axis is context turns + compaction + the follow-up turn (see
+   * `preference-regression/runner.ts`'s three `record(BENCH_AXES.cost, ...)` call sites);
+   * folding session-end distillation into the same bucket would make "how much does mori's
+   * own distillation cost" unreadable again, which is the exact gap PR #448 §5-a found.
+   */
+  sessionEndDistillation: "session-end-distillation",
 } as const;
 
 export type BenchAxis = (typeof BENCH_AXES)[keyof typeof BENCH_AXES];

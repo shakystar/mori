@@ -17,6 +17,7 @@
  * name would be silently dropped.
  */
 
+import type { Usage } from "@earendil-works/pi-ai";
 import type { ConsolidateBoundary, ConsolidatorLlm } from "@mori/kernel";
 import type { MoriKernel } from "../agent/index.js";
 
@@ -53,11 +54,18 @@ function consolidateGuarded(
   llm: ConsolidatorLlm,
   boundary: Extract<ConsolidateBoundary, "session-end" | "manual" | "post-compact">,
   signal?: AbortSignal,
+  onUsage?: (usage: unknown) => void,
 ): Promise<void> {
   const prior = chains.get(kernel) ?? Promise.resolve();
   const mine = prior
     .catch(() => {})
-    .then(() => kernel.consolidate(llm, { boundary, ...(signal ? { signal } : {}) }));
+    .then(() =>
+      kernel.consolidate(llm, {
+        boundary,
+        ...(signal ? { signal } : {}),
+        ...(onUsage ? { onUsage } : {}),
+      }),
+    );
   chains.set(
     kernel,
     mine.catch(() => {}),
@@ -71,15 +79,30 @@ function consolidateGuarded(
  * boundary failure is reported through `onError` and otherwise ignored, because the process
  * is about to exit and the watermark not advancing means the next boundary just retries this
  * same window.
+ *
+ * `onUsage` (#449) surfaces the distillation LLM call's own token/cost accounting — before
+ * this, `MoriSession.close()` had no way to tell a caller (the bench cost ledger) that this
+ * boundary spent anything at all. It rides `consolidateGuarded`'s kernel-opaque `onUsage`
+ * passthrough (`ConsolidatorLlmCallOptions`, `@mori/kernel`) — the cast back to `Usage` here
+ * is safe only because THIS module controls both ends of that passthrough: the sole
+ * `ConsolidatorLlm` this harness wires in (`PiConsolidatorLlm`) is the only thing that ever
+ * calls it, and it always calls it with a real `Usage`.
  */
 export async function consolidateOnSessionEnd(
   kernel: MoriKernel,
   llm: ConsolidatorLlm | undefined,
   onError: (message: string) => void,
+  onUsage?: (usage: Usage) => void,
 ): Promise<void> {
   if (!llm) return;
   try {
-    await consolidateGuarded(kernel, llm, "session-end");
+    await consolidateGuarded(
+      kernel,
+      llm,
+      "session-end",
+      undefined,
+      onUsage ? (usage) => onUsage(usage as Usage) : undefined,
+    );
   } catch (error) {
     onError(sessionEndFailureMessage(error));
   }
