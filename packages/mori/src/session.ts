@@ -1,4 +1,8 @@
-import type { MessageEntry } from "@earendil-works/pi-agent-core";
+import {
+  DEFAULT_COMPACTION_SETTINGS,
+  generateSummaryWithUsage,
+  type MessageEntry,
+} from "@earendil-works/pi-agent-core";
 import { contentText, type AssistantMessage, type Usage } from "@earendil-works/pi-ai";
 import {
   resolveProviderSelection,
@@ -36,6 +40,25 @@ export interface MoriSessionCompaction {
   summary: string;
   /** Usage of the LLM call that produced the summary — zero if the provider reported none. */
   usage: Usage;
+}
+
+/** Options for `MoriSession.compact()` (#464). */
+export interface MoriSessionCompactOptions {
+  /**
+   * Bypasses pi's `keepRecentTokens` (20000) tail-retention split and summarizes the entire
+   * current context in one call, instead of the default `agent.compact()` path. Opt-in only
+   * — omitting this leaves `compact()` byte-for-byte what it did before this option existed
+   * (정본 방어선: production's context-window-triggered compaction, `compactIfContextFull` in
+   * cli/compaction.ts, never sets this and is unaffected).
+   *
+   * Why this exists: pi's `compact()` only summarizes the part of the conversation OLDER than
+   * `keepRecentTokens` and leaves the rest as a verbatim `retainedTail` it does not hand to
+   * the caller. A conversation shorter than that budget (the preference-regression bench's
+   * few-turn context sessions, #462) has NOTHING older than the budget, so
+   * `messagesToSummarize` comes back empty and the summarizer answers "the conversation is
+   * empty" — a non-empty string that every downstream consumer reads as a real summary.
+   */
+  forceCut?: boolean;
 }
 
 /** What a single `MoriSession.close()` call produced (#449). */
@@ -83,25 +106,36 @@ export interface MoriSession {
   /**
    * Runs the harness's own compaction now and hands back the summary it produced — the same
    * `AgentHarness.compact()` that `compactIfContextFull` (cli/compaction.ts) fires once the
-   * context window fills, triggered by the caller instead of by the threshold. The compaction
-   * path itself stays entirely pi's: mori declares no summary prompt and no second threshold
-   * of its own (정본 문서 §6.1), and this method adds neither.
+   * context window fills, triggered by the caller instead of by the threshold. Without
+   * `options.forceCut`, the compaction path stays entirely pi's default: mori declares no
+   * summary prompt and no second threshold of its own (정본 문서 §6.1), and this method adds
+   * neither — that is still true WITH `forceCut` (#464), which reuses pi's own summarizer
+   * (`generateSummaryWithUsage`) rather than declaring a mori-side one.
    *
-   * Its one caller is the preference-regression OFF arm (bench/preference-regression/runner.ts,
-   * #434). "What would have survived the session's death if mori were not here?" has exactly
-   * one honest answer — the harness's default compaction summary — and handing that answer to
-   * the follow-up session requires getting it out of the session it was made in.
+   * Its callers are the preference-regression OFF/ON-fallback arms
+   * (bench/preference-regression/runner.ts, #434, #459) — always with `forceCut: true`
+   * (#462: their context sessions are too short for pi's default tail-retention split to ever
+   * produce a real summary; see `MoriSessionCompactOptions.forceCut`). "What would have
+   * survived the session's death if mori were not here?" has exactly one honest answer — a
+   * real compaction summary, not a "the conversation is empty" boilerplate — and handing that
+   * answer to the follow-up session requires getting it out of the session it was made in.
    *
    * Queues behind whatever `prompt()`/`consolidate()`/`close()` call is in flight, same
-   * ordering as `prompt()`: `compact()` requires an idle harness (cli/compaction.ts) and
-   * rejects with `busy` if it lands mid-turn.
+   * ordering as `prompt()`: without `forceCut`, `compact()` requires an idle harness
+   * (cli/compaction.ts) and rejects with `busy` if it lands mid-turn.
    *
    * Rejects rather than reporting through `stderr`, unlike the between-turns trigger. That
    * trigger's failure is benign (the context is merely still too big and the next turn
    * re-measures), but this caller asked for the summary itself — quietly answering with an
    * empty one would let the OFF arm report "it saw a compaction summary" when it saw nothing.
+   *
+   * @remarks
+   * `forceCut: true`는 **세션 엔트리를 갱신하지 않는다** — 요약 텍스트만 만들어 반환할 뿐
+   * `appendCompaction()`도 `session_compact` emit도 하지 않는다. 따라서 이 옵션은
+   * **호출 직후 세션을 버리는 용도(벤치 등)에서만 안전하다.** 압축 후에도 세션을 계속
+   * 쓰려면 옵션 없는 기본 경로(`compact()`)를 써라.
    */
-  compact(): Promise<MoriSessionCompaction>;
+  compact(options?: MoriSessionCompactOptions): Promise<MoriSessionCompaction>;
   /**
    * Settles queued observations and runs the session-end consolidation trigger. Call once, at
    * episode end, in place of the process exit that does this for the CLI (cli/runtime.ts's
@@ -166,6 +200,11 @@ export async function createMoriSession(
   // observe the *same* settle as the first, not a premature "done" while drain()/session-end
   // are still running (owner review, PR #350).
   let closePromise: Promise<MoriSessionClose> | undefined;
+  // Set once `compact({ forceCut: true })` has run (#464 owner review round 2): that path
+  // never appends the compaction to the session's own entry log (see `compact()`'s
+  // `@remarks`), so a later `prompt()` on this session would silently resend the full
+  // pre-compaction history while believing it had been summarized away.
+  let forceCutUsed = false;
 
   function assertOpen(method: string): void {
     if (closePromise) {
@@ -197,6 +236,13 @@ export async function createMoriSession(
     session: {
       async prompt(text: string): Promise<MoriSessionTurn> {
         assertOpen("prompt");
+        if (forceCutUsed) {
+          throw new Error(
+            "prompt() after compact({ forceCut: true }): forceCut leaves the session's entries " +
+              "unchanged, so this turn would resend the full pre-compaction history. Start a new " +
+              "session, or use compact() without forceCut.",
+          );
+        }
 
         return enqueue(async () => {
           // A tool-call loop turns one `prompt()` into several provider round-trips, each
@@ -247,16 +293,55 @@ export async function createMoriSession(
         });
       },
 
-      async compact(): Promise<MoriSessionCompaction> {
+      async compact(options?: MoriSessionCompactOptions): Promise<MoriSessionCompaction> {
         // `async` for the same reason `consolidate()` is: `assertOpen`'s throw has to reject
         // the returned promise, not escape synchronously.
         assertOpen("compact");
+        // Set synchronously, before `enqueue` — same reasoning as `closePromise` above: a
+        // caller that fires `compact({ forceCut: true })` without awaiting it and immediately
+        // calls `prompt()` (no `await` in between) must still have `prompt()`'s own synchronous
+        // guard (below) see this set. Setting it from inside the enqueued callback instead would
+        // leave that unawaited-call race open — `prompt()`'s guard runs before its own work is
+        // enqueued, so it would run ahead of a `forceCut` branch that hadn't started yet.
+        if (options?.forceCut) forceCutUsed = true;
 
         return enqueue(async () => {
-          const result = await agent.compact();
-          // `usage` is optional on `CompactResult` — a provider that reports none must read as
-          // "this cost nothing we can see", not as a missing field the caller has to handle.
-          return { summary: result.summary, usage: result.usage ?? ZERO_USAGE };
+          if (!options?.forceCut) {
+            const result = await agent.compact();
+            // `usage` is optional on `CompactResult` — a provider that reports none must read
+            // as "this cost nothing we can see", not as a missing field the caller has to
+            // handle.
+            return { summary: result.summary, usage: result.usage ?? ZERO_USAGE };
+          }
+
+          // `forceCut` (#464): `agent.compact()` goes through pi's `prepareCompaction` ->
+          // `compact()`, which SPLITS the context into `messagesToSummarize` (older than
+          // `keepRecentTokens`, the only part that gets summarized) and `retainedTail`
+          // (everything else, kept verbatim and never handed to this caller). A conversation
+          // shorter than `keepRecentTokens` has nothing older than the budget, so that split
+          // leaves `messagesToSummarize` empty and pi's summarizer answers "the conversation is
+          // empty" — the diagnosed bug (#462).
+          //
+          // The fix bypasses that split entirely: `contextMessages()` is the full message list
+          // the harness would send the NEXT turn (agent/index.ts), and it goes straight into
+          // `generateSummaryWithUsage` — the exact function pi's own `compact()` calls
+          // internally on `messagesToSummarize` (pi 0.82.1
+          // harness/compaction/compaction.ts's `compact()`), just handed the whole
+          // conversation instead of a possibly-empty slice of it. This is a deliberate choice
+          // between the two options the issue left open: carry the split summary alongside a
+          // separately-serialized `retainedTail`, or summarize everything in one call. The
+          // latter was picked because it needs no second carryover format for the tail — the
+          // summary itself is guaranteed to cover every context turn, which is what a
+          // follow-up session actually needs (#464 요구사항).
+          const messages = await agent.contextMessages();
+          const summaryResult = await generateSummaryWithUsage(
+            messages,
+            agent.models,
+            agent.getModel(),
+            DEFAULT_COMPACTION_SETTINGS.reserveTokens,
+          );
+          if (!summaryResult.ok) throw summaryResult.error;
+          return { summary: summaryResult.value.text, usage: summaryResult.value.usage };
         });
       },
 

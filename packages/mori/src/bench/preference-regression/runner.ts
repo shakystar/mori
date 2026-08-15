@@ -466,9 +466,13 @@ export async function runPreferenceRegressionEpisode(
       // 요약을 폴백으로 쓴다(#459) — 어느 쪽이든 세션이 죽기 전에, 그 세션 자신의 하네스
       // 압축으로 만들어 둬야 한다. 임계치를 기다리지 않고 직접 부르는 이유: 이 시나리오들의
       // 맥락 세션은 컨텍스트 창을 채울 만큼 길지 않아 자동 트리거(`compactIfContextFull`)가
-      // 영영 안 걸린다. 압축 경로 자체는 pi의 기본 그대로다(#7과 별개 축 — 이 조각은 쓰기만
-      // 한다).
-      const compaction = await contextResult.session.compact();
+      // 영영 안 걸린다 — 바로 그 짧음이 `forceCut: true`가 필요한 이유이기도 하다(#464):
+      // pi의 기본 압축은 `keepRecentTokens`(20000)보다 오래된 부분만 요약하므로, 이 짧은
+      // 맥락 세션에는 요약할 「오래된 부분」이 아예 없어 빈 대화 보일러플레이트가 나간다
+      // (#462 진단). `forceCut`은 같은 요약기(`generateSummaryWithUsage`)를 그대로 쓰되
+      // 전체 맥락을 요약 대상으로 넘긴다 — 압축 경로 자체가 pi의 것이라는 성질은 그대로다
+      // (#7과 별개 축 — 이 조각은 쓰기만 한다).
+      const compaction = await contextResult.session.compact({ forceCut: true });
       options.costLedger.record(BENCH_AXES.cost, compaction.usage);
       compactionSummary = compaction.summary;
     }
