@@ -5,7 +5,11 @@ import type {
   Context,
   Usage,
 } from "@earendil-works/pi-ai";
-import { createAssistantMessageEventStream, InMemoryCredentialStore } from "@earendil-works/pi-ai";
+import {
+  contentText,
+  createAssistantMessageEventStream,
+  InMemoryCredentialStore,
+} from "@earendil-works/pi-ai";
 import type { ConsolidateCallOptions, ConsolidatorLlm } from "@mori/kernel";
 import { describe, expect, it } from "vitest";
 import type { MoriKernel } from "./agent/index.js";
@@ -378,5 +382,73 @@ describe("createMoriSession (#341)", () => {
     // ran one after the other, not interleaved, even though neither call was awaited before the
     // next fired.
     expect(kernel.calls).toEqual(["drain", "consolidate", "drain", "consolidate"]);
+  });
+});
+
+/**
+ * The compaction summarizer's own user-turn prompt text, off a recorded `Context` — the
+ * `<conversation>...</conversation>` block plus the format instructions
+ * (`generateSummaryWithUsage`, pi 0.82.1). `contentText` (not `JSON.stringify`) so the
+ * assertion checks the actual prompt string the model would read, newlines included, rather
+ * than a JSON-escaped rendering of it.
+ */
+function requestText(context: Context | undefined): string {
+  const message = context?.messages[0];
+  return message ? contentText(message.content) : "";
+}
+
+describe("MoriSession.compact() (#464, diagnosis: #462)", () => {
+  // A short, multi-turn context — shorter than pi's `keepRecentTokens` (20000) budget, same
+  // shape as the preference-regression bench's context sessions that surfaced #462.
+  const CONTEXT_TURNS = [
+    "이 함수 리뷰해줘: function add(a, b) { return a + b; }",
+    "고마워, 결론만 한두 문장으로 줄여줄래.",
+    "이 워닝은 뭐야: useEffect missing dependency",
+    "역시 길다, 짧게.",
+  ];
+
+  it("without forceCut, a conversation shorter than keepRecentTokens still reaches the summarizer empty — pi's default path, unchanged (#462 regression net)", async () => {
+    const provider = scriptedProvider(CONTEXT_TURNS.map(() => ({ text: "ok" })));
+
+    const result = await createMoriSession(ENV, {
+      credentialStore: new InMemoryCredentialStore(),
+      streamFn: provider.streamFn,
+      kernel: spyKernel(),
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    for (const turn of CONTEXT_TURNS) await result.session.prompt(turn);
+
+    const beforeCalls = provider.contexts.length;
+    await result.session.compact();
+    const compactionRequest = requestText(provider.contexts[beforeCalls]);
+
+    // Asserting the REQUEST (what the summarizer was handed), not the stub's reply — the same
+    // shape as the diagnosis's own observation B. If this ever stops being empty, `compact()`'s
+    // default (no `forceCut`) has silently stopped being pi's stock path, which is exactly the
+    // production-untouched guarantee #464 promised.
+    expect(compactionRequest).toContain("<conversation>\n\n</conversation>");
+  });
+
+  it("forceCut:true summarizes the whole context in one call — the request the summarizer sees is not the empty-conversation boilerplate and contains the first context turn (#464)", async () => {
+    const provider = scriptedProvider(CONTEXT_TURNS.map(() => ({ text: "ok" })));
+
+    const result = await createMoriSession(ENV, {
+      credentialStore: new InMemoryCredentialStore(),
+      streamFn: provider.streamFn,
+      kernel: spyKernel(),
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    for (const turn of CONTEXT_TURNS) await result.session.prompt(turn);
+
+    const beforeCalls = provider.contexts.length;
+    await result.session.compact({ forceCut: true });
+    const compactionRequest = requestText(provider.contexts[beforeCalls]);
+
+    expect(compactionRequest).not.toContain("<conversation>\n\n</conversation>");
+    expect(compactionRequest).toContain(CONTEXT_TURNS[0]);
   });
 });
