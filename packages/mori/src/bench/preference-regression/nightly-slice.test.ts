@@ -219,8 +219,13 @@ describe("runNightlySlice (#406)", () => {
     for (const result of offResults) {
       expect(result.compactionSummary).toBe("fixture compaction summary");
     }
-    // Non-OFF arms never carry a compaction summary.
-    for (const result of report.scenarios.filter((r) => r.condition !== "memory-off")) {
+    // #459: "memory-on" now also carries the harness compaction summary — the fallback
+    // candidate for a follow-up whose retrieval comes up empty. Only "oracle" never carries one
+    // (its context session is never compacted; see runner.ts's compaction branch).
+    for (const result of report.scenarios.filter((r) => r.condition === "memory-on")) {
+      expect(result.compactionSummary).toBe("fixture compaction summary");
+    }
+    for (const result of report.scenarios.filter((r) => r.condition === "oracle")) {
       expect(result.compactionSummary).toBeUndefined();
     }
 

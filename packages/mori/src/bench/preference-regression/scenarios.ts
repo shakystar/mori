@@ -84,9 +84,24 @@ const CONCISE_RESPONSES_SCENARIO: PreferenceRegressionScenario = {
   rubric: [
     {
       kind: "deterministic",
+      // #459: 원래 기준은 응답 전문(코드 블록 포함)이 200자 이하였다. 이 과제(유니언·인터섹션
+      // 차이)는 최소 예시 코드 없이는 정답을 설명하기 어렵고, 그 코드는 "설명이 장황한가"와
+      // 무관하게 길이를 채운다 — 실측(2026-08-14 3팔 리포트)에서 ORACLE조차 짧은 코드 예시
+      // 하나 때문에 200자를 넘겨 이 기준에 걸렸다(전문 278자, 코드 제외 산문 78자). 코드
+      // 펜스를 뺀 산문 길이로 재면 ORACLE(78자)과 장황한 응답(OFF 598자/ON 904자)이 명확히
+      // 갈린다 — 임계값을 올리는 대신 "장황함"이 실제로 재려는 대상(산문)만 재도록 고쳤다.
+      //
+      // 코드 펜스를 통째로 면제하면 반대 우회로가 열린다 — 펜스 안에 주석·문자열로 장황한
+      // 설명을 욱여넣은 응답이 "간결함"을 통과해 버린다(PR #461 owner 수정요청 3). 그래서
+      // 펜스 내용에도 별도 상한(600자)을 둔다 — ORACLE의 최소 예시(137자)는 여유 있게
+      // 통과하고, 펜스에 설명을 우회 삽입한 응답만 걸린다.
       id: "short-response",
-      description: "응답이 200자 이하다",
-      check: (output) => output.trim().length <= 200,
+      description: "코드 블록을 제외한 설명 산문이 200자 이하이고, 코드 블록 내용도 600자 이하다",
+      check: (output) => {
+        const fences = output.match(/```[\s\S]*?```/g) ?? [];
+        const prose = output.replace(/```[\s\S]*?```/g, "").trim();
+        return prose.length <= 200 && fences.join("").length <= 600;
+      },
     },
     {
       kind: "llm-judge",

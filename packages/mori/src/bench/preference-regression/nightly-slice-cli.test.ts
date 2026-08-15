@@ -24,6 +24,7 @@ function fixtureScenarioResult(): ScenarioRunResult {
     injected: true,
     reQuestioned: true,
     compactionSummary: undefined,
+    fallbackUsed: false,
   };
 }
 

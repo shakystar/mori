@@ -253,12 +253,16 @@ describe("runPreferenceRegressionScenario (#387)", () => {
     expect(result.reQuestioned).toBe(true);
     expect(result.followUpOutput).toBe("reply:follow-up prompt");
     expect(result.score.score).toBe(1);
-    // Only the "memory-off" arm carries a compaction summary.
-    expect(result.compactionSummary).toBeUndefined();
+    // #459: "memory-on" now also carries the harness compaction summary — it's the fallback
+    // candidate for a follow-up whose retrieval comes up empty — but this follow-up's kernel
+    // double injects organically, so the fallback never fires.
+    expect(result.compactionSummary).toBe(FIXTURE_COMPACTION_SUMMARY);
+    expect(result.fallbackUsed).toBe(false);
 
-    // BENCH_AXES.cost recorded once per turn (2 context + 1 follow-up).
+    // BENCH_AXES.cost recorded once per turn (2 context + 1 follow-up) plus the #459 compaction
+    // call the "memory-on" arm now makes to have a fallback candidate ready.
     const report = costLedger.report();
-    expect(report.byAxis[BENCH_AXES.cost]?.totalTokens).toBe(15 * 3);
+    expect(report.byAxis[BENCH_AXES.cost]?.totalTokens).toBe(15 * 4);
     // #449: close()'s own session-end distillation usage lands in a separate axis, once per
     // session closed (context + follow-up), not folded into BENCH_AXES.cost.
     expect(report.byAxis[BENCH_AXES.sessionEndDistillation]?.totalTokens).toBe(15 * 2);
@@ -266,6 +270,111 @@ describe("runPreferenceRegressionScenario (#387)", () => {
     expect(report.byAxis[BENCH_AXES.injectionHitRate]).toBeDefined();
     expect(report.byAxis[BENCH_AXES.reDistillationRate]).toBeDefined();
     expect(report.byAxis[BENCH_AXES.injectionHitRate]?.totalTokens).toBe(0);
+  });
+
+  it("memory-on: no organic injection falls back to the harness compaction summary, and injectionHitRate does not count the fallback as a hit (#459)", async () => {
+    const harness = fakeHarness({
+      context: fakeKernel({ injects: false }),
+      "follow-up": fakeKernel({ injects: false }),
+    });
+
+    const result = await runPreferenceRegressionScenario({
+      scenario: fixtureScenario("s-fallback"),
+      condition: "memory-on",
+      root: "/tmp/fixture-root-fallback",
+      env: {},
+      streamFn: async () => {
+        throw new Error("unused");
+      },
+      costLedger: createCostLedger(),
+      scoringJudge: { judge: () => Promise.resolve(true) },
+      reQuestionJudge: { judge: () => Promise.resolve(true) },
+      createSession: harness.createSession,
+      createKernel: harness.createKernel,
+    });
+
+    // retrieval의 원시 신호(injected)는 폴백이 덮어쓰지 않는다 — 여전히 미스로 남는다.
+    expect(result.injected).toBe(false);
+    expect(result.fallbackUsed).toBe(true);
+    // OFF 팔과 같은 머리말 + 같은 요약 내용이 후속 컨텍스트에 얹힌다 — ON ⊇ OFF가 배선상
+    // 보장된다는 것의 직접 증거(#459 완료 조건 1).
+    expect(harness.contextFor("follow-up")).toContain(FIXTURE_COMPACTION_SUMMARY);
+
+    // injectionHitRate는 mori retrieval의 실측 적중만 센다 — 폴백 발동을 적중으로 계상하면
+    // #401이 드러낸 진단 신호(33.3%)가 지워진다(#459 완료 조건 3).
+    expect(computeAxisRates([result]).injectionHitRate).toBe(0);
+  });
+
+  it("memory-on: fallback decides once — a follow-up session whose transformContext fires more than once doesn't re-fire onFallback or re-prepend the carry-over (#459, PR #461 owner 수정요청 2)", async () => {
+    // `kernel/index.ts`의 `readTurnQuery` 독스트링이 이미 전제하듯, 한 에피소드 안에서
+    // `transformContext`가 tool-call 루프로 두 번 이상 불릴 수 있다 — `fakeHarness`의
+    // `prompt()`는 호출당 한 번만 부르므로, 이 시나리오는 여기서 직접 두 번 부르는 세션
+    // 더블을 쓴다. `withOnArmFallback`은 `withInjectionProbe`의 `observed` 가드와 같은
+    // "첫 호출에만 판정" 의미론을 지켜야 한다 — 그러지 않으면 둘째 호출에서 캐리오버가
+    // 다시 앞에 붙거나 `fallbackUsed`가 마지막 호출 기준으로 덮어써질 수 있다.
+    const followUpKernel = fakeKernel({ injects: false });
+    const contextKernel = fakeKernel({ injects: false });
+    const transformResults: AgentMessage[][] = [];
+    let sessionsCreated = 0;
+
+    const createKernel: CreateKernelFn = (_root, sessionId) =>
+      sessionId === "context" ? contextKernel : followUpKernel;
+
+    const createSession: CreateSessionFn = (
+      _env: NodeJS.ProcessEnv,
+      deps: RunCliDeps,
+    ): Promise<CreateMoriSessionResult> => {
+      const sessionId = sessionsCreated++ % 2 === 0 ? "context" : "follow-up";
+      return Promise.resolve({
+        ok: true,
+        session: {
+          async prompt(text: string): Promise<MoriSessionTurn> {
+            const messages: AgentMessage[] = [{ role: "user", content: text, timestamp: 0 }];
+            const first = (await deps.kernel?.transformContext(messages)) ?? messages;
+            if (sessionId === "follow-up") {
+              // 같은 세션 턴 안에서 tool-call 루프가 컨텍스트를 다시 재구성하는 상황을 흉내낸다.
+              const second = (await deps.kernel?.transformContext(messages)) ?? messages;
+              transformResults.push(first, second);
+            }
+            return { text: `reply:${text}`, stopReason: "stop", usage: usage() };
+          },
+          consolidate: () => Promise.resolve({ kind: "ok" as const }),
+          compact(): Promise<MoriSessionCompaction> {
+            return Promise.resolve({ summary: FIXTURE_COMPACTION_SUMMARY, usage: usage() });
+          },
+          close(): Promise<MoriSessionClose> {
+            return Promise.resolve({ usage: usage() });
+          },
+        },
+      });
+    };
+
+    const result = await runPreferenceRegressionScenario({
+      scenario: fixtureScenario("s-fallback-twice"),
+      condition: "memory-on",
+      root: "/tmp/fixture-root-fallback-twice",
+      env: {},
+      streamFn: async () => {
+        throw new Error("unused");
+      },
+      costLedger: createCostLedger(),
+      scoringJudge: { judge: () => Promise.resolve(true) },
+      reQuestionJudge: { judge: () => Promise.resolve(true) },
+      createSession,
+      createKernel,
+    });
+
+    expect(transformResults).toHaveLength(2);
+    const [firstCallResult, secondCallResult] = transformResults;
+    // (a) 첫 호출에서만 폴백이 발동해 캐리오버가 앞에 붙는다.
+    expect(JSON.stringify(firstCallResult)).toContain(FIXTURE_COMPACTION_SUMMARY);
+    // (b) 둘째 호출은 캐리오버를 다시 붙이지 않는다 — 내용이 두 번 중복되지 않는다.
+    const secondCallOccurrences = (
+      JSON.stringify(secondCallResult).match(new RegExp(FIXTURE_COMPACTION_SUMMARY, "g")) ?? []
+    ).length;
+    expect(secondCallOccurrences).toBe(0);
+    // (c) `fallbackUsed`는 첫 호출 판정(true)에 고정된다 — 둘째 호출이 다시 덮어쓰지 않는다.
+    expect(result.fallbackUsed).toBe(true);
   });
 
   it("memory-off: runs the context session and carries only the harness compaction summary — zero mori store reads", async () => {
@@ -607,6 +716,10 @@ describe("runPreferenceRegressionScenario — 빈손 retrieval의 가시성 (#44
     // 아니라 «잰 것이 없었다»로도 통과해 버린다.
     expect(result.condition).toBe("memory-on");
     expect(computeAxisRates([result]).injectionHitRate).toBe(0);
+    // #459: 진짜 retrieval이 빈손이면 폴백이 발동해 OFF와 같은 하네스 압축 요약을 대신
+    // 얹는다 — «압축 요약조차 없는 맨 세션»이던 #401의 비대칭이 여기서 없어진다.
+    expect(result.fallbackUsed).toBe(true);
+    expect(harness.contextFor("follow-up")).toContain(FIXTURE_COMPACTION_SUMMARY);
   });
 });
 
