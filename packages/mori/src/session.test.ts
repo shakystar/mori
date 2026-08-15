@@ -470,4 +470,33 @@ describe("MoriSession.compact() (#464, diagnosis: #462)", () => {
       /prompt\(\) after compact\(\{ forceCut: true \}\)/,
     );
   });
+
+  it("a failed forceCut compaction reverts forceCutUsed — the session's entries were never touched, so a later prompt() is not permanently locked out (#466)", async () => {
+    const okReplies = scriptedProvider(CONTEXT_TURNS.map(() => ({ text: "ok" })));
+    let failNextCall = false;
+    const streamFn: StreamFn = (model, context, options) => {
+      if (failNextCall) {
+        failNextCall = false;
+        throw new Error("rate limited");
+      }
+      return okReplies.streamFn(model, context, options);
+    };
+
+    const result = await createMoriSession(ENV, {
+      credentialStore: new InMemoryCredentialStore(),
+      streamFn,
+      kernel: spyKernel(),
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    for (const turn of CONTEXT_TURNS) await result.session.prompt(turn);
+
+    failNextCall = true;
+    await expect(result.session.compact({ forceCut: true })).rejects.toThrow(/rate limited/);
+
+    // Not the "resend full pre-compaction history" guard rejection — the failed compaction
+    // left forceCutUsed exactly as it was before the call.
+    await expect(result.session.prompt("한 번 더")).resolves.toMatchObject({ stopReason: "stop" });
+  });
 });

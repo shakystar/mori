@@ -134,6 +134,21 @@ export interface MoriSession {
    * `appendCompaction()`도 `session_compact` emit도 하지 않는다. 따라서 이 옵션은
    * **호출 직후 세션을 버리는 용도(벤치 등)에서만 안전하다.** 압축 후에도 세션을 계속
    * 쓰려면 옵션 없는 기본 경로(`compact()`)를 써라.
+   *
+   * 가드는 `prompt()`에만 있다. `close()`는 forceCut의 의도된 종착점(요약만 뽑고 세션을
+   * 버림)이므로 막을 대상이 아니다. `consolidate()`도 막히지 않는다 — 이 세션의 원본
+   * 엔트리는 forceCut 후에도 그대로 남아 있어 `consolidate()` 자체는 실패하지 않지만,
+   * forceCut이 이미 같은 내용을 요약해 반환했으므로 **직접 부르지 마라**: 원본 엔트리를
+   * 다시 증류해 forceCut의 요약과 중복되는 결과를 만들 뿐이다 (#466).
+   *
+   * 입력 크기: forceCut은 pi의 토큰 예산 계산·슬라이싱(`prepareCompaction`)을 건너뛰고
+   * `contextMessages()` 전체를 요약기에 한 번에 넘긴다 — 매우 긴 세션이면 이론상 요약
+   * 모델의 컨텍스트 한도를 넘길 수 있다. 가드를 두지 않기로 했다: forceCut은 애초에
+   * `prompt()`가 막는 "일회용, 호출 직후 세션을 버리는" 경로 전용이고, 현재 유일한
+   * 호출부(bench/preference-regression/runner.ts)는 3~4턴짜리 짧은 맥락 세션만 이 옵션을
+   * 쓴다. 이 전제가 깨지면(긴 세션에 forceCut을 쓰는 새 호출부가 생기면) 그때 가서
+   * 명확한 에러로 거부하는 가드를 추가하되, 조용히 잘라내는 구현은 금지한다 — #462가
+   * 정확히 「요약기가 받은 것이 기대와 다른데 아무도 모른다」였다 (#466).
    */
   compact(options?: MoriSessionCompactOptions): Promise<MoriSessionCompaction>;
   /**
@@ -303,6 +318,7 @@ export async function createMoriSession(
         // guard (below) see this set. Setting it from inside the enqueued callback instead would
         // leave that unawaited-call race open — `prompt()`'s guard runs before its own work is
         // enqueued, so it would run ahead of a `forceCut` branch that hadn't started yet.
+        const forceCutUsedBeforeThisCall = forceCutUsed;
         if (options?.forceCut) forceCutUsed = true;
 
         return enqueue(async () => {
@@ -334,14 +350,25 @@ export async function createMoriSession(
           // summary itself is guaranteed to cover every context turn, which is what a
           // follow-up session actually needs (#464 요구사항).
           const messages = await agent.contextMessages();
-          const summaryResult = await generateSummaryWithUsage(
-            messages,
-            agent.models,
-            agent.getModel(),
-            DEFAULT_COMPACTION_SETTINGS.reserveTokens,
-          );
-          if (!summaryResult.ok) throw summaryResult.error;
-          return { summary: summaryResult.value.text, usage: summaryResult.value.usage };
+          try {
+            const summaryResult = await generateSummaryWithUsage(
+              messages,
+              agent.models,
+              agent.getModel(),
+              DEFAULT_COMPACTION_SETTINGS.reserveTokens,
+            );
+            if (!summaryResult.ok) throw summaryResult.error;
+            return { summary: summaryResult.value.text, usage: summaryResult.value.usage };
+          } catch (error) {
+            // #466: the summarizer call above is the only thing a forceCut compaction does —
+            // if it fails (network/rate-limit), the session's entries are exactly as untouched
+            // as if `compact()` had never been called, so `prompt()`'s "resend full
+            // pre-compaction history" guard must not apply. Restored to whatever the flag was
+            // BEFORE this call set it, not unconditionally `false` — an earlier successful
+            // forceCut compaction on this same session must stay locked.
+            forceCutUsed = forceCutUsedBeforeThisCall;
+            throw error;
+          }
         });
       },
 
