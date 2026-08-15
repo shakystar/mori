@@ -103,4 +103,52 @@ describe("scoreBehavioralAdaptation (#386)", () => {
     expect(result.criteria).toEqual([]);
     expect(result.score).toBe(0);
   });
+
+  it("excludes an 'inconclusive' deterministic criterion from score instead of counting it as a failure (#475)", async () => {
+    const scenario: ScoredScenario = {
+      id: "with-inconclusive",
+      rubric: [
+        {
+          kind: "deterministic",
+          id: "no-evidence",
+          description: "잴 증거가 없으면 판정 불가",
+          check: () => "inconclusive",
+        },
+        {
+          kind: "deterministic",
+          id: "contains-bar",
+          description: "출력에 bar가 있다",
+          check: (output) => output.includes("bar"),
+        },
+      ],
+    };
+
+    const result = await scoreBehavioralAdaptation(scenario, "bar only");
+
+    expect(result.criteria).toEqual([
+      { id: "no-evidence", description: "잴 증거가 없으면 판정 불가", kind: "deterministic", satisfied: "inconclusive" },
+      { id: "contains-bar", description: "출력에 bar가 있다", kind: "deterministic", satisfied: true },
+    ]);
+    // "no-evidence"는 분자·분모 양쪽에서 빠지므로 남은 기준(contains-bar) 하나만으로 1/1 = 1이다
+    // — 판정 불가가 실패로 섞이면 1/2 = 0.5가 됐을 것이다.
+    expect(result.score).toBe(1);
+  });
+
+  it("scores 0, not NaN, when every deterministic criterion is inconclusive", async () => {
+    const scenario: ScoredScenario = {
+      id: "all-inconclusive",
+      rubric: [
+        {
+          kind: "deterministic",
+          id: "no-evidence",
+          description: "잴 증거가 없으면 판정 불가",
+          check: () => "inconclusive",
+        },
+      ],
+    };
+
+    const result = await scoreBehavioralAdaptation(scenario, "anything");
+
+    expect(result.score).toBe(0);
+  });
 });

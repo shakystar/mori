@@ -7,12 +7,19 @@
  */
 
 /** 후속 세션 출력 텍스트만으로 판정 가능한 기준. `impliedPreference` 라벨이나 맥락 세션
- * 원문은 시그니처에 없다 — 채점기가 정답을 몰래 참조해 우회 판정하는 경로를 타입으로 막는다. */
+ * 원문은 시그니처에 없다 — 채점기가 정답을 몰래 참조해 우회 판정하는 경로를 타입으로 막는다.
+ *
+ * `"inconclusive"`(#475): 판정에 쓸 증거 자체가 출력에 없는 경우(예: 들여쓰기 스타일을 재는
+ * 기준인데 들여쓴 줄이 아예 없는 출력) — `false`(=위반 증거 있음)와 구분해야 한다. 섞으면
+ * "스타일을 안 지켰다"와 "잴 대상이 없었다"가 같은 값으로 뭉개져, 증거 없는 출력이 위반한
+ * 출력과 똑같이 벌점을 받는다(mori#475: 코드를 채팅에 인쇄하지 않고 파일에 쓴 응답이 그
+ * 이유만으로 "탭을 안 지켰다" 취급을 받은 사례). `scoreBehavioralAdaptation`은
+ * `"inconclusive"`를 분자·분모 양쪽에서 제외한다. */
 export interface DeterministicCriterion {
   kind: "deterministic";
   id: string;
   description: string;
-  check(followUpOutput: string): boolean;
+  check(followUpOutput: string): boolean | "inconclusive";
 }
 
 /** LLM-judge에게 위임하는 기준. `question`은 시나리오 작성자가 직접 적는 예/아니오 질문이며,
@@ -37,14 +44,18 @@ export interface ScoreCriterionResult {
   id: string;
   description: string;
   kind: RubricCriterion["kind"];
-  satisfied: boolean;
+  /** `"inconclusive"`는 `deterministic` 기준이 판정할 증거를 못 찾았다는 뜻이다(#475) —
+   * `score`의 분자·분모 양쪽에서 빠진다. `llm-judge` 기준은 항상 `boolean`이다(judge는 예/아니오로만
+   * 답한다, `LlmJudge.judge`의 반환 타입 참고). */
+  satisfied: boolean | "inconclusive";
 }
 
 export interface ScenarioScore {
   scenarioId: string;
   criteria: readonly ScoreCriterionResult[];
-  /** 충족된 루브릭 항목의 비율 (0~1). 루브릭이 비어 있으면 0 — "판정 항목 없음"을 "완전
-   * 적응"으로 착시하지 않기 위해서다. */
+  /** 충족된 루브릭 항목의 비율 (0~1) — `satisfied === "inconclusive"`인 항목은 분자·분모
+   * 양쪽에서 뺀다(#475). 루브릭이 비어 있거나, 판정 가능한 항목이 하나도 없으면(전부
+   * inconclusive) 0 — "판정 항목 없음"을 "완전 적응"으로 착시하지 않기 위해서다. */
   score: number;
 }
 
@@ -92,8 +103,9 @@ export async function scoreBehavioralAdaptation(
     });
   }
 
+  const scorable = criteria.filter((c) => c.satisfied !== "inconclusive");
   const score =
-    criteria.length === 0 ? 0 : criteria.filter((c) => c.satisfied).length / criteria.length;
+    scorable.length === 0 ? 0 : scorable.filter((c) => c.satisfied === true).length / scorable.length;
 
   return { scenarioId: scenario.id, criteria, score };
 }
