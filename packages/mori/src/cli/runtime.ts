@@ -85,7 +85,13 @@ export async function prepareAgent(
   // Built even on the `deps.kernel` test-seam branch: `createMoriAgent` always needs a
   // session, and using this one rather than letting it mint its own default keeps a single
   // code path instead of branching test seam from production seam twice.
-  const session = createHarnessSession();
+  //
+  // `deps.session` (#460) lets a caller that constructs its OWN `deps.kernel` — with a
+  // `ConversationSource` bound to a `Session` it built itself — hand that same session in
+  // here, so the `deps.kernel` branch below is not stuck with an injected kernel whose
+  // conversation source (if any) points at some other instance than the one this function
+  // would otherwise mint. Absent ⇒ the pre-existing default, a fresh session.
+  const session = deps.session ?? createHarnessSession();
 
   // The real memory kernel (#12), sharing the toolset's working root so "which
   // checkout is this" has one answer. It writes nothing until an observation

@@ -24,6 +24,8 @@ import { createAssistantMessageEventStream, InMemoryCredentialStore } from "@ear
 import type { ConsolidatorLlm, ConversationSource } from "@mori/kernel";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { fakeProviderModels } from "../agent/fake-provider-models.js";
+import { createHarnessConversationSource } from "../agent/harness-conversation-source.js";
+import { createHarnessSession } from "../agent/harness-session.js";
 import { compactIfContextFull } from "../cli/compaction.js";
 import { consolidateAfterCompact, consolidateOnSessionEnd } from "../cli/consolidation.js";
 import { prepareAgent } from "../cli/runtime.js";
@@ -953,6 +955,79 @@ describe("createMoriKernel — conversationSource wiring (#426, #7 조각 2/2)",
       expect(readdirSync(store)).toContain("projects");
       expect(errors).toEqual([]);
 
+      const consolidatorRequest = requests.find((context) => context.systemPrompt === undefined);
+      expect(consolidatorRequest).toBeDefined();
+      expect(messageText(consolidatorRequest!.messages[0]!)).toContain(marker);
+    },
+  );
+
+  it(
+    "the deps.kernel test seam pulls conversation text too, when deps.session names the same " +
+      "Session the kernel's ConversationSource was bound to (#460) — this is exactly the pair " +
+      "the bench runner's CreateKernelFn/defaultCreateKernel now hands prepareAgent, in place of " +
+      "an unwired deps.kernel that silently ran as an observation-only boundary. Checked by " +
+      "observed behavior (the consolidator request's own text), not by asserting the option was " +
+      "merely accepted — a kernel bound to a DIFFERENT session than the one the harness types " +
+      "into would still construct without error and still read nothing.",
+    async () => {
+      const marker = "탭 들여쓰기를 쓴다";
+      const requests: Context[] = [];
+      const streamFn = compactionStreamFn(
+        [
+          {
+            toolCall: {
+              name: "edit_file",
+              arguments: { path: "notes.md", oldString: "", newString: "메모\n" },
+            },
+          },
+          { text: "생성했습니다" },
+          { text: "확인했습니다", usage: usage(10_000_000) },
+        ],
+        requests,
+      );
+      const env = {
+        ANTHROPIC_API_KEY: "sk-ant-test",
+        MORI_CONSOLIDATE_MODEL: "anthropic/claude-sonnet-4-6",
+      };
+      const credentialStore = new InMemoryCredentialStore();
+      const errors: string[] = [];
+
+      // Built in the bench runner's own order (runner.ts's `defaultCreateKernel`): the
+      // `Session` first, a `ConversationSource` bound to it, then the kernel — all BEFORE
+      // `prepareAgent` ever runs, exactly the shape `deps.kernel` carries in from outside.
+      const session = createHarnessSession();
+      const kernel = createMoriKernel({
+        root,
+        env: {},
+        conversationSource: createHarnessConversationSource(session),
+      });
+
+      const prepared = await prepareAgent(
+        "anthropic",
+        env,
+        {
+          root,
+          credentialStore,
+          models: fakeProviderModels(env, credentialStore, streamFn),
+          kernel,
+          session,
+        },
+        { stdout: () => {}, stderr: (chunk) => errors.push(chunk) },
+      );
+      if (!prepared.ok)
+        throw new Error("prepareAgent did not authenticate against the fake provider");
+
+      await prepared.agent.prompt(marker);
+      await prepared.kernel.drain();
+      await compactIfContextFull(prepared.agent, () => {});
+      await prepared.agent.prompt("한 번 더");
+      await compactIfContextFull(prepared.agent, () => {});
+
+      const consolidatorRequestArrived = () =>
+        requests.some((context) => context.systemPrompt === undefined);
+      await waitFor(consolidatorRequestArrived);
+
+      expect(errors).toEqual([]);
       const consolidatorRequest = requests.find((context) => context.systemPrompt === undefined);
       expect(consolidatorRequest).toBeDefined();
       expect(messageText(consolidatorRequest!.messages[0]!)).toContain(marker);

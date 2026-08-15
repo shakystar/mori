@@ -1,7 +1,9 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { Api, CredentialStore, Model } from "@earendil-works/pi-ai";
-import type { StreamFn } from "@earendil-works/pi-agent-core";
+import type { Session, StreamFn } from "@earendil-works/pi-agent-core";
+import { createHarnessConversationSource } from "../../agent/harness-conversation-source.js";
+import { createHarnessSession } from "../../agent/harness-session.js";
 import type { MoriKernel } from "../../agent/index.js";
 import type { RunCliDeps } from "../../cli/types.js";
 import { createMoriKernel } from "../../kernel/index.js";
@@ -330,14 +332,33 @@ export type CreateSessionFn = (
   env: NodeJS.ProcessEnv,
   deps: RunCliDeps,
 ) => Promise<CreateMoriSessionResult>;
+/**
+ * `session` (#460) is the `Session` this kernel's `ConversationSource` must be bound to at
+ * construction — the same instance the caller then hands `createSession` as `RunCliDeps.session`
+ * (`cli/types.ts`), so the harness types into the exact session the kernel reads captures from.
+ * A kernel double that never consolidates real memory (`createStoreFreeKernel` below) has no use
+ * for it, but the signature carries it unconditionally so a custom `CreateKernelFn` cannot forget
+ * to wire it the one time it matters (`defaultCreateKernel`, `"memory-on"`).
+ */
 export type CreateKernelFn = (
   root: string,
   sessionId: string,
   env: NodeJS.ProcessEnv,
+  session: Session,
 ) => MoriKernel;
 
-function defaultCreateKernel(root: string, sessionId: string, env: NodeJS.ProcessEnv): MoriKernel {
-  return createMoriKernel({ root, sessionId, env });
+function defaultCreateKernel(
+  root: string,
+  sessionId: string,
+  env: NodeJS.ProcessEnv,
+  session: Session,
+): MoriKernel {
+  return createMoriKernel({
+    root,
+    sessionId,
+    env,
+    conversationSource: createHarnessConversationSource(session),
+  });
 }
 
 export interface ScenarioRunResult {
@@ -440,10 +461,21 @@ export async function runPreferenceRegressionEpisode(
   // `"memory-on"`만 진짜 mori 커널을 만든다. 나머지 두 팔이 `createKernel`을 부르지 않는 것이
   // "이 팔들의 mori 스토어 읽기는 0건"의 근거다 — 스토어 핸들이 생기지 않는다.
   const usesMoriStore = options.condition === "memory-on";
-  const contextKernel = usesMoriStore
-    ? createKernel(options.root, "context", options.env)
+  // `contextSession` (#460): built BEFORE the kernel so `createKernel` can bind a
+  // `ConversationSource` to the exact `Session` this episode's context turns will type
+  // into — passed to `createSession` below as `RunCliDeps.session` so `prepareAgent`
+  // (cli/runtime.ts) reuses it instead of minting its own, which is what makes the binding
+  // observe anything at all. Store-free arms have no conversation source to bind, so they
+  // skip minting one.
+  const contextSession = usesMoriStore ? createHarnessSession() : undefined;
+  const contextKernel = contextSession
+    ? createKernel(options.root, "context", options.env, contextSession)
     : createStoreFreeKernel();
-  const contextResult = await createSession(options.env, { ...baseDeps, kernel: contextKernel });
+  const contextResult = await createSession(options.env, {
+    ...baseDeps,
+    kernel: contextKernel,
+    ...(contextSession ? { session: contextSession } : {}),
+  });
   if (!contextResult.ok) {
     throw new Error(
       `mori bench: 시나리오 "${options.scenario.id}"의 맥락 세션 생성 실패 ` +
@@ -488,9 +520,17 @@ export async function runPreferenceRegressionEpisode(
 
   const carryOver = buildFollowUpCarryOver(options.condition, options.scenario, compactionSummary);
 
+  // Same reasoning as `contextSession` above, for the follow-up session — a separate
+  // `Session` because the follow-up is a fresh session in every arm (#434: only the
+  // "memory-on" carry-over is mori's own retrieval; a shared session across context and
+  // follow-up would let the follow-up read the context session's raw transcript, exactly
+  // the leniency trap `contextResult.session.close()` above is there to avoid).
+  const followUpSession = usesMoriStore ? createHarnessSession() : undefined;
   let injected = false;
   const probedKernel = withInjectionProbe(
-    usesMoriStore ? createKernel(options.root, "follow-up", options.env) : createStoreFreeKernel(),
+    followUpSession
+      ? createKernel(options.root, "follow-up", options.env, followUpSession)
+      : createStoreFreeKernel(),
     (hit) => {
       injected = hit;
     },
@@ -508,7 +548,11 @@ export async function runPreferenceRegressionEpisode(
   } else {
     followUpKernel = probedKernel;
   }
-  const followUpResult = await createSession(options.env, { ...baseDeps, kernel: followUpKernel });
+  const followUpResult = await createSession(options.env, {
+    ...baseDeps,
+    kernel: followUpKernel,
+    ...(followUpSession ? { session: followUpSession } : {}),
+  });
   if (!followUpResult.ok) {
     throw new Error(
       `mori bench: 시나리오 "${options.scenario.id}"의 후속 세션 생성 실패 ` +
