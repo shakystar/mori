@@ -60,6 +60,41 @@ describe("PREFERENCE_REGRESSION_SCENARIOS (#386)", () => {
     expect(longScore.score).toBeLessThan(1);
   });
 
+  it("concise-responses: short-response ignores fenced code length so a minimal example doesn't sink an otherwise concise answer (#459)", async () => {
+    // #459 실측(docs/bench/preference-regression-3arm-run-2026-08-14.md §1·§6-1) — ORACLE조차
+    // 최소 코드 예시 하나 때문에 200자를 넘겨 이 기준에서 0점을 받았다(전문 278자). 코드
+    // 펜스를 뺀 산문 길이로 재면 이 케이스는 통과해야 하고, 코드 없이도 장황한 응답은 여전히
+    // 걸려야 한다.
+    const scenario = PREFERENCE_REGRESSION_SCENARIOS.find((s) => s.id === "concise-responses");
+    if (!scenario) throw new Error("concise-responses scenario missing");
+
+    const conciseWithCode =
+      "유니언(합집합): `A | B` — A 또는 B 중 하나의 타입.\n\n" +
+      "인터섹션(교집합): `A & B` — A와 B의 모든 속성을 가진 타입.\n\n" +
+      "```ts\n" +
+      "type A = { a: number };\n" +
+      "type B = { b: string };\n\n" +
+      "const u: A | B = { a: 1 };  // OK\n" +
+      'const i: A & B = { a: 1, b: "x" }; // 둘 다 필요\n' +
+      "```";
+    const verboseNoCode = "핵심은요, ".repeat(40);
+
+    const conciseScore = await scoreBehavioralAdaptation(
+      scenario,
+      conciseWithCode,
+      ALWAYS_TRUE_JUDGE,
+    );
+    const verboseScore = await scoreBehavioralAdaptation(
+      scenario,
+      verboseNoCode,
+      ALWAYS_TRUE_JUDGE,
+    );
+
+    expect(conciseWithCode.trim().length).toBeGreaterThan(200); // 전문은 여전히 200자를 넘는다.
+    expect(conciseScore.score).toBe(1);
+    expect(verboseScore.score).toBeLessThan(1);
+  });
+
   it("pnpm-workflow: scores 1 on pnpm-only output and less than 1 when npm is mixed in", async () => {
     const scenario = PREFERENCE_REGRESSION_SCENARIOS.find((s) => s.id === "pnpm-workflow");
     if (!scenario) throw new Error("pnpm-workflow scenario missing");
