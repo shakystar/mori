@@ -297,6 +297,13 @@ export async function createMoriSession(
         // `async` for the same reason `consolidate()` is: `assertOpen`'s throw has to reject
         // the returned promise, not escape synchronously.
         assertOpen("compact");
+        // Set synchronously, before `enqueue` — same reasoning as `closePromise` above: a
+        // caller that fires `compact({ forceCut: true })` without awaiting it and immediately
+        // calls `prompt()` (no `await` in between) must still have `prompt()`'s own synchronous
+        // guard (below) see this set. Setting it from inside the enqueued callback instead would
+        // leave that unawaited-call race open — `prompt()`'s guard runs before its own work is
+        // enqueued, so it would run ahead of a `forceCut` branch that hadn't started yet.
+        if (options?.forceCut) forceCutUsed = true;
 
         return enqueue(async () => {
           if (!options?.forceCut) {
@@ -306,13 +313,6 @@ export async function createMoriSession(
             // handle.
             return { summary: result.summary, usage: result.usage ?? ZERO_USAGE };
           }
-
-          // Marks this session as no longer safe to `prompt()` on (see `forceCutUsed`'s own
-          // comment above) — set on entry to this branch, before the summarization call
-          // itself even starts, so a caller who awaits this `compact()` call before its next
-          // `prompt()` (the ordering `MoriSession`'s own doc assumes throughout) always sees
-          // it set.
-          forceCutUsed = true;
 
           // `forceCut` (#464): `agent.compact()` goes through pi's `prepareCompaction` ->
           // `compact()`, which SPLITS the context into `messagesToSummarize` (older than
