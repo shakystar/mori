@@ -11,7 +11,11 @@ import {
 import { BENCH_AXES, type BenchAxis } from "../axes.js";
 import { FileLlmCallCacheStore, sweepOrphanCacheTmpFiles } from "../cache/file-cache-store.js";
 import { createCostLedger, type CostLedger, type CostReport } from "../cost-ledger.js";
-import { PREFERENCE_REGRESSION_SCENARIOS, type PreferenceRegressionScenario } from "./scenarios.js";
+import {
+  PREFERENCE_REGRESSION_RUBRIC_VERSION,
+  PREFERENCE_REGRESSION_SCENARIOS,
+  type PreferenceRegressionScenario,
+} from "./scenarios.js";
 import {
   buildJudgePrompt,
   computeAxisRates,
@@ -310,6 +314,7 @@ export async function runPreferenceRegressionMilestone(
       ...report,
       scenarios: scenarioResults,
       axisRates: computeAxisRates(scenarioResults),
+      rubricVersion: PREFERENCE_REGRESSION_RUBRIC_VERSION,
       batchFailures,
       judgeBatchRequests: requests.length,
       judgeBatchSubmitted: results.filter((r) => !r.fromCache).length,

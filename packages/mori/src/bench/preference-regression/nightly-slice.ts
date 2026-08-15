@@ -3,7 +3,6 @@ import type { Api, CredentialStore, Model } from "@earendil-works/pi-ai";
 import type { StreamFn } from "@earendil-works/pi-agent-core";
 import { createCostLedger, type CostReport } from "../cost-ledger.js";
 import { computeKillSwitchReport, type KillSwitchReport } from "./kill-switch.js";
-import type { PreferenceRegressionScenario } from "./scenarios.js";
 import {
   computeAxisRates,
   runPreferenceRegression,
@@ -12,6 +11,7 @@ import {
   type PreferenceRegressionCondition,
   type ScenarioRunResult,
 } from "./runner.js";
+import { PREFERENCE_REGRESSION_RUBRIC_VERSION, type PreferenceRegressionScenario } from "./scenarios.js";
 
 const SLICE_REPEATS_ENV = "MORI_BENCH_SLICE_REPEATS";
 
@@ -61,6 +61,9 @@ export interface NightlySliceReport extends CostReport {
    * 등 다른 프로바이더로는 돌릴 수 없다 — 실비용 API 경로에서 이 판정을 실제로 낼 수 있는
    * 것은 이 리포트뿐이다(#401). */
   killSwitch: KillSwitchReport;
+  /** `PREFERENCE_REGRESSION_RUBRIC_VERSION`(scenarios.ts, #475) 그대로 — 반복마다 부르는
+   * `runPreferenceRegression`이 전부 같은 값을 실어 오므로 슬라이스 전체를 대표한다. */
+  rubricVersion: number;
 }
 
 /**
@@ -116,5 +119,6 @@ export async function runNightlySlice(options: NightlySliceOptions): Promise<Nig
     scenarios: scenarioResults,
     axisRates: computeAxisRates(scenarioResults),
     killSwitch: computeKillSwitchReport(scenarioResults),
+    rubricVersion: PREFERENCE_REGRESSION_RUBRIC_VERSION,
   };
 }

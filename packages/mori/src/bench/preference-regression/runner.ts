@@ -19,7 +19,11 @@ import { withLlmCallCache, type LlmCallCacheStore } from "../cache/llm-call-cach
 import type { CostLedger, CostReport } from "../cost-ledger.js";
 import { createReader, type Reader } from "../reader.js";
 import { createBenchRunner } from "../runner.js";
-import { PREFERENCE_REGRESSION_SCENARIOS, type PreferenceRegressionScenario } from "./scenarios.js";
+import {
+  PREFERENCE_REGRESSION_RUBRIC_VERSION,
+  PREFERENCE_REGRESSION_SCENARIOS,
+  type PreferenceRegressionScenario,
+} from "./scenarios.js";
 import { scoreBehavioralAdaptation, type LlmJudge, type ScenarioScore } from "./scorer.js";
 
 /**
@@ -677,6 +681,9 @@ export interface PreferenceRegressionReport extends CostReport {
     reDistillationRate: number;
     reQuestionRate: number;
   };
+  /** `PREFERENCE_REGRESSION_RUBRIC_VERSION`(scenarios.ts, #475) 그대로 — 이 리포트를 다른
+   * 리포트와 나란히 비교해도 되는지, 리포트 파일 자신이 말하게 한다. */
+  rubricVersion: number;
 }
 
 /**
@@ -786,6 +793,7 @@ export async function runPreferenceRegression(
       ...report,
       scenarios: results,
       axisRates: computeAxisRates(results),
+      rubricVersion: PREFERENCE_REGRESSION_RUBRIC_VERSION,
     };
   } finally {
     if (previousMemorizeRoot === undefined) delete process.env.MEMORIZE_ROOT;

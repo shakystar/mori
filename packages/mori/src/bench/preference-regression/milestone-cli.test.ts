@@ -39,6 +39,7 @@ function fixtureReport(overrides: {
     byAxis: {},
     scenarios: overrides.scenarios ?? [fixtureScenarioResult()],
     axisRates: { injectionHitRate: 0, reDistillationRate: 0, reQuestionRate: 0 },
+    rubricVersion: 2,
     batchFailures: overrides.batchFailures ?? [],
     judgeBatchRequests: overrides.judgeBatchRequests ?? 1,
     judgeBatchSubmitted: overrides.judgeBatchRequests ?? 1,
