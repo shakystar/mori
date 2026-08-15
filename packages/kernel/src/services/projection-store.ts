@@ -143,8 +143,8 @@ export interface RebuildProjectProjectionOptions {
    * `REBUILD_STALE_HEAD_RETRIES` retries, return `{ committed: false }`
    * instead of writing anything (see that type's doc) — and its two
    * `reindexSearch: true` callers do not check the return value:
-   * `consolidateBoundary` (packages/kernel/src/services/consolidate-service.ts:2911) calls it and
-   * falls straight through to `commitBoundaryCursors` (packages/kernel/src/services/consolidate-service.ts:2973) regardless of
+   * `consolidateBoundary` (packages/kernel/src/services/consolidate-service.ts:2921) calls it and
+   * falls straight through to `commitBoundaryCursors` (packages/kernel/src/services/consolidate-service.ts:2983) regardless of
    * the result, advancing the boundary's cursor past events whose
    * true-reindex never landed; `detectContradictions`, nested inside it
    * (packages/kernel/src/services/contradiction-service.ts:346), does the same. When that happens, the
