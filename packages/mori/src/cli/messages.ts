@@ -35,6 +35,21 @@ export function replConsolidateFailedMessage(error: unknown): string {
   return `mori: 증류에 실패했습니다 — ${reason}\n`;
 }
 
+/**
+ * `mori bench:nightly-slice` / `mori bench:milestone`이 `memory-on` 팔을 돌리기 전에 부르는
+ * 시작 전제 실패 메시지(#452, #446 후속 제안 2). 두 CLI 모두 세 팔(memory-off/memory-on/oracle)을
+ * 항상 함께 돌리므로 예외 없이 요구한다 — `MORI_CONSOLIDATE_MODEL`이 없으면 증류 boundary가
+ * 조용히 no-op이 되어(`../external/consolidator/config.js`) memory-on 팔이 «증류 없음»으로
+ * 끝까지 돌고 리포트가 그 사실을 「측정 안 함」이 아니라 「0」으로 내보낸다.
+ */
+export function consolidateModelRequiredMessage(): string {
+  return (
+    "mori bench: MORI_CONSOLIDATE_MODEL이 설정되지 않았다 — memory-on 팔은 증류가 있어야 " +
+    "측정된다(설정 안 하면 증류가 조용히 no-op돼 '측정 안 함'이 '0'으로 새어 나간다).\n" +
+    "  export MORI_CONSOLIDATE_MODEL=deepseek/deepseek-v4-flash     # 또는 provider 기본값(anthropic)에 맡기려면 모델 id만: sonnet-4-5\n"
+  );
+}
+
 export function unauthenticatedMessage(providerId: string): string {
   const apiKeyEnv = apiKeyEnvVarFor(providerId);
   if (!apiKeyEnv) {

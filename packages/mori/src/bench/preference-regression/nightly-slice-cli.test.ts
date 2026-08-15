@@ -1,7 +1,7 @@
 import type { Usage } from "@earendil-works/pi-ai";
 import { describe, expect, it } from "vitest";
 import { KILL_SWITCH_GAP_THRESHOLD } from "./kill-switch.js";
-import { reportNightlySliceOutcome } from "./nightly-slice-cli.js";
+import { reportNightlySliceOutcome, runNightlySliceCli } from "./nightly-slice-cli.js";
 import type { NightlySliceReport } from "./nightly-slice.js";
 import type { ScenarioRunResult } from "./runner.js";
 
@@ -143,5 +143,18 @@ describe("reportNightlySliceOutcome (#416: 0건 그린 구멍)", () => {
     expect(code).toBe(1);
     expect(stderr.join("")).toContain("킬 스위치 발동");
     expect(stderr.join("")).toContain("s1(gap=0)");
+  });
+});
+
+describe("runNightlySliceCli (#452: MORI_CONSOLIDATE_MODEL 미설정이면 memory-on 팔이 조용히 0으로 샌다)", () => {
+  it("fails before running any episode when MORI_CONSOLIDATE_MODEL is unset", async () => {
+    const { stderr, io } = fakeIo();
+
+    // `env`에 인증·프로바이더 정보를 아예 안 넣는다 — 이 가드가 그보다 먼저 걸린다면
+    // 이후 어떤 실 I/O(credential store, 모델 해석)도 건드리지 않았다는 뜻이다.
+    const code = await runNightlySliceCli([], {}, io);
+
+    expect(code).toBe(1);
+    expect(stderr.join("")).toContain("MORI_CONSOLIDATE_MODEL");
   });
 });

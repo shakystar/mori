@@ -1,7 +1,7 @@
 import type { Usage } from "@earendil-works/pi-ai";
 import { describe, expect, it } from "vitest";
 import { KILL_SWITCH_GAP_THRESHOLD } from "./kill-switch.js";
-import { reportMilestoneOutcome } from "./milestone-cli.js";
+import { reportMilestoneOutcome, runMilestoneCli } from "./milestone-cli.js";
 import type { MilestoneReport } from "./milestone.js";
 import type { ScenarioRunResult } from "./runner.js";
 
@@ -134,5 +134,18 @@ describe("reportMilestoneOutcome (#407 owner 수정요청, #416)", () => {
     expect(code).toBe(1);
     expect(stderr.join("")).toContain("킬 스위치 발동");
     expect(stderr.join("")).toContain("s1(gap=0)");
+  });
+});
+
+describe("runMilestoneCli (#452: MORI_CONSOLIDATE_MODEL 미설정이면 memory-on 팔이 조용히 0으로 샌다)", () => {
+  it("fails before running any episode when MORI_CONSOLIDATE_MODEL is unset", async () => {
+    const { stderr, io } = fakeIo();
+
+    // `env`에 인증·프로바이더 정보를 아예 안 넣는다 — 이 가드가 그보다 먼저 걸린다면
+    // 이후 어떤 실 I/O(credential store, Batch API 인증 해석)도 건드리지 않았다는 뜻이다.
+    const code = await runMilestoneCli([], {}, io);
+
+    expect(code).toBe(1);
+    expect(stderr.join("")).toContain("MORI_CONSOLIDATE_MODEL");
   });
 });

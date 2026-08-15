@@ -10,7 +10,8 @@ import {
 } from "../../agent/provider-selection.js";
 import { defaultCredentialsPath, FileCredentialStore } from "../../auth/credential-store.js";
 import { isMainEntry } from "../../cli/entrypoint.js";
-import { unauthenticatedMessage } from "../../cli/messages.js";
+import { consolidateModelRequiredMessage, unauthenticatedMessage } from "../../cli/messages.js";
+import { resolveConsolidatorConfig } from "../../external/consolidator/config.js";
 import { resolveBenchCacheDir } from "../cache/bench-cache-dir.js";
 import { writeCostReport } from "../cost-ledger.js";
 import { runNightlySlice, type NightlySliceReport } from "./nightly-slice.js";
@@ -138,6 +139,14 @@ export async function runNightlySliceCli(
   },
 ): Promise<number> {
   const args = parseArgs(argv);
+
+  // #452: 이 CLI는 항상 세 팔(memory-off/memory-on/oracle)을 함께 돌린다 — 어느 팔이
+  // 도는지 걸러낼 지점이 없으므로 무조건 요구한다(이슈 #452 기본안). 인증·프로바이더
+  // 검사와 같은 층·같은 종료 규약: 에피소드를 하나도 돌리기 전에 실패한다.
+  if (!resolveConsolidatorConfig(env)) {
+    io.stderr(consolidateModelRequiredMessage());
+    return 1;
+  }
 
   const { providerId, modelId } = resolveProviderSelection(env);
   if (!supportedProviderIds(env).includes(providerId)) {
