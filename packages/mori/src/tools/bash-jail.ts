@@ -46,6 +46,13 @@
  * checks below exist for the same reason: `findmnt` failing outright (missing binary,
  * unexpected output) must not be mistaken for "there was nothing to lock down".
  *
+ * The working-root check (exit 92) is that same failure shape from the other side. The
+ * loop skips mounts under the root by pattern (`"$ROOT"|"$ROOT"/*`), so a root of `/`
+ * — or an empty one — matches every mount, and the loop runs to completion having
+ * locked down nothing while reporting success. Callers do not pass such a root today
+ * (`bash-exec.ts` hands over a realpath-resolved scratch dir), but the failure is silent
+ * and total, which is the one kind worth a guard even when it is currently unreachable.
+ *
  * ## What the confined command can still try, and why none of it reaches the host
  *
  * The boundary has to hold against a model that treats a blocked tool as a puzzle — that
@@ -101,6 +108,11 @@
 export const BASH_JAIL_SCRIPT = `set -ef
 mount --make-rprivate / || { echo "mori bash jail: mount --make-rprivate failed" >&2; exit 97; }
 ROOT=$1; shift
+case "$ROOT" in
+  ""|/) echo "mori bash jail: refusing an empty or filesystem-root working root ('$ROOT') — every mount would be skipped and nothing would be locked down" >&2; exit 92 ;;
+  /*) ;;
+  *) echo "mori bash jail: working root must be an absolute path, got '$ROOT'" >&2; exit 92 ;;
+esac
 command -v findmnt >/dev/null 2>&1 || { echo "mori bash jail: findmnt not found — cannot enumerate mounts to lock down" >&2; exit 96; }
 MOUNTS=$(findmnt -rno TARGET) || { echo "mori bash jail: findmnt failed" >&2; exit 95; }
 printf '%s\\n' "$MOUNTS" | grep -qx "/" || { echo "mori bash jail: root mount missing from findmnt output — refusing to proceed" >&2; exit 94; }

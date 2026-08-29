@@ -132,6 +132,24 @@ jobs:
       - name: Typecheck tests
         run: pnpm typecheck:test
 
+      # #489: bash-jail.test.ts는 무권한 user namespace(`unshare --user --mount`)를
+      # 실제로 만들어서 경계를 검증한다 — 벤치 실행 경로가 의존하는 커널 기능이고,
+      # 목으로 흉내 내면 «믿었는데 안 막는» 그 실패 모드를 그대로 재현한다.
+      # ubuntu-24.04부터 AppArmor가 unconfined 바이너리의 무권한 userns를 기본 차단하므로
+      # (`kernel.apparmor_restrict_unprivileged_userns=1`), 막혀 있으면 여기서 푼다.
+      # 조건부인 이유는 러너 이미지가 굴러 기본값이 바뀌어도 이 스텝이 그대로 맞기 위해서다.
+      # 실패하면 여기서 멈춘다 — 테스트가 «커널이 못 해서» 빨개지는 것과 «경계가 안 서서»
+      # 빨개지는 것은 다른 사건이고, 후자만 Test 스텝에서 보고 싶다.
+      - name: Allow unprivileged user namespaces (#489 bash jail)
+        run: |
+          if unshare --user --map-root-user --mount -- true 2>/dev/null; then
+            echo "무권한 user namespace 사용 가능 — 조정 불필요"
+          else
+            echo "무권한 user namespace가 막혀 있다 — AppArmor 제한을 해제한다"
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+            unshare --user --map-root-user --mount -- true
+          fi
+
       # `pnpm test`(= `turbo run test`)로 되돌렸다. 예전에 vitest를 직접 부른 이유는
       # `pretest` 훅이 위 Build를 한 번 더 돌리는 것을 피하려던 것인데, #185에서 그 훅을
       # 없앴다 — 이제 build 재실행은 turbo가 캐시로 막는다. vitest를 직접 부르면 태스크
