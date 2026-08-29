@@ -23,6 +23,19 @@ import type { RubricCriterion } from "./scorer.js";
  *   주입 지점은 러너의 `injectOraclePreference`(runner.ts) 하나뿐이고, `"oracle"`이 아닌
  *   조건이 그 경로로 들어오면 던진다. 새 주입 지점을 만들지 말고 그 함수를 거쳐라.
  */
+/**
+ * 루브릭 판정 *방식*(어떤 기준이 어떻게 satisfied/false/inconclusive를 가르는가)이 바뀌면
+ * 올린다 — 프롬프트 문구·주석만 바뀐 것은 대상이 아니다. 리포트(`PreferenceRegressionReport.rubricVersion`,
+ * runner.ts)가 이 값을 그대로 실어, 서로 다른 버전의 리포트를 나란히 비교하면 안 된다는 사실을
+ * 리포트 파일 스스로 말하게 한다(#475 — 이 필드가 생기기 전 회차는 전부 암묵적 버전 1이다).
+ *
+ * 버전 2(#475): `uses-tab-indentation`의 결정적 검사가, 들여쓴 줄이 0개인 출력(예: 코드를
+ * 채팅에 인쇄하지 않고 파일 저장 도구로만 처리한 응답)을 더 이상 "탭 스타일 위반"(false)으로
+ * 채점하지 않는다 — `"inconclusive"`로 처리해 점수 계산에서 제외한다(`scorer.ts`). 이 변경
+ * 이전 회차의 `tabs-indentation` 점수는 「채팅에 코드를 인쇄했는가」에 오염돼 있었다.
+ */
+export const PREFERENCE_REGRESSION_RUBRIC_VERSION = 2;
+
 export interface PreferenceRegressionScenario {
   id: string;
   title: string;
@@ -44,8 +57,9 @@ const TABS_INDENTATION_SCENARIO: PreferenceRegressionScenario = {
     "다음 것도 방금 스타일 그대로 만들어줘: 두 수 중 큰 값을 반환하는 함수.",
   ],
   // 이 과제는 반드시 블록 본문 + 분기를 포함하게 해서 들여쓴 줄이 최소 1줄 나오도록 고정한다.
-  // uses-tab-indentation은 "들여쓴 줄이 0개면 false"이므로, 여기서 증거를 강제하지 않으면
-  // 한 줄 화살표 함수 정답이 탭 선호와 무관하게 0점으로 채점된다.
+  // 들여쓴 줄이 0개인 출력은 (#475부터) "inconclusive"로 빠져 벌점을 받지 않지만, 그래도
+  // 여기서 증거를 강제해 둔다 — 안 그러면 이 시나리오의 유일한 결정적 기준이 매 회차
+  // inconclusive로 빠지고, 채점이 llm-judge 기준 하나에만 의존하게 된다.
   followUpPrompt:
     "두 문자열을 이어붙이는 concat 함수를 TypeScript로 짜줘. 둘 중 한쪽이 빈 문자열이면 " +
     "다른 쪽을 그대로 반환하도록 분기도 넣고, 함수는 블록 본문으로 작성해줘.",
@@ -57,7 +71,12 @@ const TABS_INDENTATION_SCENARIO: PreferenceRegressionScenario = {
       description: "들여쓰기가 있는 모든 줄이 탭 문자로 시작한다 (스페이스 인덴트 없음)",
       check: (output) => {
         const indentedLines = output.split("\n").filter((line) => /^[\t ]+\S/.test(line));
-        return indentedLines.length > 0 && indentedLines.every((line) => line.startsWith("\t"));
+        // 들여쓴 줄이 0개면 이 기준이 잴 대상 자체가 없다 — 코드를 채팅에 인쇄하지 않고 쓰기
+        // 도구로 파일에 저장한 응답이 대표 사례다(mori#470 H3). "false"로 떨어뜨리면 「스타일을
+        // 안 지켰다」와 「잴 게 없었다」가 뭉개져 정상 응답 패턴이 벌점을 받는다 — "inconclusive"로
+        // 돌려 scorer.ts가 점수 계산에서 빼게 한다.
+        if (indentedLines.length === 0) return "inconclusive";
+        return indentedLines.every((line) => line.startsWith("\t"));
       },
     },
     {

@@ -44,6 +44,22 @@ describe("PREFERENCE_REGRESSION_SCENARIOS (#386)", () => {
 
     expect(tabScore.score).toBe(1);
     expect(spaceScore.score).toBeLessThan(1);
+
+    // #475(mori#470 H3 후속): 코드를 채팅에 인쇄하지 않고 파일 저장 도구로만 처리한 응답처럼
+    // 들여쓴 줄이 0개인 출력은 "탭 스타일 위반"(false)이 아니라 "판정 불가"(inconclusive)로
+    // 빠져야 한다 — uses-tab-indentation이 점수 계산에서 제외되고, 남은 llm-judge 기준
+    // (ALWAYS_TRUE_JUDGE로 항상 충족)만으로 만점이 나온다. 고쳐지기 전에는 이 케이스가
+    // false로 떨어져 spaceOutput과 똑같이 1점 미만을 받았다.
+    const noEvidenceOutput = "파일에 저장했습니다. 결과 표는 다음과 같습니다: OK";
+    const noEvidenceScore = await scoreBehavioralAdaptation(
+      scenario,
+      noEvidenceOutput,
+      ALWAYS_TRUE_JUDGE,
+    );
+    expect(noEvidenceScore.criteria).toContainEqual(
+      expect.objectContaining({ id: "uses-tab-indentation", satisfied: "inconclusive" }),
+    );
+    expect(noEvidenceScore.score).toBe(1);
   });
 
   it("concise-responses: scores 1 on a short reply and less than 1 on a long one", async () => {

@@ -39,6 +39,7 @@ function fixtureReport(
     repeatsPerScenario: 10,
     scenarios,
     axisRates: { injectionHitRate: 0, reDistillationRate: 0, reQuestionRate: 0 },
+    rubricVersion: 2,
     // 이 CLI의 판정은 표본 요약(#469)을 읽지 않는다 — 종료 코드는 아래 킬 스위치·건수
     // 가드로만 갈리므로 픽스처는 비워 둔다.
     sampleStats: [],
