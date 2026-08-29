@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 # billed-usage-report.sh — Actions 청구를 벽시계가 아니라 "청구된 잡 수" 기준으로
-# 워크플로별로 집계한다 (#480, #478 조각 2/2).
+# 워크플로별로, 그리고 워크플로 × 트리거 이벤트별로 집계한다 (#480, #486, #478 조각 2·3/N).
 #
 # 배경: GitHub Actions 과금은 잡 단위 1분 올림이다. 벽시계 합으로는 어느 워크플로를
 # 손대야 하는지 순위조차 뒤집힌다 — 매트릭스가 펴진 워크플로는 벽시계로는 작아 보여도
 # 청구 잡 수는 클 수 있다. `GET /repos/{owner}/{repo}/actions/runs/{run_id}/timing`이
 # run 하나당 `billable.<OS>.jobs`(청구된 잡 수)를 준다 — 이 값을 run 목록 위에서
-# 워크플로 이름별로 합산한다.
+# 워크플로 이름별로, 그리고 워크플로 × 트리거 이벤트(`event`) 조합별로 합산한다.
+# `event`는 run 목록 조회에 이미 들어 있는 필드라(`.workflow_runs[].event`) 이벤트별
+# 분해에 추가 API 호출이 필요 없다 — `timing` 호출은 여전히 run 하나당 1회다(#486).
 #
 # `total_ms`는 판별자·합산 근거로 쓰지 않는다: owner가 2026-08-29 실측한 바로는 이
 # 리포의 timing이 total_ms를 채우지 않아 — 실제로 청구된(conclusion=success,
@@ -24,7 +26,7 @@
 # 인자:
 #   --since YYYY-MM-DD   집계 시작일 (포함)
 #   --until YYYY-MM-DD   집계 종료일 (포함)
-# 출력: 워크플로 이름별 표 + 월 환산 청구 잡 수 추정치 (stdout).
+# 출력: 워크플로 이름별 표 + 워크플로 × 이벤트별 표 + 월 환산 청구 잡 수 추정치 (stdout).
 # 종료 코드:
 #   0  기간 전체를 완주했다.
 #   1  인자 오류이거나 run 목록 조회 자체가 실패했다 — 부분 결과조차 없다.
@@ -84,7 +86,7 @@ echo "## Actions 청구 잡 수 집계 (${SINCE}..${UNTIL}, ${period_days}일)"
 echo
 
 if ! runs=$(gh api --paginate "repos/${REPO}/actions/runs?created=${SINCE}..${UNTIL}&per_page=100" |
-  jq -s '[.[].workflow_runs[]?] | map({id, name})'); then
+  jq -s '[.[].workflow_runs[]?] | map({id, name, event: (.event // "unknown")})'); then
   echo "run 목록을 조회하지 못했습니다 (REPO=${REPO}, 기간=${SINCE}..${UNTIL})" >&2
   exit 1
 fi
@@ -96,9 +98,13 @@ if [ "$total_runs" -eq 0 ]; then
 fi
 
 # 워크플로 이름별 누적치. ORDER는 처음 등장한 순서를 표에 그대로 반영하기 위한 것이다
-# (연관배열은 순서를 보장하지 않는다).
+# (연관배열은 순서를 보장하지 않는다). EVENT_KEY는 "이름<US>이벤트"(유닛 구분자, \x1f) —
+# 워크플로 이름에 파이프·탭이 섞여도 키가 깨지지 않게 필드 구분에 안 쓰이는 문자를 쓴다.
 declare -A SEEN=() RUN_COUNT=() JOBS_SUM=() WALL_MS_SUM=()
+declare -A EVENT_SEEN=() EVENT_RUN_COUNT=() EVENT_JOBS_SUM=() EVENT_WALL_MS_SUM=()
 ORDER=()
+EVENT_ORDER=()
+US=$'\x1f'
 
 ensure_order() {
   local name="$1"
@@ -108,13 +114,21 @@ ensure_order() {
   fi
 }
 
+ensure_event_order() {
+  local key="$1"
+  if [ -z "${EVENT_SEEN[$key]:-}" ]; then
+    EVENT_SEEN[$key]=1
+    EVENT_ORDER+=("$key")
+  fi
+}
+
 processed=0
 partial=0
 last_id=""
 
 # 프로세스 치환(< <(...))으로 돌린다 — 파이프(| while)로 돌리면 루프가 서브셸에서 실행돼
 # 위 연관배열에 쌓은 값이 루프가 끝나는 순간 사라진다.
-while IFS=$'\t' read -r id name; do
+while IFS=$'\t' read -r id name event; do
   last_id="$id"
   if ! timing=$(gh api "repos/${REPO}/actions/runs/${id}/timing"); then
     echo "run ${id}(${name})의 timing 조회 실패 — 여기서 집계를 멈춥니다." >&2
@@ -123,6 +137,8 @@ while IFS=$'\t' read -r id name; do
   fi
 
   ensure_order "$name"
+  event_key="${name}${US}${event}"
+  ensure_event_order "$event_key"
   jobs=$(jq '[.billable[]?.jobs // 0] | add // 0' <<<"$timing")
   wall=$(jq '.run_duration_ms // 0' <<<"$timing")
 
@@ -132,8 +148,12 @@ while IFS=$'\t' read -r id name; do
   JOBS_SUM[$name]=$(( ${JOBS_SUM[$name]:-0} + jobs ))
   WALL_MS_SUM[$name]=$(( ${WALL_MS_SUM[$name]:-0} + wall ))
 
+  EVENT_RUN_COUNT[$event_key]=$(( ${EVENT_RUN_COUNT[$event_key]:-0} + 1 ))
+  EVENT_JOBS_SUM[$event_key]=$(( ${EVENT_JOBS_SUM[$event_key]:-0} + jobs ))
+  EVENT_WALL_MS_SUM[$event_key]=$(( ${EVENT_WALL_MS_SUM[$event_key]:-0} + wall ))
+
   processed=$((processed + 1))
-done < <(jq -r '.[] | [.id, .name] | @tsv' <<<"$runs")
+done < <(jq -r '.[] | [.id, .name, .event] | @tsv' <<<"$runs")
 
 echo "| 워크플로 | 실행 수 | 청구 잡 수 | 벽시계 분 |"
 echo "|---|---:|---:|---:|"
@@ -146,6 +166,20 @@ for name in "${ORDER[@]}"; do
   wall_min=$(awk -v ms="$w" 'BEGIN{printf "%.1f", ms/60000}')
   echo "| ${name} | ${n} | ${j} | ${wall_min} |"
   total_jobs=$((total_jobs + j))
+done
+
+echo
+echo "| 워크플로 | 이벤트 | 실행 수 | 청구 잡 수 | 벽시계 분 |"
+echo "|---|---|---:|---:|---:|"
+
+for key in "${EVENT_ORDER[@]}"; do
+  name="${key%%"${US}"*}"
+  event="${key#*"${US}"}"
+  n="${EVENT_RUN_COUNT[$key]:-0}"
+  j="${EVENT_JOBS_SUM[$key]:-0}"
+  w="${EVENT_WALL_MS_SUM[$key]:-0}"
+  wall_min=$(awk -v ms="$w" 'BEGIN{printf "%.1f", ms/60000}')
+  echo "| ${name} | ${event} | ${n} | ${j} | ${wall_min} |"
 done
 
 echo
