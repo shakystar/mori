@@ -105,7 +105,9 @@ export async function scoreBehavioralAdaptation(
 
   const scorable = criteria.filter((c) => c.satisfied !== "inconclusive");
   const score =
-    scorable.length === 0 ? 0 : scorable.filter((c) => c.satisfied === true).length / scorable.length;
+    scorable.length === 0
+      ? 0
+      : scorable.filter((c) => c.satisfied === true).length / scorable.length;
 
   return { scenarioId: scenario.id, criteria, score };
 }

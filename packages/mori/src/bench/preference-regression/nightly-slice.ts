@@ -12,7 +12,10 @@ import {
   type PreferenceRegressionCondition,
   type ScenarioRunResult,
 } from "./runner.js";
-import { PREFERENCE_REGRESSION_RUBRIC_VERSION, type PreferenceRegressionScenario } from "./scenarios.js";
+import {
+  PREFERENCE_REGRESSION_RUBRIC_VERSION,
+  type PreferenceRegressionScenario,
+} from "./scenarios.js";
 
 const SLICE_REPEATS_ENV = "MORI_BENCH_SLICE_REPEATS";
 

@@ -126,8 +126,18 @@ describe("scoreBehavioralAdaptation (#386)", () => {
     const result = await scoreBehavioralAdaptation(scenario, "bar only");
 
     expect(result.criteria).toEqual([
-      { id: "no-evidence", description: "잴 증거가 없으면 판정 불가", kind: "deterministic", satisfied: "inconclusive" },
-      { id: "contains-bar", description: "출력에 bar가 있다", kind: "deterministic", satisfied: true },
+      {
+        id: "no-evidence",
+        description: "잴 증거가 없으면 판정 불가",
+        kind: "deterministic",
+        satisfied: "inconclusive",
+      },
+      {
+        id: "contains-bar",
+        description: "출력에 bar가 있다",
+        kind: "deterministic",
+        satisfied: true,
+      },
     ]);
     // "no-evidence"는 분자·분모 양쪽에서 빠지므로 남은 기준(contains-bar) 하나만으로 1/1 = 1이다
     // — 판정 불가가 실패로 섞이면 1/2 = 0.5가 됐을 것이다.
