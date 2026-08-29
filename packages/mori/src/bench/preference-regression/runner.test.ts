@@ -652,6 +652,68 @@ describe("runPreferenceRegression (#387)", () => {
     await run(secondStream);
     expect(secondStream.calls).toBe(0);
   });
+
+  // #473: before this, `runPreferenceRegression` never handed the episode path a `cacheStore`
+  // (`RunEpisodeOptions.cacheStore` was declared but only `milestone.ts` ever filled it in), so
+  // the test above only proved the *judge* calls replay from cache — the context/follow-up
+  // session turns underneath (`fakeHarness`'s `prompt()` never touches `deps.streamFn` at all)
+  // stayed invisible to that assertion. This test drives an episode whose session turns
+  // actually call `deps.streamFn` (`dynamicRootEchoingHarness`, mirroring the #445 episode-level
+  // tests) through the top-level `runPreferenceRegression` entry point nightly-slice.ts calls, so
+  // a regression here — the cacheStore wiring silently dropped again — fails at the same layer
+  // the real `--repeats 2` rerun does.
+  it("#473: wires cacheStore into the episode path too — a rerun against the same cacheDir makes zero session-turn streamFn calls", async () => {
+    const m = model();
+    const scenario = fixtureScenario("episode-cache-473");
+    const harness = dynamicRootEchoingHarness(m);
+
+    async function run(
+      runWorkRoot: string,
+      runMemorizeRoot: string,
+      episodeStreamFn: StreamFn & { calls: number },
+    ) {
+      return runPreferenceRegression({
+        model: m,
+        streamFn: episodeStreamFn,
+        cacheDir,
+        workRoot: runWorkRoot,
+        memorizeRoot: runMemorizeRoot,
+        scenarios: [scenario],
+        // `dynamicRootEchoingHarness.createKernel` throws for a store-free condition's kernel
+        // request never arriving — restricting to "memory-off" keeps this test about the
+        // session-turn wiring, not the "memory-on" store path already covered elsewhere.
+        conditions: ["memory-off"],
+        createSession: harness.createSession,
+        createKernel: harness.createKernel,
+      });
+    }
+
+    const firstWorkRoot = await mkdtemp(join(tmpdir(), "mori-473-preference-regression-work-"));
+    const firstMemorizeRoot = await mkdtemp(
+      join(tmpdir(), "mori-473-preference-regression-store-"),
+    );
+    const firstStream = fakeEpisodeStreamFn();
+    try {
+      await run(firstWorkRoot, firstMemorizeRoot, firstStream);
+    } finally {
+      await rm(firstWorkRoot, { recursive: true, force: true });
+      await rm(firstMemorizeRoot, { recursive: true, force: true });
+    }
+    expect(firstStream.calls).toBeGreaterThan(0);
+
+    const secondWorkRoot = await mkdtemp(join(tmpdir(), "mori-473-preference-regression-work-"));
+    const secondMemorizeRoot = await mkdtemp(
+      join(tmpdir(), "mori-473-preference-regression-store-"),
+    );
+    const secondStream = fakeEpisodeStreamFn();
+    try {
+      await run(secondWorkRoot, secondMemorizeRoot, secondStream);
+    } finally {
+      await rm(secondWorkRoot, { recursive: true, force: true });
+      await rm(secondMemorizeRoot, { recursive: true, force: true });
+    }
+    expect(secondStream.calls).toBe(0);
+  });
 });
 
 /**
@@ -789,6 +851,59 @@ function toolRootEchoingHarness(
                 toolCallId: "call-0",
                 toolName: "bash",
                 content: [{ type: "text", text: `${root}\n[exit code 0]` }],
+                isError: false,
+                timestamp: 0,
+              },
+            ],
+          });
+          const message = await stream.result();
+          return {
+            text: contentText(message.content),
+            stopReason: message.stopReason,
+            usage: message.usage,
+          };
+        },
+        consolidate: () => Promise.resolve({ kind: "ok" as const }),
+        compact: () => Promise.resolve({ summary: "unused fixture summary", usage: usage() }),
+        close: () => Promise.resolve({ usage: usage() }),
+      },
+    });
+  return { createSession, createKernel };
+}
+
+/**
+ * Same shape as `toolRootEchoingHarness` above, but reads the scratch root off `deps.root` at
+ * call time instead of a fixed closure value. `runPreferenceRegressionEpisode` (the #445 tests
+ * above) is handed a `root` the test already knows ahead of time; `runPreferenceRegression`
+ * computes a fresh `root` per (scenario, condition) itself (`root = path.join(workRoot,
+ * scenario.id, condition)`), so a fixture driving a *whole* `runPreferenceRegression` call can't
+ * close over it in advance (#473).
+ */
+function dynamicRootEchoingHarness(m: Model<Api>): {
+  createSession: CreateSessionFn;
+  createKernel: CreateKernelFn;
+} {
+  const createKernel: CreateKernelFn = () => {
+    throw new Error("fixture: createKernel should not be called for a store-free condition");
+  };
+  const createSession: CreateSessionFn = (
+    _env: NodeJS.ProcessEnv,
+    deps: RunCliDeps,
+  ): Promise<CreateMoriSessionResult> =>
+    Promise.resolve({
+      ok: true,
+      session: {
+        async prompt(text: string): Promise<MoriSessionTurn> {
+          await deps.kernel?.transformContext([{ role: "user", content: text, timestamp: 0 }]);
+          if (!deps.streamFn) throw new Error("fixture: streamFn missing");
+          const stream = await deps.streamFn(m, {
+            messages: [
+              { role: "user", content: text, timestamp: 0 },
+              {
+                role: "toolResult",
+                toolCallId: "call-0",
+                toolName: "bash",
+                content: [{ type: "text", text: `${deps.root ?? ""}\n[exit code 0]` }],
                 isError: false,
                 timestamp: 0,
               },
