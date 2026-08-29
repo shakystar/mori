@@ -180,3 +180,105 @@ REPO=shakystar/mori bash .github/scripts/billed-usage-report.sh --since 2026-08-
 ```
 
 이번 조각에서는 표본이 없어 **미측정**.
+
+# push:[main] paths-ignore 절감 실측 (#478 조각 4/N, #493)
+
+(a)의 깨끗한 구간(2026-08-01~08-14)에서 `Recheck open PRs × push`가 74실행/353잡으로
+단일 최대 기여자였다(위 (d)). `.github/workflows/recheck-open-prs.yml`의 `push:` 트리거에
+`paths-ignore: [docs/**, *.md]`를 추가했다 — 이 절은 그 필터가 **이미 지난** 74실행에
+소급 적용됐다면 몇 건이 발화하지 않았을지를 반사실로 센다.
+
+## (f) 재현 명령과 판정 방법
+
+```
+$ gh api "repos/shakystar/mori/actions/workflows/323326130/runs?event=push&created=2026-08-01..2026-08-14&per_page=100" \
+    --paginate --jq '.workflow_runs[] | [.id, .head_sha] | @tsv' > push_runs.tsv
+$ wc -l push_runs.tsv
+74 push_runs.tsv
+
+$ while IFS=$'\t' read -r run_id sha; do
+    files=$(gh api "repos/shakystar/mori/commits/${sha}" --jq '[.files[].filename] | join(",")')
+    echo -e "${run_id}\t${sha}\t${files}"
+  done < push_runs.tsv > push_files.tsv
+```
+
+각 run의 head_sha가 main에 만든 커밋의 `files[].filename` 전체를 받아, **전부**가
+`docs/**` 아래이거나 슬래시 없이 `*.md`(루트 파일)에 걸리면 "필터가 걸러 발화하지
+않았을 것"으로, 파일이 하나도 없거나 그 밖의 경로가 하나라도 섞이면 "여전히 발화"로
+판정한다(paths-ignore의 glob 의미론 그대로 — `docs/**`는 `docs/` 아래 전부, 슬래시 없는
+`*.md`는 루트 직속 파일만 매치하고 `packages/**/*.md`는 매치하지 않는다). 74건 전부
+`files`가 비어 있지 않았고(머지 커밋 없음 — 이 리포는 push 커밋이 단일 커밋), 최대 파일
+수는 43건으로 commits API의 파일 목록 절단(300건) 임계값과 거리가 멀어 절단으로 인한
+오분류 위험은 없다.
+
+## (g) 결과
+
+74실행 중 **5건**이 필터로 걸러졌을 것이다 — 전부 `docs/**` 또는 루트 `*.md`만 바꾼
+커밋이다:
+
+| run_id      | head_sha | 변경 파일                                                    |
+| ----------- | -------- | ------------------------------------------------------------ |
+| 31842770427 | 974cd47a | `docs/bench/longmemeval-v2-3arm-budget-2026-08-14.md`        |
+| 31377742099 | 0bd5aed4 | `docs/bench/implicit-mem-bench-source-audit.md`              |
+| 31354476784 | 0df2d6bd | `CONTRIBUTING.md`                                            |
+| 31121130757 | 9561daba | `CONTRIBUTING.md`                                            |
+| 30754133078 | 363d364e | `docs/inherited/...`(19개 파일, 전부 `docs/inherited/` 아래) |
+
+이 5건의 청구 잡 수(`GET /repos/{owner}/{repo}/actions/runs/{run_id}/timing`의
+`billable.*.jobs` 합)와 벽시계(`run_duration_ms`)를 개별 조회해 합산했다:
+
+```
+$ for id in 31842770427 31377742099 31354476784 31121130757 30754133078; do
+    gh api "repos/shakystar/mori/actions/runs/${id}/timing" --jq '[.billable[]?.jobs // 0] | add // 0'
+  done
+4
+5
+4
+4
+5
+```
+
+절감 청구 잡 수 = 4+5+4+4+5 = **22잡** (14일 구간). 절감 벽시계 =
+189000+199000+20000+902000+83000 = 1,393,000ms ≈ **23.2분**.
+
+## (h) 절감 후 값
+
+`Recheck open PRs × push`: 74실행/353잡/134.7분 → **69실행/331잡/111.5분**.
+`Recheck open PRs` 워크플로 합계: 151실행/661잡/322.4분 → **146실행/639잡/299.2분**.
+전체 워크플로 청구 잡 수 합계: 1120 → **1098**.
+
+```
+월 환산 청구 잡 수 추정치 = 1098 / 14일 × 30일 = 2352.857... ≈ 2352.9
+```
+
+## (i) 판정
+
+**2352.9 > 1,500(#478 완료 기준) ⇒ "아니오" — 아직 추가 감축이 필요하다.**
+
+절감 후 이벤트 분해 표를 다시 정렬하면:
+
+| 워크플로               | 이벤트            | 실행 수 | 청구 잡 수 |
+| ---------------------- | ----------------- | ------: | ---------: |
+| Recheck open PRs       | push              |      69 |        331 |
+| Recheck open PRs       | pull_request      |      77 |        308 |
+| CI                     | pull_request      |     149 |        152 |
+| CI                     | push              |      74 |         73 |
+| Refresh armed PRs      | push              |      58 |        112 |
+| Notify merge           | pull_request      |      72 |         72 |
+| Line citation advisory | pull_request      |      48 |         48 |
+| Refresh armed PRs      | workflow_dispatch |       1 |          2 |
+
+**`Recheck open PRs × push`가 필터 적용 후에도 여전히 최댓값(331잡)이다.** 이번 필터는
+74건 중 5건(6.8%)만 걸렀다 — 이 구간의 main push 대부분이 문서 외 경로(코드·설정·워크플로)를
+함께 포함해, 경로 필터로는 걸러지지 않는다. 다음 1순위는 **이 행 자체의 잔여**다: 경로
+필터로 「아예 안 뜬다」로 더 줄일 여지가 소진됐으므로, 다음 조각은 `recheck-select.sh`의
+`push` 분기 선정 로직 자체(이번 조각의 비범위)를 좁히는 방법을 검토해야 한다 — 예를 들어
+매 push마다 열린 PR 전부를 재검증하는 대신, 그 push가 실제로 무효화하는 판정만 골라내는
+방식. 2위는 `Recheck open PRs × pull_request`(308, #479가 이미 narrowing 완료 — 재조정은
+비범위), 3위는 `CI × pull_request`(152).
+
+## (j) 재현 데이터 위치
+
+이 절의 원자료(74건의 run_id·head_sha·변경 파일, 5건의 개별 timing 조회)는 위 (f)의
+명령을 그대로 재실행하면 재현된다 — 리포 run 보존 기간 내라면 결과가 안정적이다(2026-08-01
+~08-14는 과금정지 이전 구간이라 재실행해도 값이 바뀌지 않는다, (a) 각주 참조).
