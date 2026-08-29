@@ -245,9 +245,12 @@ memory-on|9
 있다(owner 확인):
 
 ```
-docs/bench/reports/preference-regression-3arm-2026-08-15-469-repeats3.json       — "/data/repos" 4건
-docs/bench/reports/preference-regression-3arm-2026-08-15-469-repeats3-run2.json  — "/data/repos" 2건
+docs/bench/reports/preference-regression-3arm-2026-08-15-469-repeats3.json       — 오염 엔트리 3건 (pnpm-workflow|memory-on|0,1,2)
+docs/bench/reports/preference-regression-3arm-2026-08-15-469-repeats3-run2.json  — 오염 엔트리 2건 (pnpm-workflow|memory-off|1, pnpm-workflow|memory-on|1)
 ```
+
+> 「건」 = `compactionSummary`가 `/data/repos`를 포함하는 `scenarios[]` 엔트리 수. 위 §8의
+> 재현 명령에서 파일명만 바꿔 그대로 돌린 결과다.
 
 즉 §1의 세 회차 비교(n=3-1 · n=3-2 · n=10) 전부가 같은 종류의 오염 위에 서 있다 —
 이번 회차만의 문제가 아니라 이 벤치 하네스가 이 세 번의 실행 내내 갖고 있던
