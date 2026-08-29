@@ -213,7 +213,16 @@ jobs:
           PR: ${{ matrix.pr }}
           LOG: ${{ runner.temp }}/checks.log
         run: |
-          set -uo pipefail
+          # GitHub Actions는 `shell:`을 지정하지 않은 리눅스 run 스텝을 기본으로
+          # `bash -eo pipefail {0}`로 띄운다 — 즉 이 스크립트가 시작하기 전부터 errexit가
+          # 이미 켜져 있다. 아래 `set -uo pipefail`은 옵션을 "추가"할 뿐 기존 -e를 끄지
+          # 않으므로, 조건문 밖에서 실패하는 파이프라인(`$cmd | tee ...`)을 만나는 즉시
+          # errexit가 스크립트를 그 자리에서 죽였다 — for 루프의 `status=$?`·break·아래
+          # status=red 기록까지 전혀 도달하지 못하고 스텝 자체가 exit 1로 끝났다(#499).
+          # 그 결과 recheck-verdict.sh는 "판정을 남기지 않고 실패"로 읽어 테스트 실패를
+          # red가 아니라 "판정 불가"로 보고했다. 이 루프는 실패를 직접 검사해 처리하는
+          # 것이 설계 의도이므로 -e를 꺼서 그 설계가 실제로 동작하게 한다.
+          set +e -uo pipefail
           : > "$LOG"
 
           # ci.yml의 build-and-test와 같은 명령·같은 순서다. 첫 실패에서 멈춘다.
