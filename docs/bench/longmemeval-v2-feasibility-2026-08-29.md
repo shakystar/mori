@@ -53,6 +53,26 @@ $ wc -l questions.jsonl
 
 **451 — 이슈·논문이 말하는 수와 일치한다.**
 
+### 실물 `trajectories.jsonl`(1.11GB)에 `loadTrajectories` 실행
+
+```
+$ wc -l trajectories.jsonl
+1870 trajectories.jsonl
+
+$ node --max-old-space-size=1536 count-trajectories.mjs   # loadTrajectories(dataDir) 호출
+trajectories: 1870
+elapsed: 124.1s
+peak rss: 1521 MB
+```
+
+**1,870 — `wc -l`과 일치한다.** 기본 힙(이 2GB RAM 환경에서 V8 기본 old-space 상한)으로는
+`Array.prototype.map`이 만드는 1,870개 `LongMemEvalTrajectory` 객체 그래프가 힙에 다 못 들어가
+`JavaScript heap out of memory`로 죽었다 — `--max-old-space-size=1536`으로 올려서야 통과했다
+(피크 RSS 1,521MB). 반환값이 배열 전체이므로 이 메모리 요구량은 스트리밍 파싱(`readJsonlObjects`)
+과 별개로 남는다 — 다음 조각(ingestion)이 1,870개보다 많은 트라젝토리를 다루거나 더 작은
+컨테이너에서 돈다면 `loadTrajectories`가 배열 전체를 반환하는 현재 형태로는 힙 여유를 다시
+따져야 한다 (이번 조각에서는 고치지 않음 — owner 반송 사유 1의 범위).
+
 ## §2. 스키마 — 5능력 라벨의 필드명과 능력별 문항 수
 
 `questions.jsonl`의 능력 라벨 필드명은 **`question_type`**이다 (`SCHEMA.md`: "memory ability

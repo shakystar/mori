@@ -1,5 +1,6 @@
-import { readFile } from "node:fs/promises";
+import { createReadStream } from "node:fs";
 import { join } from "node:path";
+import { createInterface } from "node:readline";
 import {
   abilityForQuestionType,
   type LongMemEvalQuestion,
@@ -21,27 +22,33 @@ function requireDomain(value: unknown, id: string): "web" | "enterprise" {
   return value;
 }
 
-/** Parses a `.jsonl` file into one object per non-empty line. Fails loudly on a malformed
- * line rather than skipping it — a silently dropped record would understate the question/
- * trajectory count this loader's whole job is to report accurately. */
+/** Parses a `.jsonl` file into one object per non-empty line, streaming line-by-line rather than
+ * buffering the whole file as a string — `trajectories.jsonl` is ~1.1GB, past Node's
+ * `MAX_STRING_LENGTH` (~0.5GiB), so a `readFile(path, "utf8")` read fails unconditionally on the
+ * real file. Fails loudly on a malformed line rather than skipping it — a silently dropped record
+ * would understate the question/trajectory count this loader's whole job is to report accurately. */
 async function readJsonlObjects(path: string): Promise<Record<string, unknown>[]> {
-  const raw = await readFile(path, "utf8");
   const rows: Record<string, unknown>[] = [];
-  const lines = raw.split("\n");
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i]?.trim();
+  const rl = createInterface({
+    input: createReadStream(path, { encoding: "utf8" }),
+    crlfDelay: Infinity,
+  });
+  let lineNumber = 0;
+  for await (const rawLine of rl) {
+    lineNumber++;
+    const line = rawLine.trim();
     if (!line) continue;
     let parsed: unknown;
     try {
       parsed = JSON.parse(line);
     } catch (error) {
       throw new Error(
-        `longmemeval-v2: ${path}:${i + 1} JSON 파싱 실패 — ${error instanceof Error ? error.message : String(error)}`,
+        `longmemeval-v2: ${path}:${lineNumber} JSON 파싱 실패 — ${error instanceof Error ? error.message : String(error)}`,
         { cause: error },
       );
     }
     if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-      throw new Error(`longmemeval-v2: ${path}:${i + 1} JSON 객체가 아니다`);
+      throw new Error(`longmemeval-v2: ${path}:${lineNumber} JSON 객체가 아니다`);
     }
     rows.push(parsed as Record<string, unknown>);
   }
@@ -53,8 +60,13 @@ async function readJsonlObjects(path: string): Promise<Record<string, unknown>[]
  * on an unrecognized type — see types.ts). */
 export async function loadQuestions(dataDir: string): Promise<LongMemEvalQuestion[]> {
   const rows = await readJsonlObjects(join(dataDir, "questions.jsonl"));
+  const seenIds = new Set<string>();
   return rows.map((row) => {
     const id = requireString(row.id, "id", String(row.id));
+    if (seenIds.has(id)) {
+      throw new Error(`longmemeval-v2: questions.jsonl에 중복 id "${id}"가 있다`);
+    }
+    seenIds.add(id);
     const questionType = requireString(row.question_type, "question_type", id);
     const image = row.image;
     if (image !== null && typeof image !== "string") {
