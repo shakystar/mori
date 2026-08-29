@@ -6,6 +6,7 @@
  */
 import { spawn } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
+import { buildJailedSpawnArgs } from "./bash-jail.js";
 import { blockedReason, findBlockedPattern } from "./bash-guard.js";
 
 /** Default wall-clock limit for one command. Injectable per call. */
@@ -76,6 +77,17 @@ export interface RunBashOptions {
   /** Parent environment to derive the child environment from. Defaults to `process.env`. */
   env?: NodeJS.ProcessEnv;
   signal?: AbortSignal;
+  /**
+   * mori#489 — confine the command's writes to `root` at the kernel level (a private
+   * mount namespace with every other mount remounted read-only, `bash-jail.ts`), instead
+   * of the ordinary "cwd is pinned, everything else is reachable" contract this tool
+   * otherwise has (see `bash.ts`'s module comment). Off by default: this is for the bench
+   * execution path (`bench/preference-regression/runner.ts`), which runs a model against
+   * prompts nobody has reviewed for what tool calls they provoke. The interactive/dev
+   * `bash` tool does not set this — a developer session already has, and needs, full
+   * host access.
+   */
+  confineWrites?: boolean;
 }
 
 /** Parent environment minus mori's own credentials. See `BASH_STRIPPED_ENV_VARS`. */
@@ -170,7 +182,11 @@ export async function runBash(
     let drainTimer: NodeJS.Timeout | undefined;
     let armDrain: () => void = () => {};
 
-    const child = spawn(resolveShell(), ["-c", command], {
+    const { file, args } = options.confineWrites
+      ? buildJailedSpawnArgs(resolveShell(), command, cwd)
+      : { file: resolveShell(), args: ["-c", command] };
+
+    const child = spawn(file, args, {
       cwd,
       env: sanitizeEnv(options.env),
       // stdin is /dev/null: a command that reads input sees EOF at once instead of

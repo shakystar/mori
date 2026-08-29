@@ -499,6 +499,11 @@ export async function runPreferenceRegressionEpisode(
   const baseDeps: RunCliDeps = {
     streamFn,
     root: options.root,
+    // mori#489: every bench episode runs a model against prompts nobody has reviewed for
+    // what tool calls they might provoke (the incident this confines: a "pnpm-workflow"
+    // episode used `bash` to edit `/data/repos/mori`, the real checkout, instead of
+    // staying inside its scratch `root`). See `tools/bash-jail.ts` for the mechanism.
+    confineBashWrites: true,
     ...(options.credentialStore ? { credentialStore: options.credentialStore } : {}),
   };
 
