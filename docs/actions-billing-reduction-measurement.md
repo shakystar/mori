@@ -42,6 +42,11 @@ $ REPO=shakystar/mori bash .github/scripts/billed-usage-report.sh --since 2026-0
 
 종료 코드 0 (기간 전체 완주, 부분 결과 아님).
 
+(참고, 비게이팅) `Recheck open PRs` 워크플로별 벽시계 분(322.4)과 이벤트 분해 두 행의
+합(134.7 + 187.8 = 322.5)이 0.1 어긋난다 — 워크플로별·이벤트별 합계를 각각 독립적으로
+`%.1f`로 반올림해서 생기는 표시 오차다(실행 수 74+77=151, 청구 잡 수 353+308=661은
+정확히 크로스풋된다 — ms 단위 원본 합산 자체는 문제없다).
+
 **08-16까지 쓰지 않는 이유**: 08-15 13:39 UTC부터 과금정지 run이 섞이는데, 이 리포의
 `timing` API가 `total_ms`를 채우지 않아 집계기가 정지 run과 정상 run을 구분하지 못하므로
 (위 각주), 정지 시작 이전 날짜(08-14)까지만 자른다.
@@ -72,7 +77,10 @@ $ REPO=shakystar/mori bash .github/scripts/billed-usage-report.sh --since 2026-0
   통과 → **report 1잡**.
 - `discover`는 항상 실행 → **discover 1잡**.
 - 합계 **discover(1) + recheck(1) + report(1) = 3잡**. PR #481 본문이 적은 값과
-  일치한다 — 어긋남 없음.
+  일치한다 — 다만 이 일치는 **머지된 코드(`recheck-open-prs.yml`·`recheck-select.sh`)를
+  읽어 세운 모델끼리의 일치**이지 실측과의 일치가 아니다. (a)의 실측
+  `Recheck open PRs × pull_request`는 77실행 / 308잡, 즉 **회당 4.0잡**으로 이 모델의
+  상한 3잡을 33% 넘는다. 초과분의 해석은 아래 (c) 참조.
 
 **② `count`가 0일 때(트리거한 PR이 스윕 대상이 아닐 때)**
 
@@ -117,8 +125,13 @@ $ REPO=shakystar/mori bash .github/scripts/billed-usage-report.sh --since 2026-0
 최댓값 231)을 77잡 **초과**한다는 뜻이다. narrowing이 풀렸거나 롤백된 흔적은 없으므로
 (코드는 여전히 트리거 PR 1건으로 고정) 이 초과분은 이 조각의 3-1-2잡 모델이 설명하지
 못하는 요인(예: 잡 재시도/재실행이 같은 run id의 `billable.jobs`에 누적되는 경우)에서
-온다고 보는 것이 가장 근거 있는 해석이다. 잡 단위 정확 산정(재시도 포함)은 #486 비범위
-("잡 단위 정확 분 산정... 이번 판정에는 충분하지 않다")다.
+온다고 보는 것이 가장 근거 있는 해석이다. 이 가설은
+`GET /repos/{owner}/{repo}/actions/runs/{run_id}` 의 `run_attempt` 와
+`GET /repos/{owner}/{repo}/actions/runs/{run_id}/jobs?filter=all` 의 `jobs[].run_attempt`
+분포를 대조하면 갈린다 — 같은 run id에 `run_attempt ≥ 2` 인 잡이 있으면 재시도분이
+`timing` 의 `billable.*.jobs` 에 누적된 것이다. **이 조각에서는 조회하지 않는다**(#486 비범위).
+잡 단위 정확 산정(재시도 포함)은 #486 비범위다("잡 단위 정확 분 산정 … (d)의 **하한**으로
+이번 판정에는 충분하다").
 
 **⇒ #479에 귀속되는 반사실 절감분 = 0잡.** 관측이 불가능해서가 아니라, #479가 코드를
 바꾸지 않았으므로 낼 전/후 델타 자체가 없다 — narrowing이 만든 절감은 이 창 이전(07-30
