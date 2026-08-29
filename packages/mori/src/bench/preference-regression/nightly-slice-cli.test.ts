@@ -38,6 +38,9 @@ function fixtureReport(
     repeatsPerScenario: 10,
     scenarios,
     axisRates: { injectionHitRate: 0, reDistillationRate: 0, reQuestionRate: 0 },
+    // 이 CLI의 판정은 표본 요약(#469)을 읽지 않는다 — 종료 코드는 아래 킬 스위치·건수
+    // 가드로만 갈리므로 픽스처는 비워 둔다.
+    sampleStats: [],
     // 기본값은 **판정이 실제로 선** 회차다 — ORACLE·OFF가 둘 다 돌아 간격이 임계값을 넘긴
     // 시나리오 1건. `scenarios: []`(판정 0건)를 기본값으로 두면 그 자체가 아래 0건 가드에
     // 걸리므로, 그 상태는 전용 케이스에서만 만든다.

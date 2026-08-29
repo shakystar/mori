@@ -16,6 +16,14 @@ on:
   # main push만으로는 낡은 판정이 무효화되지 않는다: PR이 한 번 레드로 찍히면 developer가
   # 고쳐도 재평가 트리거가 없어 레드가 남고, 그 PR이 막혀 있으니 main push도 없어 재검증이
   # 안 된다 (#53 드레인 모드에서 정확히 이 교착이 만들어진다). head 갱신에서 다시 돈다.
+  #
+  # 이 트리거의 discover 선정(recheck-select.sh)은 트리거한 PR 하나로 좁힌다 — push:[main]의
+  # 전체 스윕과 다르다. 나머지 열린 PR의 낡은 판정은 그대로 남지만 커버리지가 줄지는 않는다:
+  # main이 움직이면 그 PR들의 base도 낡으므로 push:[main] 스윕이 다음에 다시 검증한다. 좁히지
+  # 않으면 developer의 체크포인트 push 한 번마다 discover(1) + recheck(열린 PR 수 N) +
+  # report(1) 잡이 청구되고, 재평가 트리거의 목적(head가 움직인 그 PR 하나를 다시 보는 것)에는
+  # N-1개가 불필요하다. 좁히면 대상이 항상 1건(또는 스윕 대상이 아니면 0건)이라
+  # discover(1) + recheck(1) + report(1) = 3으로 고정된다(#478 · #479).
   pull_request:
     branches: [main]
     types: [synchronize, reopened, ready_for_review]

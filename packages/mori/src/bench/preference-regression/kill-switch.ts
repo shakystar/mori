@@ -1,4 +1,5 @@
 import type { PreferenceRegressionCondition, ScenarioRunResult } from "./runner.js";
+import { armScoreSamples, summarizeScores } from "./sample-stats.js";
 
 /**
  * 킬 스위치(#435, discussion #343 owner 지시 5) — ORACLE(정답을 통째로 준 팔)과 OFF(하네스
@@ -46,18 +47,18 @@ export interface KillSwitchReport {
 /** 같은 (시나리오, 조건) 쌍의 점수를 평균한다 — 마일스톤(milestone.ts)은 조건당 결과가 항상
  * 하나라 평균이 그 값 그대로지만, 나이틀리/주간 슬라이스(nightly-slice.ts)는 `repeatsPerScenario`
  * 회 반복된 결과가 전부 같은 (시나리오, 조건) 키로 쌓인다. 첫 건만 보면(`.find()`) 반복 10회 중
- * 1회의 우연한 저점으로 전체가 무효 판정될 수 있다 — 평균이 그 표본 크기를 실제로 쓴다. */
+ * 1회의 우연한 저점으로 전체가 무효 판정될 수 있다 — 평균이 그 표본 크기를 실제로 쓴다.
+ *
+ * 표본 추출·요약 자체는 `sample-stats.ts`에 있다(#469): 리포트 표의 팔별 평균이 여기 판정과 같은
+ * 표본 위에서 나온 값임을 「같은 함수를 쓴다」로 보장하기 위해서다 — 표 각주가 그렇게 적는다. */
 function scoreFor(
   results: readonly ScenarioRunResult[],
   scenarioId: string,
   condition: PreferenceRegressionCondition,
 ): { mean: number; sampleSize: number } | undefined {
-  const matches = results.filter((r) => r.scenarioId === scenarioId && r.condition === condition);
-  if (matches.length === 0) return undefined;
-  return {
-    mean: matches.reduce((sum, r) => sum + r.score.score, 0) / matches.length,
-    sampleSize: matches.length,
-  };
+  const summary = summarizeScores(armScoreSamples(results, scenarioId, condition));
+  if (summary === undefined) return undefined;
+  return { mean: summary.mean, sampleSize: summary.n };
 }
 
 /**
