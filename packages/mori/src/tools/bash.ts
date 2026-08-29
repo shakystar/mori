@@ -57,6 +57,9 @@ export interface CreateBashToolOptions {
   timeoutMs?: number;
   maxOutputChars?: number;
   env?: NodeJS.ProcessEnv;
+  /** mori#489 — see `RunBashOptions.confineWrites` (bash-exec.ts) for what this does and
+   * why it defaults off. */
+  confineWrites?: boolean;
 }
 
 /**
@@ -99,6 +102,7 @@ export function createBashTool(
         ...(options.maxOutputChars !== undefined ? { maxOutputChars: options.maxOutputChars } : {}),
         ...(options.env ? { env: options.env } : {}),
         ...(signal ? { signal } : {}),
+        ...(options.confineWrites ? { confineWrites: true } : {}),
       });
 
       return textResult(formatBashResult(result), result);

@@ -76,6 +76,19 @@ assert_eq "2" "$code"
 assert_contains "$out" "| CI | 1 | 1 | 0.5 |"
 assert_contains "$out" "부분 결과: 전체 2건 중 1건까지 집계를 완료했습니다"
 
+it "같은 워크플로 이름의 run이 서로 다른 event로 섞이면 이벤트별 청구 잡 수 합이 갈라진다"
+reset_scenario
+route "actions/runs?created=" \
+  '{"total_count":3,"workflow_runs":[{"id":701,"name":"CI","event":"push"},{"id":702,"name":"CI","event":"pull_request"},{"id":703,"name":"CI","event":"push"}]}'
+route "runs/701/timing" '{"billable":{"UBUNTU":{"total_ms":180000,"jobs":3}},"run_duration_ms":90000}'
+route "runs/702/timing" '{"billable":{"UBUNTU":{"total_ms":60000,"jobs":1}},"run_duration_ms":30000}'
+route "runs/703/timing" '{"billable":{"UBUNTU":{"total_ms":120000,"jobs":2}},"run_duration_ms":60000}'
+out=$(run_report --since 2026-01-01 --until 2026-01-10)
+code=$?
+assert_eq "0" "$code"
+assert_contains "$out" "| CI | push | 2 | 5 | 2.5 |"
+assert_contains "$out" "| CI | pull_request | 1 | 1 | 0.5 |"
+
 it "run 목록 조회 자체가 실패하면 부분 결과 없이 종료코드 1로 끝난다"
 reset_scenario
 fail_calls_matching "actions/runs?created="
