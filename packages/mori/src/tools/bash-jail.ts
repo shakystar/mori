@@ -101,7 +101,7 @@
  * `$1` is the working root); everything from `$2` on (`"$@"` after the `shift`) is the
  * real command to `exec` once the boundary is in place.
  *
- * Every early exit uses a distinct code (94-99) so a failure is diagnosable from the
+ * Every early exit uses a distinct code (91-99) so a failure is diagnosable from the
  * `bash` tool's reported exit code alone, without needing the stderr text that came
  * with it.
  */
@@ -111,7 +111,7 @@ ROOT=$1; shift
 case "$ROOT" in
   ""|/) echo "mori bash jail: refusing an empty or filesystem-root working root ('$ROOT') — every mount would be skipped and nothing would be locked down" >&2; exit 92 ;;
   /*) ;;
-  *) echo "mori bash jail: working root must be an absolute path, got '$ROOT'" >&2; exit 92 ;;
+  *) echo "mori bash jail: working root must be an absolute path, got '$ROOT'" >&2; exit 91 ;;
 esac
 command -v findmnt >/dev/null 2>&1 || { echo "mori bash jail: findmnt not found — cannot enumerate mounts to lock down" >&2; exit 96; }
 MOUNTS=$(findmnt -rno TARGET) || { echo "mori bash jail: findmnt failed" >&2; exit 95; }
