@@ -14,6 +14,7 @@ function fixtureResult(
     followUpOutput: "reply",
     score: { scenarioId, criteria: [], score },
     injected: false,
+    injectedContent: undefined,
     reQuestioned: undefined,
     compactionSummary: undefined,
     fallbackUsed: undefined,

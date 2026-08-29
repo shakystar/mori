@@ -22,6 +22,7 @@ function fixtureScenarioResult(): ScenarioRunResult {
     followUpOutput: "reply",
     score: { scenarioId: "s1", criteria: [], score: 1 },
     injected: true,
+    injectedContent: "fixture injected content",
     reQuestioned: true,
     compactionSummary: undefined,
     fallbackUsed: false,
