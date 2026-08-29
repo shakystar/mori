@@ -63,6 +63,12 @@ export async function runPrSmoke(options: { record: boolean }): Promise<number> 
       memorizeRoot,
       env: fixtureEnv(),
       credentialStore: new InMemoryCredentialStore(),
+      // #473: `streamFn`(위) is already a full record/replay cache over this same
+      // `FIXTURE_CACHE_DIR` (`createFixtureCacheStreamFn`, `pr-smoke-cache.ts`) — wrapping it
+      // again in `runPreferenceRegression`'s own episode cache (`PreferenceRegressionOptions.cacheEpisodes`'s
+      // doc, runner.ts) would layer a second, always-missing key scheme over it and write new
+      // files into this committed fixtures directory on every ordinary run.
+      cacheEpisodes: false,
     });
 
     console.log(
