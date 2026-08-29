@@ -32,32 +32,37 @@ route "runs/103/timing" '{"billable":{"UBUNTU":{"total_ms":120000,"jobs":2}},"ru
 out=$(run_report --since 2026-01-01 --until 2026-01-11)
 code=$?
 assert_eq "0" "$code"
-assert_contains "$out" "| CI | 2 | 8 | 4.0 | 0 |"
-assert_contains "$out" "| Notify | 1 | 2 | 1.0 | 0 |"
-assert_contains "$out" "청구 잡 수 합계(과금 정지 run 제외): 10"
+assert_contains "$out" "| CI | 2 | 8 | 4.0 |"
+assert_contains "$out" "| Notify | 1 | 2 | 1.0 |"
+assert_contains "$out" "청구 잡 수 합계: 10"
 assert_contains "$out" "월 환산 청구 잡 수 추정치 = 10 / 10일 × 30일 = 30.0"
 
-it "total_ms=0인 run은 0분으로 합산하지 않고 과금정지 실행 수로 따로 센다"
+it "total_ms=0인 run도 jobs·벽시계를 정상 run과 똑같이 합산한다"
 reset_scenario
 route "actions/runs?created=" \
-  '{"total_count":2,"workflow_runs":[{"id":201,"name":"CI"},{"id":202,"name":"CI"}]}'
-route "runs/201/timing" '{"billable":{"UBUNTU":{"total_ms":180000,"jobs":3}},"run_duration_ms":90000}'
-route "runs/202/timing" '{"billable":{},"run_duration_ms":5000}'
+  '{"total_count":3,"workflow_runs":[{"id":501,"name":"CI"},{"id":502,"name":"CI"},{"id":503,"name":"Paused Only"}]}'
+route "runs/501/timing" '{"billable":{"UBUNTU":{"total_ms":180000,"jobs":3}},"run_duration_ms":90000}'
+route "runs/502/timing" '{"billable":{"UBUNTU":{"total_ms":0,"jobs":1}},"run_duration_ms":30000}'
+route "runs/503/timing" '{"billable":{"UBUNTU":{"total_ms":0,"jobs":2}},"run_duration_ms":60000}'
 out=$(run_report --since 2026-01-01 --until 2026-01-11)
 code=$?
 assert_eq "0" "$code"
-assert_contains "$out" "| CI | 1 | 3 | 1.5 | 1 |"
-assert_contains "$out" "청구 잡 수 합계(과금 정지 run 제외): 3"
+assert_contains "$out" "| CI | 2 | 4 | 2.0 |"
+assert_contains "$out" "| Paused Only | 1 | 2 | 1.0 |"
+assert_contains "$out" "청구 잡 수 합계: 6"
+assert_contains "$out" "월 환산 청구 잡 수 추정치 = 6 / 10일 × 30일 = 18.0"
 
-it "다 과금정지 run만 있는 워크플로도 표에 0으로 나타난다"
+it "회귀: total_ms가 전부 0인 응답 묶음에서도 청구 잡 수 합계가 0이 아니다"
 reset_scenario
 route "actions/runs?created=" \
-  '{"total_count":1,"workflow_runs":[{"id":301,"name":"Paused Only"}]}'
-route "runs/301/timing" '{"billable":{},"run_duration_ms":0}'
+  '{"total_count":2,"workflow_runs":[{"id":601,"name":"CI"},{"id":602,"name":"CI"}]}'
+route "runs/601/timing" '{"billable":{"UBUNTU":{"total_ms":0,"jobs":2}},"run_duration_ms":10000}'
+route "runs/602/timing" '{"billable":{"UBUNTU":{"total_ms":0,"jobs":3}},"run_duration_ms":20000}'
 out=$(run_report --since 2026-01-01 --until 2026-01-11)
 code=$?
 assert_eq "0" "$code"
-assert_contains "$out" "| Paused Only | 0 | 0 | 0.0 | 1 |"
+assert_contains "$out" "청구 잡 수 합계: 5"
+assert_contains "$out" "월 환산 청구 잡 수 추정치 = 5 / 10일 × 30일 = 15.0"
 
 it "timing 조회가 도중 실패하면 그때까지 모은 부분 결과를 내고 종료코드 2로 끝난다"
 reset_scenario
@@ -68,7 +73,7 @@ fail_calls_matching "runs/402/timing"
 out=$(run_report --since 2026-01-01 --until 2026-01-11 2>&1)
 code=$?
 assert_eq "2" "$code"
-assert_contains "$out" "| CI | 1 | 1 | 0.5 | 0 |"
+assert_contains "$out" "| CI | 1 | 1 | 0.5 |"
 assert_contains "$out" "부분 결과: 전체 2건 중 1건까지 집계를 완료했습니다"
 
 it "run 목록 조회 자체가 실패하면 부분 결과 없이 종료코드 1로 끝난다"

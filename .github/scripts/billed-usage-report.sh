@@ -5,8 +5,15 @@
 # 배경: GitHub Actions 과금은 잡 단위 1분 올림이다. 벽시계 합으로는 어느 워크플로를
 # 손대야 하는지 순위조차 뒤집힌다 — 매트릭스가 펴진 워크플로는 벽시계로는 작아 보여도
 # 청구 잡 수는 클 수 있다. `GET /repos/{owner}/{repo}/actions/runs/{run_id}/timing`이
-# run 하나당 `billable.<OS>.jobs`(청구된 잡 수)와 `billable.<OS>.total_ms`를 준다 — 이
-# 값을 run 목록 위에서 워크플로 이름별로 합산한다.
+# run 하나당 `billable.<OS>.jobs`(청구된 잡 수)를 준다 — 이 값을 run 목록 위에서
+# 워크플로 이름별로 합산한다.
+#
+# `total_ms`는 판별자·합산 근거로 쓰지 않는다: owner가 2026-08-29 실측한 바로는 이
+# 리포의 timing이 total_ms를 채우지 않아 — 실제로 청구된(conclusion=success,
+# run_duration_ms 138~160초) run에서도 항상 0이다. 과거 버전은 이 필드로 "과금정지
+# run"을 가르려 했으나, 그 분기가 참인 run만 골라 합산하다 보니 billable.jobs가
+# 정상적으로 채워져 있어도 합계가 영원히 0에 고정되는 버그였다(#480 PR #482 반송).
+# 벽시계는 대신 `run_duration_ms`에서 낸다.
 #
 # CI에서 자동으로 돌리지 않는다 — 사람이 필요할 때 손으로 부르는 도구다. timing 호출은
 # run 하나당 1회이므로 호출 수가 run 수에 비례한다. 측정 도구가 스스로 청구를 만들면
@@ -88,7 +95,7 @@ fi
 
 # 워크플로 이름별 누적치. ORDER는 처음 등장한 순서를 표에 그대로 반영하기 위한 것이다
 # (연관배열은 순서를 보장하지 않는다).
-declare -A SEEN=() NORMAL_RUNS=() PAUSED_RUNS=() JOBS_SUM=() MS_SUM=() WALL_MS_SUM=()
+declare -A SEEN=() RUN_COUNT=() JOBS_SUM=() WALL_MS_SUM=()
 ORDER=()
 
 ensure_order() {
@@ -115,45 +122,40 @@ while IFS=$'\t' read -r id name; do
 
   ensure_order "$name"
   jobs=$(jq '[.billable[]?.jobs // 0] | add // 0' <<<"$timing")
-  ms=$(jq '[.billable[]?.total_ms // 0] | add // 0' <<<"$timing")
   wall=$(jq '.run_duration_ms // 0' <<<"$timing")
 
-  # total_ms=0은 잡이 시작되지 못한 run이다(과금 정지 구간 등). 0분으로 조용히 합산하면
-  # "청구가 줄었다"는 착시가 나므로 별도 카운터로만 센다 — 정상 합계에 넣지 않는다.
-  if [ "$ms" -eq 0 ]; then
-    PAUSED_RUNS[$name]=$(( ${PAUSED_RUNS[$name]:-0} + 1 ))
-  else
-    NORMAL_RUNS[$name]=$(( ${NORMAL_RUNS[$name]:-0} + 1 ))
-    JOBS_SUM[$name]=$(( ${JOBS_SUM[$name]:-0} + jobs ))
-    MS_SUM[$name]=$(( ${MS_SUM[$name]:-0} + ms ))
-    WALL_MS_SUM[$name]=$(( ${WALL_MS_SUM[$name]:-0} + wall ))
-  fi
+  # jobs·wall은 total_ms 값과 무관하게 항상 더한다 — total_ms는 이 리포에서 신뢰할 수
+  # 없는 필드이고(위 배경 주석), 실제로 청구된 run에서도 0으로 나온다.
+  RUN_COUNT[$name]=$(( ${RUN_COUNT[$name]:-0} + 1 ))
+  JOBS_SUM[$name]=$(( ${JOBS_SUM[$name]:-0} + jobs ))
+  WALL_MS_SUM[$name]=$(( ${WALL_MS_SUM[$name]:-0} + wall ))
 
   processed=$((processed + 1))
 done < <(jq -r '.[] | [.id, .name] | @tsv' <<<"$runs")
 
-echo "| 워크플로 | 정상 실행 | 청구 잡 수 | 벽시계 분 | 과금정지 실행 |"
-echo "|---|---:|---:|---:|---:|"
+echo "| 워크플로 | 실행 수 | 청구 잡 수 | 벽시계 분 |"
+echo "|---|---:|---:|---:|"
 
 total_jobs=0
 for name in "${ORDER[@]}"; do
-  n="${NORMAL_RUNS[$name]:-0}"
+  n="${RUN_COUNT[$name]:-0}"
   j="${JOBS_SUM[$name]:-0}"
   w="${WALL_MS_SUM[$name]:-0}"
-  p="${PAUSED_RUNS[$name]:-0}"
   wall_min=$(awk -v ms="$w" 'BEGIN{printf "%.1f", ms/60000}')
-  echo "| ${name} | ${n} | ${j} | ${wall_min} | ${p} |"
+  echo "| ${name} | ${n} | ${j} | ${wall_min} |"
   total_jobs=$((total_jobs + j))
 done
 
 echo
-echo "청구 잡 수 합계(과금 정지 run 제외): ${total_jobs}"
+echo "청구 잡 수 합계: ${total_jobs}"
 echo
 monthly=$(awk -v jobs="$total_jobs" -v days="$period_days" 'BEGIN{printf "%.1f", jobs/days*30}')
 echo "월 환산 청구 잡 수 추정치 = ${total_jobs} / ${period_days}일 × 30일 = ${monthly}"
 echo
-echo "* 과금정지 실행 열은 total_ms=0(잡이 시작되지 못한 run)의 건수다 — 0분으로 합산하지"
-echo "  않고 별도로 뺐다. 이 구간이 정상 구간과 섞이면 청구가 준 것처럼 보이는 착시가 난다."
+echo "* 이 리포의 timing API는 total_ms를 채우지 않아(#480 실측, 2026-08-29) 과금정지 run과"
+echo "  정상 run을 구분할 수 없다. 위 합계는 기간 내 전체 run의 billable.jobs 합이며,"
+echo "  과금정지 구간(2026-08-15 13:39 UTC~08-29 10:02 UTC)이 섞였는지는 --since/--until로"
+echo "  기간을 좁혀 확인한다."
 
 if [ "$partial" -eq 1 ]; then
   echo
