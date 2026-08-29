@@ -70,4 +70,13 @@ export interface RunCliDeps {
    * nothing. Unset — the default — is a fresh session, exactly as before this seam existed.
    */
   session?: Session;
+  /**
+   * mori#489 — forwarded to `createMoriAgent`'s option of the same name
+   * (`agent/index.ts`) when `prepareAgent` builds the agent: confines the `bash` tool's
+   * writes to `root` at the kernel level instead of the ordinary "cwd pinned, nothing
+   * else restricted" contract. Unset — every front end but the bench execution path — is
+   * the existing unsandboxed behavior. `bench/preference-regression/runner.ts` sets this
+   * for every episode it runs; nothing else needs to.
+   */
+  confineBashWrites?: boolean;
 }

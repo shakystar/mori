@@ -134,6 +134,18 @@ export interface CreateMoriAgentOptions {
    * builds a fresh session exactly as before this seam existed.
    */
   session?: Session;
+  /**
+   * mori#489 — when `tools` is unset (the default toolset is built here from `root`),
+   * confine the `bash` tool's writes to `root` at the kernel level (`tools/bash-jail.ts`).
+   * Unset — every non-bench call site — leaves `bash` exactly as `tools/bash.ts`'s module
+   * comment describes it: cwd pinned, nothing else restricted. `prepareAgent`
+   * (cli/runtime.ts) threads this from `RunCliDeps.confineBashWrites`, which the bench
+   * execution path (`bench/preference-regression/runner.ts`) sets — the one caller that
+   * runs a model against prompts nobody has reviewed for what tool calls they provoke.
+   * Has no effect when `tools` is set — a caller supplying its own toolset owns that
+   * toolset's confinement, if any.
+   */
+  confineBashWrites?: boolean;
 }
 
 export function createMoriAgent(
@@ -170,7 +182,9 @@ export function createMoriAgent(
   // credentials anyway, because the auth gate it passes first requires them.
   if (streamFn) overrideProviderStream(models, providerId, streamFn);
 
-  const tools = options.tools ?? createMoriTools(options.root ?? process.cwd(), env);
+  const tools =
+    options.tools ??
+    createMoriTools(options.root ?? process.cwd(), env, options.confineBashWrites ?? false);
 
   // Kept in this closure rather than dropped once handed to the harness: `AgentHarness`
   // stores `session` in a private field with no getter, and `resetSession`/`getEntries`

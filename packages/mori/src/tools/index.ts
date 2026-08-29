@@ -19,10 +19,16 @@ export * from "./bash.js";
  * the path guard's root (read_file/list_dir/grep/edit_file) and the bash tool's child
  * cwd, so a path that the guard allows and a relative path a shell command resolves
  * agree on what "inside the working root" means.
+ *
+ * `confineBashWrites` (mori#489) additionally puts `bash` behind the mount-namespace
+ * boundary `bash-jail.ts` builds — see `RunBashOptions.confineWrites` for what that does
+ * and why it is not the default here. `createMoriAgent` (agent/index.ts) is what actually
+ * decides the value for a given caller; this function only threads it through.
  */
 export function createMoriTools(
   root: string = process.cwd(),
   env: NodeJS.ProcessEnv = process.env,
+  confineBashWrites = false,
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- AgentTool<TArgs> erasure for a heterogeneous tool array
 ): AgentTool<any>[] {
   return [
@@ -30,6 +36,6 @@ export function createMoriTools(
     createListDirTool(root),
     createGrepTool(root),
     createEditFileTool(root),
-    createBashTool(root, { env }),
+    createBashTool(root, { env, confineWrites: confineBashWrites }),
   ];
 }
