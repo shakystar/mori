@@ -3,6 +3,7 @@ import type { Api, CredentialStore, Model } from "@earendil-works/pi-ai";
 import type { StreamFn } from "@earendil-works/pi-agent-core";
 import { createCostLedger, type CostReport } from "../cost-ledger.js";
 import { computeKillSwitchReport, type KillSwitchReport } from "./kill-switch.js";
+import { computeSampleStats, type ScenarioSampleStats } from "./sample-stats.js";
 import {
   computeAxisRates,
   runPreferenceRegression,
@@ -64,6 +65,10 @@ export interface NightlySliceReport extends CostReport {
   /** `PREFERENCE_REGRESSION_RUBRIC_VERSION`(scenarios.ts, #475) 그대로 — 반복마다 부르는
    * `runPreferenceRegression`이 전부 같은 값을 실어 오므로 슬라이스 전체를 대표한다. */
   rubricVersion: number;
+  /** 시나리오별 × 팔별 표본 요약(n·평균·표준편차·최소·최대) — #469 요구 3. `killSwitch`의 판정이
+   * 딛고 선 평균이 어떤 표본에서 나왔는지를 같은 리포트 안에서 읽게 한다(둘 다 `sample-stats.ts`의
+   * 같은 추출·요약을 쓴다). */
+  sampleStats: readonly ScenarioSampleStats[];
 }
 
 /**
@@ -99,6 +104,11 @@ export async function runNightlySlice(options: NightlySliceOptions): Promise<Nig
       cacheDir: options.cacheDir,
       workRoot: path.join(options.workRoot, `rep-${rep}`),
       memorizeRoot: path.join(options.memorizeRootBase, `rep-${rep}`),
+      // #469: 회차 인덱스를 캐시 키에 싣는 유일한 지점. 이것이 없으면 회차마다 새 `workRoot`·
+      // `memorizeRoot`를 줘도 표본이 늘지 않는다 — 스크래치 루트는 캐시 키에서 정규화돼 빠지고
+      // (`llm-call-cache.ts`의 `normalizeVolatilePaths`), judge 프롬프트는 회차 간 같아질 수
+      // 있어서 2회차 이후가 1회차 판정을 그대로 재생한다.
+      repeatIndex: rep,
       env,
       ...(options.credentialStore ? { credentialStore: options.credentialStore } : {}),
       ...(options.scenarios ? { scenarios: options.scenarios } : {}),
@@ -120,5 +130,6 @@ export async function runNightlySlice(options: NightlySliceOptions): Promise<Nig
     axisRates: computeAxisRates(scenarioResults),
     killSwitch: computeKillSwitchReport(scenarioResults),
     rubricVersion: PREFERENCE_REGRESSION_RUBRIC_VERSION,
+    sampleStats: computeSampleStats(scenarioResults),
   };
 }

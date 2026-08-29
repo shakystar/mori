@@ -41,6 +41,9 @@ export interface BenchRunnerConfig {
   /** Test/observability seam surfaced straight through to `withLlmCallCache` (#372) — a bench
    * can wire counters/loggers here without reaching into the cache module directly. */
   cacheHooks?: LlmCallCacheHooks;
+  /** #469 — repeat index folded into this runner's reader cache keys
+   * (`ApiReaderConfig.repeatIndex`). Unset for a bench that runs each episode once. */
+  repeatIndex?: number;
 }
 
 export interface BenchRunner {
@@ -82,6 +85,7 @@ export async function createBenchRunner(
             costLedger,
             ...(config.costAxis === undefined ? {} : { costAxis: config.costAxis }),
             ...(config.systemPrompt === undefined ? {} : { systemPrompt: config.systemPrompt }),
+            ...(config.repeatIndex === undefined ? {} : { repeatIndex: config.repeatIndex }),
           },
         }
       : {
