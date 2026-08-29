@@ -49,20 +49,20 @@ $ REPO=shakystar/mori bash .github/scripts/billed-usage-report.sh --since 2026-0
 ## (b) 변경 후 회당 청구 잡 수의 확정
 
 `.github/workflows/recheck-open-prs.yml`의 `pull_request` 트리거(`synchronize`,
-`reopened`, `ready_for_review`, 27~29행)는 잡 셋으로 구성된다 — `discover`(44~95행,
-조건 없이 항상 실행), `recheck`(97~110행, `if: needs.discover.outputs.count != '0'`,
-`matrix.pr = needs.discover.outputs.prs`), `report`(275~280행,
+`reopened`, `ready_for_review`, 27\~29행)는 잡 셋으로 구성된다 — `discover`(44\~95행,
+조건 없이 항상 실행), `recheck`(97\~110행, `if: needs.discover.outputs.count != '0'`,
+`matrix.pr = needs.discover.outputs.prs`), `report`(275\~280행,
 `if: !cancelled() && needs.discover.result == 'success' && needs.discover.outputs.report_count != '0'`).
 대상 선정은 `.github/scripts/recheck-select.sh`가 한다.
 
 `pull_request` 이벤트에서 `recheck-select.sh`는 대상 후보를 트리거한 PR 하나로 고정한다
 (`numbers=("${PR_NUMBER:?...}")`, 70행) — `push` 이벤트처럼 열린 PR 전체를 조회하지
-않는다(61~68행은 `push` 분기 전용). 그 PR 하나를 `classify()`(91~151행)로 판정해
-`run`(재검증 대상, 158~160행) / `skip:*`(드래프트·충돌·머지가능성 계산중 — 로그만 남기고
-`sel`·`unverified` 어디에도 담기지 않음, 162~164행) / `error:classify-*`(재시도
-`RETRY_ATTEMPTS`회를 다 써도 판정 불가 — `unverified`에 담김, 165~170행) 셋으로 가른다.
+않는다(61\~68행은 `push` 분기 전용). 그 PR 하나를 `classify()`(91\~151행)로 판정해
+`run`(재검증 대상, 158\~160행) / `skip:*`(드래프트·충돌·머지가능성 계산중 — 로그만 남기고
+`sel`·`unverified` 어디에도 담기지 않음, 162\~164행) / `error:classify-*`(재시도
+`RETRY_ATTEMPTS`회를 다 써도 판정 불가 — `unverified`에 담김, 165\~170행) 셋으로 가른다.
 `count`는 `sel`(재검증 대상)의 길이(188행), `report_count`는 `sel + unverified`의
-길이(182~191행)다.
+길이(182\~191행)다.
 
 **① 트리거한 PR이 스윕 대상일 때(`classify()` → `run`)**
 
@@ -148,9 +148,9 @@ Recheck open PRs × pull_request 월 환산 = 308 / 14일 × 30일 = 660.0잡/�
 
 다음 감축 대상 1순위는 (a)의 이벤트 분해 표에서 숫자로 드러난다:
 
-| 워크플로 | 이벤트 | 실행 수 | 청구 잡 수 | 벽시계 분 |
-|---|---|---:|---:|---:|
-| Recheck open PRs | push | 74 | 353 | 134.7 |
+| 워크플로         | 이벤트 | 실행 수 | 청구 잡 수 | 벽시계 분 |
+| ---------------- | ------ | ------: | ---------: | --------: |
+| Recheck open PRs | push   |      74 |        353 |     134.7 |
 
 이 행이 이벤트 분해 표 전체에서 청구 잡 수 **최댓값**이다(2위 `Recheck open PRs ×
 pull_request` 308, 3위 `CI × pull_request` 152). `push:[main]` 트리거는 여전히 열린 PR
