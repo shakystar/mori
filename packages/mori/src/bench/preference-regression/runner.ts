@@ -378,6 +378,8 @@ export interface ScenarioRunResult {
   compactionSummary: string | undefined;
   /** `EpisodeResult.fallbackUsed` 그대로 — `"memory-off"`·`"oracle"`이면 `undefined`. */
   fallbackUsed: boolean | undefined;
+  /** `EpisodeResult.repeatIndex` 그대로 (#469). */
+  repeatIndex?: number;
 }
 
 export interface RunEpisodeOptions {
@@ -400,6 +402,11 @@ export interface RunEpisodeOptions {
    * `llm-call-cache.ts`'s `normalizeVolatilePaths` for why. Only read when `cacheStore` is also
    * given; a `cacheStore`-less run never computes a cache key at all. */
   volatilePaths?: readonly string[];
+  /** #469 — 이 에피소드가 속한 회차. `cacheStore`가 있을 때 캐시 키에 섞여 들어가, 같은
+   * (시나리오, 팔, 프롬프트)를 반복해도 회차마다 모델을 실제로 다시 호출하게 만든다
+   * (`LlmCallCacheKeyScope.repeatIndex`). 에피소드를 한 번만 도는 호출자(`milestone.ts`)는
+   * 넘기지 않는다 — 넘기지 않으면 키는 이 필드가 없던 때와 바이트 단위로 같다. */
+  repeatIndex?: number;
   credentialStore?: CredentialStore;
   costLedger: CostLedger;
   createSession?: CreateSessionFn;
@@ -424,6 +431,11 @@ export interface EpisodeResult {
    * `"oracle"`에서는 항상 `undefined`다(그 팔들에는 폴백 개념 자체가 없다). 폴백 발동 여부가
    * 에피소드별로 리포트 JSON에 관측되도록 여기서 표면화한다(#459 완료 조건). */
   fallbackUsed: boolean | undefined;
+  /** #469 — 이 레코드가 몇 회차의 것인가(`RunEpisodeOptions.repeatIndex` 그대로). 반복 실행에서는
+   * 같은 (시나리오, 팔) 키가 여러 번 나타나므로, 이 값이 없으면 JSON 리포트만 보고 «회차 3건이
+   * 서로 다른 에피소드인가»를 확인할 방법이 없다. 회차 개념이 없는 호출자(`milestone.ts`)에서는
+   * 필드 자체가 없다. */
+  repeatIndex?: number;
 }
 
 /** 시나리오 하나 × 조건 하나를 채점 없이 끝까지 실행한다: 맥락 세션 주입 → 세션 사망 →
@@ -450,7 +462,10 @@ export async function runPreferenceRegressionEpisode(
   const createSession = options.createSession ?? createMoriSession;
   const createKernel = options.createKernel ?? defaultCreateKernel;
   const streamFn = options.cacheStore
-    ? withLlmCallCache(options.streamFn, options.cacheStore, undefined, options.volatilePaths)
+    ? withLlmCallCache(options.streamFn, options.cacheStore, undefined, {
+        ...(options.volatilePaths === undefined ? {} : { volatilePaths: options.volatilePaths }),
+        ...(options.repeatIndex === undefined ? {} : { repeatIndex: options.repeatIndex }),
+      })
     : options.streamFn;
   const baseDeps: RunCliDeps = {
     streamFn,
@@ -588,6 +603,7 @@ export async function runPreferenceRegressionEpisode(
     injected,
     compactionSummary,
     fallbackUsed,
+    ...(options.repeatIndex === undefined ? {} : { repeatIndex: options.repeatIndex }),
   };
 }
 
@@ -635,6 +651,7 @@ export async function runPreferenceRegressionScenario(
     reQuestioned,
     compactionSummary: episode.compactionSummary,
     fallbackUsed: episode.fallbackUsed,
+    ...(episode.repeatIndex === undefined ? {} : { repeatIndex: episode.repeatIndex }),
   };
 }
 
@@ -664,6 +681,17 @@ export interface PreferenceRegressionOptions {
   scenarios?: readonly PreferenceRegressionScenario[];
   conditions?: readonly PreferenceRegressionCondition[];
   systemPrompt?: string;
+  /**
+   * #469 — 이 호출이 반복 실행(`nightly-slice.ts`)의 몇 회차인가. 캐시를 타는 모든 호출
+   * (스코어러 judge reader, 재질문 judge reader, 그리고 `cacheStore`를 받는 에피소드)의 키에
+   * 이 값이 들어가, 회차가 다르면 같은 프롬프트라도 다른 캐시 엔트리가 된다.
+   *
+   * 이 값이 없으면 반복은 표본을 늘리지 못한다: 에피소드 출력이 회차마다 같게 나오는 순간
+   * judge 프롬프트가 바이트 단위로 같아지고, 2회차 이후의 «판정»은 1회차 판정의 재생이 된다 —
+   * 즉 표본 하나를 N번 복제한 것이 되어, #459·#460 회차가 노이즈와 신호를 구분하지 못한 원인이
+   * 그대로 남는다. 단발 실행 호출자는 넘기지 않는다(키가 예전과 동일하게 유지된다).
+   */
+  repeatIndex?: number;
   createSession?: CreateSessionFn;
   createKernel?: CreateKernelFn;
 }
@@ -734,6 +762,7 @@ export async function runPreferenceRegression(
         model: options.model,
         streamFn: options.streamFn,
         ...(options.systemPrompt === undefined ? {} : { systemPrompt: options.systemPrompt }),
+        ...(options.repeatIndex === undefined ? {} : { repeatIndex: options.repeatIndex }),
       },
       env,
     );
@@ -751,6 +780,7 @@ export async function runPreferenceRegression(
         costLedger: runner.costLedger,
         costAxis: BENCH_AXES.reQuestionRate,
         ...(options.systemPrompt === undefined ? {} : { systemPrompt: options.systemPrompt }),
+        ...(options.repeatIndex === undefined ? {} : { repeatIndex: options.repeatIndex }),
       },
     });
 
@@ -769,6 +799,7 @@ export async function runPreferenceRegression(
             root,
             env,
             streamFn: options.streamFn,
+            ...(options.repeatIndex === undefined ? {} : { repeatIndex: options.repeatIndex }),
             ...(options.credentialStore ? { credentialStore: options.credentialStore } : {}),
             costLedger: runner.costLedger,
             scoringJudge,

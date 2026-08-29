@@ -244,6 +244,29 @@ describe("withLlmCallCache", () => {
     expect(result.stopReason).toBe("stop");
   });
 
+  // #469: the "misses on the first call, then replays on the second" test above is the replay
+  // guarantee (#342 완료 조건 2); this one is its counterpart for repeated sampling — two repeats
+  // of the identical call must each reach the provider, while a replay *within* one repeat must
+  // still cost zero calls. Both halves are asserted here rather than in a second test, because
+  // the second half is exactly what the first half must not break.
+  it("keys on the repeat index: a different index calls the provider again, the same index replays", async () => {
+    const inner = fakeStreamFn(assistantMessage({ content: [{ type: "text", text: "draw 1" }] }));
+    const repeatZero = withLlmCallCache(inner, store, undefined, { repeatIndex: 0 });
+    const repeatOne = withLlmCallCache(inner, store, undefined, { repeatIndex: 1 });
+
+    await (await repeatZero(model(), context(), undefined)).result();
+    expect(inner.calls).toBe(1);
+
+    // Same (model, prompt, params) — only the repeat index differs, so this is a real draw.
+    await (await repeatOne(model(), context(), undefined)).result();
+    expect(inner.calls).toBe(2);
+
+    // Replaying either repeat stays free.
+    await (await repeatZero(model(), context(), undefined)).result();
+    await (await repeatOne(model(), context(), undefined)).result();
+    expect(inner.calls).toBe(2);
+  });
+
   it("does not cache an error terminal — the next call retries the provider", async () => {
     const errorMessage = assistantMessage({ stopReason: "error", errorMessage: "boom" });
     const inner = fakeStreamFn(errorMessage, assistantMessage());

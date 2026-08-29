@@ -147,20 +147,53 @@ function stableStringify(value: unknown): string {
   return JSON.stringify(value) ?? "null";
 }
 
-/** `llmCallCacheKey`'s third parameter — `SimpleStreamOptions` (the "파라미터" third of the
- * key) plus `volatilePaths` (#445): a bench-caller-declared list of absolute per-run scratch
- * roots to normalize out of the "프롬프트" third before hashing. See `normalizeVolatilePaths`
- * for why this exists and why it isn't a heuristic. */
-export interface LlmCallCacheKeyOptions extends SimpleStreamOptions {
+/**
+ * Key inputs a bench caller declares once per wrapper rather than per call — neither is part of
+ * the (모델, 프롬프트, 파라미터) triple the call itself carries.
+ */
+export interface LlmCallCacheKeyScope {
+  /** #445 — absolute per-run scratch roots to normalize out of the "프롬프트" third before
+   * hashing. See `normalizeVolatilePaths` for why this exists and why it isn't a heuristic. */
   volatilePaths?: readonly string[];
+  /**
+   * #469 — the repeat (회차) this call belongs to. A bench that runs the same scenario N times to
+   * build a sample (`--repeats`, `nightly-slice.ts`) asks the model the *same* (모델, 프롬프트,
+   * 파라미터) question in every repeat: without this, repeat 2..N replay repeat 1's stored
+   * response and the "sample" is one draw copied N times, which is exactly what made the #459·#460
+   * 회차 unable to tell signal from noise. Declaring the index makes each repeat its own cache
+   * entry, so every repeat actually calls the model.
+   *
+   * This does **not** weaken #342's replay guarantee (「동일 실행을 재생하면 API 호출 0건」): a
+   * replay walks the same repeat indices in the same order, so every call still finds the entry
+   * its own repeat wrote. What it does invalidate is entries written *before* a caller started
+   * declaring an index — including repeat 0, which is deliberately keyed as `repeat: 0` rather
+   * than "same as no index at all". Folding index 0 into the legacy key would leave exactly one
+   * repeat sharing its cache slot with older runs (and with the index-less callers below:
+   * `milestone.ts`, `pr-smoke`'s judge), so that one draw of the sample would come from a
+   * different run's conditions than the other N−1. A one-time re-fill of the cache directory is
+   * the cheaper error.
+   */
+  repeatIndex?: number;
 }
+
+/** `llmCallCacheKey`'s third parameter — `SimpleStreamOptions` (the "파라미터" third of the
+ * key) plus the caller-declared scope above. */
+export type LlmCallCacheKeyOptions = SimpleStreamOptions & LlmCallCacheKeyScope;
 
 /** The full (모델, 프롬프트, 파라미터) cache key, hashed to a fixed-length id suitable for a
  * filename. "프롬프트" is the full `Context` (system prompt, messages, tools) — everything in
  * it is load-bearing except each message's own `timestamp` (dropped by `dropMessageTimestamps`)
  * and any caller-declared `volatilePaths` substrings (replaced by `normalizeVolatilePaths`) —
  * both carry per-run bookkeeping/scratch-directory noise rather than anything that changes what
- * the model was asked to produce. */
+ * the model was asked to produce.
+ *
+ * `repeatIndex` (#469) is the one key component that does *not* come from the call: it sits as
+ * its own top-level layer beside the triple rather than inside `params`, because it is not a
+ * generation knob — the model is asked the identical question in every repeat, and the index is
+ * only there to keep the repeats from collapsing into one cache entry
+ * (`LlmCallCacheKeyScope.repeatIndex`). Omitted from the hashed object entirely when the caller
+ * declares no index, so an index-less caller's keys are byte-identical to what they were before
+ * this field existed. */
 export function llmCallCacheKey(
   model: Model<Api>,
   context: Context,
@@ -170,6 +203,7 @@ export function llmCallCacheKey(
     model: modelIdentity(model),
     context: dropMessageTimestamps(context),
     params: generationParams(options),
+    ...(options?.repeatIndex === undefined ? {} : { repeat: options.repeatIndex }),
   };
   const serialized = normalizeVolatilePaths(stableStringify(keyed), options?.volatilePaths);
   return createHash("sha256").update(serialized).digest("hex");
@@ -304,22 +338,22 @@ function callHook<Args extends unknown[]>(
  * condition — a fake-provider call counter in a test proves this). A cache miss calls
  * `streamFn` normally and stores its cacheable terminal message for next time.
  *
- * `volatilePaths` (#445) is fixed for the lifetime of this wrapper, not per-call — a bench
- * caller wraps once per episode/session with that run's own scratch roots
- * (`preference-regression/runner.ts`'s `RunEpisodeOptions.volatilePaths`), so every call this
- * wrapper makes normalizes the same roots out of the key.
+ * `scope` (`volatilePaths` #445, `repeatIndex` #469) is fixed for the lifetime of this wrapper,
+ * not per-call — a bench caller wraps once per episode/session with that run's own scratch roots
+ * and repeat index (`preference-regression/runner.ts`'s `RunEpisodeOptions`), so every call this
+ * wrapper makes carries the same scope into its key.
  */
 export function withLlmCallCache(
   streamFn: StreamFn,
   store: LlmCallCacheStore,
   hooks?: LlmCallCacheHooks,
-  volatilePaths?: readonly string[],
+  scope?: LlmCallCacheKeyScope,
 ): StreamFn {
   return async (model, context, options) => {
     const key = llmCallCacheKey(
       model,
       context,
-      volatilePaths === undefined ? options : { ...options, volatilePaths },
+      scope === undefined ? options : { ...options, ...scope },
     );
     const cached = await store.get(key);
     if (cached) {

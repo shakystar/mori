@@ -235,6 +235,37 @@ describe("runNightlySlice (#406)", () => {
     expect(report.killSwitch.scenarios.length).toBeGreaterThan(0);
   });
 
+  // #469: a reader of the JSON report could not previously tell whether a score was one draw or
+  // ten — the repeats were merged into a flat list with no repeat marker and no per-arm sample
+  // summary, so `killSwitch.gap` looked equally authoritative at n=1 and n=10.
+  it("labels each result with its repeat and summarizes the sample per (scenario, arm)", async () => {
+    const harness = fakeHarness();
+
+    const report = await runNightlySlice({
+      model: model(),
+      streamFn: fakeJudgeStreamFn(),
+      cacheDir,
+      workRoot,
+      memorizeRootBase,
+      scenarios: [fixtureScenario("solo")],
+      repeatsPerScenario: 3,
+      createSession: harness.createSession,
+      createKernel: harness.createKernel,
+    });
+
+    const offResults = report.scenarios.filter((r) => r.condition === "memory-off");
+    expect(offResults.map((r) => r.repeatIndex)).toEqual([0, 1, 2]);
+
+    const [scenarioStats] = report.sampleStats;
+    expect(scenarioStats?.scenarioId).toBe("solo");
+    const offStats = scenarioStats?.arms.find((arm) => arm.condition === "memory-off");
+    expect(offStats?.n).toBe(3);
+    // The stats sit on the same mean the kill switch judges (both go through sample-stats.ts).
+    expect(offStats?.mean).toBe(
+      report.killSwitch.scenarios.find((s) => s.scenarioId === "solo")?.offScore,
+    );
+  });
+
   it("reruns against the same cacheDir for free — second call makes zero streamFn calls (#422)", async () => {
     const scenarios = [fixtureScenario("solo")];
     let callCount = 0;
