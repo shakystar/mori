@@ -725,6 +725,22 @@ export interface PreferenceRegressionOptions {
    * 그대로 남는다. 단발 실행 호출자는 넘기지 않는다(키가 예전과 동일하게 유지된다).
    */
   repeatIndex?: number;
+  /**
+   * #473 — 에피소드 세션 턴(맥락·후속 프롬프트, 압축)도 judge/reader 호출과 같은 `cacheDir` 위에서
+   * `withLlmCallCache`(#372)를 타게 할지. 기본값 `true` — 이 옵션이 생긴 이유(`nightly-slice.ts`)는
+   * 항상 이걸 원한다: 같은 명령을 같은 `cacheDir`로 재실행했을 때 세션 턴도 재과금 없이 재생돼야
+   * 한다는 것이 이 이슈 자체다.
+   *
+   * `pr-smoke.ts`만 `false`로 끈다 — 그 호출자의 `streamFn`(`createFixtureCacheStreamFn`,
+   * `pr-smoke-cache.ts`)은 이미 그 자체로 같은 `cacheDir` 위의 완결된 기록/재생 캐시다(자신만의
+   * 타임스탬프 제거 키 `fixtureCacheKey`를 쓴다). 이 옵션을 켠 채로 그 호출자를 통과시키면 이
+   * 파일의 `llmCallCacheKey`(다른 키 스킴)가 매번 처음 보는 키로 미스나고, 미스마다
+   * `withLlmCallCache`가 그 결과를 커밋된 픽스처 디렉터리에 **새 파일로 써 버린다** — 실측:
+   * 이 옵션 없이 이 필드를 무조건 켰을 때 `pnpm bench:pr-smoke`(레코드 모드 아님) 한 번 실행에
+   * `git status`에 커밋 안 된 캐시 파일 19개가 새로 생겼다. `missCount()`(pr-smoke.ts의 CI
+   * 게이트)는 이 층을 보지 않으므로 조용히 그린인 채 저장소만 더러워진다.
+   */
+  cacheEpisodes?: boolean;
   createSession?: CreateSessionFn;
   createKernel?: CreateKernelFn;
 }
@@ -823,6 +839,18 @@ export async function runPreferenceRegression(
     const scoringJudge = createReaderLlmJudge(runner.reader);
     const reQuestionJudge = createReaderLlmJudge(reQuestionReader);
 
+    // #473: 에피소드 세션 턴(맥락 주입·후속 프롬프트)도 캐시를 타게 한다. `runPreferenceRegressionEpisode`
+    // 는 `cacheStore`가 주어질 때만 자신의 `streamFn`을 `withLlmCallCache`로 감싼다(#372) — 이
+    // 필드를 넘기지 않던 것이 이 이슈의 원인 1이었다(같은 명령을 같은 `cacheDir`로 재실행해도
+    // 세션 턴은 매번 실과금). `milestone.ts`의 `runPreferenceRegressionMilestone`와 같은 이유로
+    // 같은 `cacheDir` 위에 별도 `FileLlmCallCacheStore` 인스턴스를 둔다(위 `reQuestionReader`도
+    // 이미 그렇게 한다) — 캐시 키가 (모델, 프롬프트, 파라미터)라 인스턴스가 여러 개여도 충돌하지
+    // 않는다. `cacheEpisodes: false`(pr-smoke.ts, 위 옵션 문서 참고)면 만들지 않는다 — 그 호출자의
+    // `streamFn`은 이미 그 자체가 완결된 캐시라, 여기서 또 하나를 씌우면 다른 키 스킴이 매번
+    // 미스나며 커밋된 픽스처 디렉터리에 새 파일을 써 버린다.
+    const episodeCacheStore =
+      options.cacheEpisodes === false ? undefined : new FileLlmCallCacheStore(options.cacheDir);
+
     const results: ScenarioRunResult[] = [];
     for (const scenario of scenarios) {
       for (const condition of conditions) {
@@ -835,6 +863,15 @@ export async function runPreferenceRegression(
             root,
             env,
             streamFn: options.streamFn,
+            ...(episodeCacheStore === undefined ? {} : { cacheStore: episodeCacheStore }),
+            // #445: `root`와 `memorizeRoot`는 둘 다 호출마다 새로 만드는 스크래치 루트라, 도구
+            // 결과 원문이 이 경로들을 그대로 echo할 수 있다(`milestone.ts`의 같은 필드와 동일한
+            // 이유) — 정규화하지 않으면 같은 `cacheDir`로의 재실행이 도구 왕복이 두 경로 중
+            // 하나라도 건드린 에피소드마다 미스난다. `episodeCacheStore`가 없으면(`cacheEpisodes:
+            // false`) 애초에 캐시 키를 계산하지 않으므로 이 값도 같이 뺀다.
+            ...(episodeCacheStore === undefined
+              ? {}
+              : { volatilePaths: [root, options.memorizeRoot] }),
             ...(options.repeatIndex === undefined ? {} : { repeatIndex: options.repeatIndex }),
             ...(options.credentialStore ? { credentialStore: options.credentialStore } : {}),
             costLedger: runner.costLedger,

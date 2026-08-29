@@ -105,10 +105,26 @@ export function reportNightlySliceOutcome(
     // #469 완료 조건 2의 증거 출력. 여기서 세는 것은 **이 CLI가 넘긴 product-path `streamFn`을
     // 실제로 통과한 호출**이다 — 캐시 적중은 `withLlmCallCache`가 저장된 응답을 재생하고 이
     // 함수를 부르지 않으므로 세지 않는다. 두 번 연속 돌렸을 때 이 숫자가 어떻게 변하는지가
-    // 「재생이 캐시를 실제로 탔는가」의 관측치다. 세지 **않는** 것 둘: (a) 증류 호출 —
+    // 「재생이 캐시를 실제로 탔는가」의 관측치다. 세지 **않는** 것 하나: 증류 호출 —
     // `getConsolidatorLlm`(cli/runtime.ts)이 `models`에서 직접 만드므로 이 `streamFn`을 타지
-    // 않고 캐시도 없다. (b) 에피소드 세션 턴의 캐시 — 이 층은 `cacheStore`를 에피소드에 넘기지
-    // 않는다(runner.ts `RunEpisodeOptions.cacheStore`, #423 비범위)라 매 회차 실호출이다.
+    // 않고 캐시도 없다(단, 이 카운터가 아니라 재실행 자체가 실호출이라는 뜻 — 증류 비용은
+    // `session-end-distillation` 축으로 별도 집계된다).
+    //
+    // 에피소드 세션 턴은 #473부터 `cacheStore`를 받는다(runner.ts
+    // `PreferenceRegressionOptions.cacheEpisodes`, 기본 `true`, 이 CLI는 넘기지 않으므로
+    // 기본값으로 돈다 — `cacheEpisodes: false`로 도는 호출자는 pr-smoke.ts뿐이고 이 카운터를
+    // 쓰지 않는다). 재실행 시 **대부분** 이 카운터에서 빠지지만 **전부는 아니다** — 캐시는
+    // LLM 호출만 감싸고, 그 응답에 실린 tool_call이 트리거하는 실제 도구 실행(예: `bash`의
+    // 디렉터리 목록·파일 쓰기)까지는 감싸지 않는다. 재생된 assistant 메시지가 tool_call을
+    // 담고 있으면 그 도구는 실행마다 실제로 다시 돌고, 결과 텍스트가 실행마다 달라지면
+    // (예: `ls -la`의 mtime — `normalizeVolatilePaths`가 잡는 "경로 문자열"과는 다른 값이라
+    // 그 정규화로는 안 잡힌다) 그 지점부터 같은 에피소드의 나머지 호출(후속 세션 턴,
+    // 그 출력에 기대는 judge 판정)이 연쇄로 캐시 밖이 된다. 실측(#473 PR #484 후속): 1건
+    // 시나리오·`--repeats 2`·3팔을 같은 `--cache-dir`로 연속 2회 실행하면 38→8건으로
+    // 줄지만 0은 아니다 — 남은 8건의 항목별 귀속은 PR #484 코멘트 참고. `memory-off`·
+    // `oracle`처럼 도구를 안 쓰는 팔·시나리오라도 하네스가 자체적으로 탐색성 도구 호출을
+    // 내면 같은 연쇄가 생긴다(실측: memory-on 없이도 재실행에 미스가 남았다) — memory-on
+    // 고유의 현상이 아니라 **도구를 실제로 실행하는 모든 세션**의 구조적 한계다.
     io.stdout(`mori bench: provider 스트림 호출 ${String(providerCalls)}건 (캐시 적중 제외)\n`);
   }
   if (report.scenarios.length === 0) {
