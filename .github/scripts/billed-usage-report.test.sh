@@ -29,7 +29,7 @@ route "actions/runs?created=" \
 route "runs/101/timing" '{"billable":{"UBUNTU":{"total_ms":180000,"jobs":3}},"run_duration_ms":90000}'
 route "runs/102/timing" '{"billable":{"UBUNTU":{"total_ms":300000,"jobs":5}},"run_duration_ms":150000}'
 route "runs/103/timing" '{"billable":{"UBUNTU":{"total_ms":120000,"jobs":2}},"run_duration_ms":60000}'
-out=$(run_report --since 2026-01-01 --until 2026-01-11)
+out=$(run_report --since 2026-01-01 --until 2026-01-10)
 code=$?
 assert_eq "0" "$code"
 assert_contains "$out" "| CI | 2 | 8 | 4.0 |"
@@ -44,7 +44,7 @@ route "actions/runs?created=" \
 route "runs/501/timing" '{"billable":{"UBUNTU":{"total_ms":180000,"jobs":3}},"run_duration_ms":90000}'
 route "runs/502/timing" '{"billable":{"UBUNTU":{"total_ms":0,"jobs":1}},"run_duration_ms":30000}'
 route "runs/503/timing" '{"billable":{"UBUNTU":{"total_ms":0,"jobs":2}},"run_duration_ms":60000}'
-out=$(run_report --since 2026-01-01 --until 2026-01-11)
+out=$(run_report --since 2026-01-01 --until 2026-01-10)
 code=$?
 assert_eq "0" "$code"
 assert_contains "$out" "| CI | 2 | 4 | 2.0 |"
@@ -58,7 +58,7 @@ route "actions/runs?created=" \
   '{"total_count":2,"workflow_runs":[{"id":601,"name":"CI"},{"id":602,"name":"CI"}]}'
 route "runs/601/timing" '{"billable":{"UBUNTU":{"total_ms":0,"jobs":2}},"run_duration_ms":10000}'
 route "runs/602/timing" '{"billable":{"UBUNTU":{"total_ms":0,"jobs":3}},"run_duration_ms":20000}'
-out=$(run_report --since 2026-01-01 --until 2026-01-11)
+out=$(run_report --since 2026-01-01 --until 2026-01-10)
 code=$?
 assert_eq "0" "$code"
 assert_contains "$out" "청구 잡 수 합계: 5"
@@ -70,7 +70,7 @@ route "actions/runs?created=" \
   '{"total_count":2,"workflow_runs":[{"id":401,"name":"CI"},{"id":402,"name":"CI"}]}'
 route "runs/401/timing" '{"billable":{"UBUNTU":{"total_ms":60000,"jobs":1}},"run_duration_ms":30000}'
 fail_calls_matching "runs/402/timing"
-out=$(run_report --since 2026-01-01 --until 2026-01-11 2>&1)
+out=$(run_report --since 2026-01-01 --until 2026-01-10 2>&1)
 code=$?
 assert_eq "2" "$code"
 assert_contains "$out" "| CI | 1 | 1 | 0.5 |"
@@ -79,7 +79,7 @@ assert_contains "$out" "부분 결과: 전체 2건 중 1건까지 집계를 완�
 it "run 목록 조회 자체가 실패하면 부분 결과 없이 종료코드 1로 끝난다"
 reset_scenario
 fail_calls_matching "actions/runs?created="
-out=$(run_report --since 2026-01-01 --until 2026-01-11 2>&1)
+out=$(run_report --since 2026-01-01 --until 2026-01-10 2>&1)
 code=$?
 assert_eq "1" "$code"
 assert_not_contains "$out" "청구 잡 수 합계"

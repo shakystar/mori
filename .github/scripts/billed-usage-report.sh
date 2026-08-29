@@ -72,9 +72,11 @@ if ! until_epoch=$(date -d "$UNTIL" +%s 2>/dev/null); then
   exit 1
 fi
 
-period_days=$(( (until_epoch - since_epoch) / 86400 ))
+# created=A..B는 양 끝 날짜를 모두 포함하므로 기간 일수는 차이 + 1이다.
+# (--since X --until X = 하루치 = 1일)
+period_days=$(( (until_epoch - since_epoch) / 86400 + 1 ))
 if [ "$period_days" -le 0 ]; then
-  echo "--until은 --since보다 뒤여야 합니다 (since=${SINCE}, until=${UNTIL})" >&2
+  echo "--until은 --since와 같거나 뒤여야 합니다 (since=${SINCE}, until=${UNTIL})" >&2
   exit 1
 fi
 
