@@ -189,6 +189,23 @@ jobs:
           node-version: 22.23.1
           cache: pnpm
 
+      # ci.yml 143-151행과 같은 완화 스텝이다(#489). 아래 Run repo checks가 `pnpm exec
+      # vitest run`으로 bash-jail.test.ts를 직접 돌려 무권한 user namespace를 실제로
+      # 만드는데, ubuntu-24.04부터 AppArmor가 unconfined 바이너리의 무권한 userns를 기본
+      # 차단해서 이 스텝 없이는 그 테스트가 working root 안의 쓰기까지 실패한다(#499).
+      # 조건부인 이유도 ci.yml과 같다 — 러너 이미지가 굴러 기본값이 바뀌어도 이 스텝이
+      # 그대로 맞기 위해서다.
+      - name: Allow unprivileged user namespaces (#489 bash jail)
+        if: steps.merge.outputs.outcome == 'merged'
+        run: |
+          if unshare --user --map-root-user --mount -- true 2>/dev/null; then
+            echo "무권한 user namespace 사용 가능 — 조정 불필요"
+          else
+            echo "무권한 user namespace가 막혀 있다 — AppArmor 제한을 해제한다"
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+            unshare --user --map-root-user --mount -- true
+          fi
+
       - name: Run repo checks
         id: checks
         if: steps.merge.outputs.outcome == 'merged'
