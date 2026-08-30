@@ -18,12 +18,12 @@
 
 ## §1. 배포처·파일 확인
 
-| 항목      | 값                                                                                                                                       |
-| --------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| 논문      | arXiv [2410.10813](https://arxiv.org/abs/2410.10813) — "LongMemEval: Benchmarking Chat Assistants on Long-Term Interactive Memory" (ICLR 2025) |
-| 데이터셋  | [huggingface.co/datasets/xiaowu0162/longmemeval-cleaned](https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned) (2025-09 정제판), revision `98d7416c24c778c2fee6e6f3006e7a073259d48f` — MIT |
-| 대상 split | `LongMemEval_S`, 파일 `longmemeval_s_cleaned.json` — 일반 HTTPS로 직접 받아짐(LFS 아님, `huggingface_hub` 불필요) |
-| 파일 크기 | 277,383,467 B (≈277MB), `curl -I`로 확인                                                                                                    |
+| 항목       | 값                                                                                                                                                                                                   |
+| ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 논문       | arXiv [2410.10813](https://arxiv.org/abs/2410.10813) — "LongMemEval: Benchmarking Chat Assistants on Long-Term Interactive Memory" (ICLR 2025)                                                       |
+| 데이터셋   | [huggingface.co/datasets/xiaowu0162/longmemeval-cleaned](https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned) (2025-09 정제판), revision `98d7416c24c778c2fee6e6f3006e7a073259d48f` — MIT |
+| 대상 split | `LongMemEval_S`, 파일 `longmemeval_s_cleaned.json` — 일반 HTTPS로 직접 받아짐(LFS 아님, `huggingface_hub` 불필요)                                                                                    |
+| 파일 크기  | 277,383,467 B (≈277MB), `curl -I`로 확인                                                                                                                                                             |
 
 전량 다운로드 후 `JSON.parse`로 파싱해 직접 셌다:
 
@@ -51,15 +51,15 @@ read ms: 2591  parse ms: 913  count: 500  peak rss: ~892 MB
 논문(§1)이 말하는 5개 능력은 raw `question_type`(6값)과 1:1이 아니다 — abstention은
 별도 필드가 아니라 `question_id`가 `_abs`로 끝나는지로 식별된다. 전량 실측:
 
-| `question_type` (raw)         | 문항 수 |    그중 `_abs` | → 능력                    |
-| ------------------------------ | ------: | --------------: | -------------------------- |
-| `single-session-user`          |      70 |               6 | information extraction     |
-| `single-session-assistant`     |      56 |               0 | information extraction     |
-| `single-session-preference`    |      30 |               0 | information extraction     |
-| `multi-session`                |     133 |              12 | multi-session reasoning    |
-| `knowledge-update`             |      78 |               6 | knowledge updates          |
-| `temporal-reasoning`           |     133 |               6 | temporal reasoning         |
-| **합계**                        | **500** |          **30** |                             |
+| `question_type` (raw)       | 문항 수 | 그중 `_abs` | → 능력                  |
+| --------------------------- | ------: | ----------: | ----------------------- |
+| `single-session-user`       |      70 |           6 | information extraction  |
+| `single-session-assistant`  |      56 |           0 | information extraction  |
+| `single-session-preference` |      30 |           0 | information extraction  |
+| `multi-session`             |     133 |          12 | multi-session reasoning |
+| `knowledge-update`          |      78 |           6 | knowledge updates       |
+| `temporal-reasoning`        |     133 |           6 | temporal reasoning      |
+| **합계**                    | **500** |      **30** |                         |
 
 능력별 합계(abstention 제외분을 각 base 능력에서 뺀 뒤 abstention 30건을 별도 집계) —
 `print-question-count.ts`의 실제 출력과 일치:

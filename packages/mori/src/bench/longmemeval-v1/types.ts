@@ -64,13 +64,13 @@ export const QUESTION_TYPE_TO_ABILITY: Readonly<Record<string, MemoryAbility>> =
  * `id` ends in `_abs` is scored on abstention regardless of which of the 6 base types it was
  * drawn from (see `QUESTION_TYPE_TO_ABILITY`'s doc comment). */
 export function abilityForQuestion(questionType: string, id: string): MemoryAbility {
-  if (id.endsWith("_abs")) return MEMORY_ABILITIES.abstention;
   const ability = QUESTION_TYPE_TO_ABILITY[questionType];
   if (ability === undefined) {
     throw new Error(
       `longmemeval-v1: 알 수 없는 question_type "${questionType}" — QUESTION_TYPE_TO_ABILITY(types.ts)에 매핑을 추가해라.`,
     );
   }
+  if (id.endsWith("_abs")) return MEMORY_ABILITIES.abstention;
   return ability;
 }
 

@@ -10,12 +10,23 @@
     "haystack_dates": ["2023/05/20 (Sat) 09:00", "2023/05/21 (Sun) 09:00"],
     "haystack_sessions": [
       [
-        { "role": "user", "content": "I just started learning the violin this month.", "has_answer": true },
-        { "role": "assistant", "content": "That's great, the violin is a rewarding instrument to learn.", "has_answer": false }
+        {
+          "role": "user",
+          "content": "I just started learning the violin this month.",
+          "has_answer": true
+        },
+        {
+          "role": "assistant",
+          "content": "That's great, the violin is a rewarding instrument to learn.",
+          "has_answer": false
+        }
       ],
       [
         { "role": "user", "content": "What's a good recipe for lentil soup?" },
-        { "role": "assistant", "content": "Saute onions and garlic, add lentils and broth, simmer for 30 minutes." }
+        {
+          "role": "assistant",
+          "content": "Saute onions and garlic, add lentils and broth, simmer for 30 minutes."
+        }
       ]
     ]
   },
@@ -30,8 +41,16 @@
     "haystack_dates": ["2023/05/22 (Mon) 08:00"],
     "haystack_sessions": [
       [
-        { "role": "user", "content": "My cat Miso knocked a plant off the shelf again.", "has_answer": true },
-        { "role": "assistant", "content": "Miso sounds like a handful! Might be worth moving plants out of reach.", "has_answer": false }
+        {
+          "role": "user",
+          "content": "My cat Miso knocked a plant off the shelf again.",
+          "has_answer": true
+        },
+        {
+          "role": "assistant",
+          "content": "Miso sounds like a handful! Might be worth moving plants out of reach.",
+          "has_answer": false
+        }
       ]
     ]
   },
@@ -50,7 +69,11 @@
     ],
     "haystack_sessions": [
       [
-        { "role": "user", "content": "I always book a window seat so I can watch the clouds.", "has_answer": true },
+        {
+          "role": "user",
+          "content": "I always book a window seat so I can watch the clouds.",
+          "has_answer": true
+        },
         { "role": "assistant", "content": "Window seats are great for that.", "has_answer": false }
       ],
       [
@@ -58,7 +81,11 @@
         { "role": "assistant", "content": "Slow neck rolls and a short walk usually help." }
       ],
       [
-        { "role": "user", "content": "I always book a window seat so I can watch the clouds.", "has_answer": true },
+        {
+          "role": "user",
+          "content": "I always book a window seat so I can watch the clouds.",
+          "has_answer": true
+        },
         { "role": "assistant", "content": "Window seats are great for that.", "has_answer": false }
       ]
     ]
@@ -74,12 +101,28 @@
     "haystack_dates": ["2023/05/24 (Wed) 09:00", "2023/05/27 (Sat) 09:00"],
     "haystack_sessions": [
       [
-        { "role": "user", "content": "Just got back from a week in Lisbon, the food was incredible.", "has_answer": true },
-        { "role": "assistant", "content": "Lisbon sounds wonderful, glad you had a good trip.", "has_answer": false }
+        {
+          "role": "user",
+          "content": "Just got back from a week in Lisbon, the food was incredible.",
+          "has_answer": true
+        },
+        {
+          "role": "assistant",
+          "content": "Lisbon sounds wonderful, glad you had a good trip.",
+          "has_answer": false
+        }
       ],
       [
-        { "role": "user", "content": "Kyoto in the spring was unbelievably beautiful.", "has_answer": true },
-        { "role": "assistant", "content": "Kyoto's cherry blossoms are famous for a reason.", "has_answer": false }
+        {
+          "role": "user",
+          "content": "Kyoto in the spring was unbelievably beautiful.",
+          "has_answer": true
+        },
+        {
+          "role": "assistant",
+          "content": "Kyoto's cherry blossoms are famous for a reason.",
+          "has_answer": false
+        }
       ]
     ]
   },
@@ -98,8 +141,16 @@
         { "role": "assistant", "content": "Denver gets snow early in the season." }
       ],
       [
-        { "role": "user", "content": "Update: I moved to Austin last week for a new job.", "has_answer": true },
-        { "role": "assistant", "content": "Congrats on the move and the new job!", "has_answer": false }
+        {
+          "role": "user",
+          "content": "Update: I moved to Austin last week for a new job.",
+          "has_answer": true
+        },
+        {
+          "role": "assistant",
+          "content": "Congrats on the move and the new job!",
+          "has_answer": false
+        }
       ]
     ]
   },
@@ -118,7 +169,11 @@
         { "role": "assistant", "content": "Good luck on your first day!", "has_answer": false }
       ],
       [
-        { "role": "user", "content": "Update: I moved to Austin last week for the new job.", "has_answer": true },
+        {
+          "role": "user",
+          "content": "Update: I moved to Austin last week for the new job.",
+          "has_answer": true
+        },
         { "role": "assistant", "content": "Congrats on the move!", "has_answer": false }
       ]
     ]
@@ -134,8 +189,16 @@
     "haystack_dates": ["2023/05/24 (Wed) 07:00"],
     "haystack_sessions": [
       [
-        { "role": "user", "content": "Do you know a good stretch for a stiff neck?", "has_answer": false },
-        { "role": "assistant", "content": "Slow neck rolls and a short walk usually help.", "has_answer": true }
+        {
+          "role": "user",
+          "content": "Do you know a good stretch for a stiff neck?",
+          "has_answer": false
+        },
+        {
+          "role": "assistant",
+          "content": "Slow neck rolls and a short walk usually help.",
+          "has_answer": true
+        }
       ]
     ]
   },
@@ -150,12 +213,28 @@
     "haystack_dates": ["2023/05/24 (Wed) 09:00", "2023/05/27 (Sat) 09:00"],
     "haystack_sessions": [
       [
-        { "role": "user", "content": "Just got back from a week in Lisbon, the food was incredible.", "has_answer": true },
-        { "role": "assistant", "content": "Lisbon sounds wonderful, glad you had a good trip.", "has_answer": false }
+        {
+          "role": "user",
+          "content": "Just got back from a week in Lisbon, the food was incredible.",
+          "has_answer": true
+        },
+        {
+          "role": "assistant",
+          "content": "Lisbon sounds wonderful, glad you had a good trip.",
+          "has_answer": false
+        }
       ],
       [
-        { "role": "user", "content": "Kyoto in the spring was unbelievably beautiful.", "has_answer": true },
-        { "role": "assistant", "content": "Kyoto's cherry blossoms are famous for a reason.", "has_answer": false }
+        {
+          "role": "user",
+          "content": "Kyoto in the spring was unbelievably beautiful.",
+          "has_answer": true
+        },
+        {
+          "role": "assistant",
+          "content": "Kyoto's cherry blossoms are famous for a reason.",
+          "has_answer": false
+        }
       ]
     ]
   },

@@ -97,11 +97,19 @@ describe("longmemeval-v1 loader (#507)", () => {
   });
 
   it("abilityForQuestion fails loudly on an unrecognized question_type", () => {
-    expect(() => abilityForQuestion("not-a-real-type", "fx-unknown")).toThrow(/알 수 없는 question_type/);
+    expect(() => abilityForQuestion("not-a-real-type", "fx-unknown")).toThrow(
+      /알 수 없는 question_type/,
+    );
   });
 
   it("abilityForQuestion scores an _abs-suffixed id as abstention regardless of its base type", () => {
     expect(abilityForQuestion("multi-session", "abc123_abs")).toBe(MEMORY_ABILITIES.abstention);
+  });
+
+  it("abilityForQuestion fails loudly on an unrecognized question_type even for an _abs id", () => {
+    expect(() => abilityForQuestion("not-a-real-type", "fx-unknown_abs")).toThrow(
+      /알 수 없는 question_type/,
+    );
   });
 
   it("coerces a bare JSON number answer (real dataset quirk on some multi-session counting questions) to a string", async () => {

@@ -43,7 +43,12 @@ function requireStringArray(value: unknown, field: string, id: string): string[]
   return value as string[];
 }
 
-function parseTurn(raw: unknown, questionId: string, sessionIndex: number, turnIndex: number): LongMemEvalTurn {
+function parseTurn(
+  raw: unknown,
+  questionId: string,
+  sessionIndex: number,
+  turnIndex: number,
+): LongMemEvalTurn {
   const where = `${questionId}[session ${String(sessionIndex)}][turn ${String(turnIndex)}]`;
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
     throw new Error(`longmemeval-v1: ${where}가 JSON 객체가 아니다`);
@@ -64,7 +69,10 @@ function parseTurn(raw: unknown, questionId: string, sessionIndex: number, turnI
   };
 }
 
-function parseHaystackSessions(row: Record<string, unknown>, id: string): LongMemEvalHaystackSession[] {
+function parseHaystackSessions(
+  row: Record<string, unknown>,
+  id: string,
+): LongMemEvalHaystackSession[] {
   const sessionIds = requireStringArray(row.haystack_session_ids, "haystack_session_ids", id);
   const dates = requireStringArray(row.haystack_dates, "haystack_dates", id);
   const sessions = row.haystack_sessions;
@@ -78,7 +86,9 @@ function parseHaystackSessions(row: Record<string, unknown>, id: string): LongMe
   }
   return sessions.map((rawTurns, sessionIndex) => {
     if (!Array.isArray(rawTurns) || rawTurns.length === 0) {
-      throw new Error(`longmemeval-v1: ${id}의 session[${String(sessionIndex)}]에 turns가 없거나 비어있다`);
+      throw new Error(
+        `longmemeval-v1: ${id}의 session[${String(sessionIndex)}]에 turns가 없거나 비어있다`,
+      );
     }
     return {
       sessionId: sessionIds[sessionIndex] as string,
