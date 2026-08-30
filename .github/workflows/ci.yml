@@ -140,14 +140,22 @@ jobs:
       # 조건부인 이유는 러너 이미지가 굴러 기본값이 바뀌어도 이 스텝이 그대로 맞기 위해서다.
       # 실패하면 여기서 멈춘다 — 테스트가 «커널이 못 해서» 빨개지는 것과 «경계가 안 서서»
       # 빨개지는 것은 다른 사건이고, 후자만 Test 스텝에서 보고 싶다.
+      #
+      # 이 완화를 필요로 하는 것은 아래 Test 스텝 안의 bash-jail.test.ts 하나뿐이다
+      # (unshare를 쓰는 코드는 리포 전체에 그거 하나 — #497). CI script tests·Bench PR
+      # smoke는 필요로 하지 않으므로, 우리가 실제로 값을 바꿨을 때만(`changed` 출력)
+      # Test 스텝 직후에 원복해 완화의 수명을 필요 범위와 맞춘다.
       - name: Allow unprivileged user namespaces (#489 bash jail)
+        id: allow-userns
         run: |
           if unshare --user --map-root-user --mount -- true 2>/dev/null; then
             echo "무권한 user namespace 사용 가능 — 조정 불필요"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
           else
             echo "무권한 user namespace가 막혀 있다 — AppArmor 제한을 해제한다"
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
             unshare --user --map-root-user --mount -- true
+            echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
 
       # `pnpm test`(= `turbo run test`)로 되돌렸다. 예전에 vitest를 직접 부른 이유는
@@ -157,6 +165,13 @@ jobs:
       # `pnpm test`여야 한다.
       - name: Test
         run: pnpm test
+
+      # AppArmor 완화의 수명을 필요 범위(위 Test 스텝의 bash-jail.test.ts)로 제한한다 (#497).
+      # 우리가 값을 바꾼 경우에만 원복한다 — 애초에 열려 있던 러너에서 다시 잠그면 우리가
+      # 만들지 않은 상태를 건드리는 것이다. `always()`라 Test가 실패해도 원복은 실행된다.
+      - name: Restore AppArmor unprivileged userns restriction (#489 bash jail)
+        if: always() && steps.allow-userns.outputs.changed == 'true'
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=1
 
       # .github/scripts/*.sh는 bash 스크립트라 vitest가 다루지 않는다. 셸로 돌리는 이유는
       # 검증 대상이 bash의 errexit 의미론과 빈 출력 처리이기 때문이다 (#112).
