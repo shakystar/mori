@@ -425,9 +425,12 @@ by integration`), org 엔드포인트는 404다. 대조는 사람이 GitHub 결�
   `[결정]`·`[ALERT]` 두 종류로 한정하고 루틴 진행 상황(PR 제출·리뷰·승인·머지)은 보내지
   않는다고 이미 못박고 있어, 이 워크플로는 애초에 owner 알림 정책과 어긋난 채 돌고 있었다.
   머지 기록의 정본은 GitHub이므로 짝은 「구현」이 아니라 「구현하지 않는다는 판단의 기록」이다.
-- **(e) 검증**: 다음 창에서
-  `REPO=shakystar/mori bash .github/scripts/billed-usage-report.sh --since 2026-08-15`을 돌렸을 때
-  `Notify merge` 행이 결과에서 사라지는 것으로 적용을 확인한다. `docs/actions-billing-reduction-measurement.md`의
+- **(e) 검증**: **과금정지가 풀린 뒤** 시작하는 창에서
+  `REPO=shakystar/mori bash .github/scripts/billed-usage-report.sh --since <과금 재개일> --until <창 종료일>`
+  을 돌렸을 때 `Notify merge` 행이 결과에서 사라지는 것으로 적용을 확인한다.
+  **창이 2026-08-15..08-29 과금정지 구간과 겹치면 안 된다** — 그 구간은 잡이 시작조차
+  되지 않아, 삭제가 실패했더라도 행이 똑같이 사라져 검증이 성립하지 않는다
+  (스크립트 자체 주석 참조). `docs/actions-billing-reduction-measurement.md`의
   `Notify merge` 언급은 기준 창(2026-08-01..08-14) 실측 기록이므로 삭제하지 않는다.
 
 ---
@@ -634,7 +637,7 @@ owner 사이클에 새로 구현하지 않기로 판단했으므로 이 리포 �
   (경로·트리거 필터 3종)   (Recheck 잡 구조 축약)   → Recheck 이관
         │                     │
         ▼                     ▼
-  조각 B: ~~L6a~~+L5a    조각 D: L2b 선행 실측
+  조각 B: (L6a 소진) + L5a  조각 D: L2b 선행 실측
   (L6a 소진 · 잡 강등)     → 결과에 따라 L2b 적용
 ```
 
