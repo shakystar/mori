@@ -80,7 +80,9 @@ $ REPO=shakystar/mori bash .github/scripts/billed-usage-report.sh --since 2026-0
   일치한다 — 다만 이 일치는 **머지된 코드(`recheck-open-prs.yml`·`recheck-select.sh`)를
   읽어 세운 모델끼리의 일치**이지 실측과의 일치가 아니다. (a)의 실측
   `Recheck open PRs × pull_request`는 77실행 / 308잡, 즉 **회당 4.0잡**으로 이 모델의
-  상한 3잡을 33% 넘는다. 초과분의 해석은 아래 (c) 참조.
+  상한 3잡을 33% 넘는다. 초과분의 해석은 아래 (c) 참조 — 결론만 먼저 적으면, 이
+  3잡 모델 자체가 틀렸다: (f)에서 밝히듯 실제로는 네 번째 잡(`report-discovery-failure`)이
+  매 run마다 존재해 **①의 상한은 3잡이 아니라 4잡**이다.
 
 **② `count`가 0일 때(트리거한 PR이 스윕 대상이 아닐 때)**
 
@@ -133,6 +135,10 @@ $ REPO=shakystar/mori bash .github/scripts/billed-usage-report.sh --since 2026-0
 잡 단위 정확 산정(재시도 포함)은 #486 비범위다("잡 단위 정확 분 산정 … (d)의 **하한**으로
 이번 판정에는 충분하다").
 
+**(f)(#494)가 이 대조를 실제로 실행했다 — 재시도 가설은 기각됐다.** 77실행 전부
+`run_attempt=1`(재시도 0건)이고, 초과 77잡은 (b)의 모델이 세지 않은 네 번째 잡
+(`report-discovery-failure`)이 매 run마다 등장하기 때문이다. 자세한 재현·분해는 (f) 참조.
+
 **⇒ #479에 귀속되는 반사실 절감분 = 0잡.** 관측이 불가능해서가 아니라, #479가 코드를
 바꾸지 않았으므로 낼 전/후 델타 자체가 없다 — narrowing이 만든 절감은 이 창 이전(07-30
 이전 대비)에 이미 실현되어 있고, 그 이전 구간은 이 리포의 run 보존 기간·측정 범위 밖이라
@@ -181,6 +187,136 @@ REPO=shakystar/mori bash .github/scripts/billed-usage-report.sh --since 2026-08-
 
 이번 조각에서는 표본이 없어 **미측정**.
 
+## (f) 회당 4.0잡 초과분의 해명 — run_attempt 대조 (#478 조각 5/N)
+
+(b)가 세운 모델은 `pull_request` 트리거·스윕 대상 PR 1건일 때
+discover(1) + recheck(1) + report(1) = **상한 3잡**이라고 했지만, (a)의 실측은
+77실행/308잡, 즉 **회당 4.0잡**이었다 — 상한을 77잡(33%) 초과한다. (c)는 이 초과분의
+후보로 "잡 재시도/재실행이 같은 run id의 `billable.*.jobs`에 누적되는 경우"를 가설로
+남기고 조회는 다음 조각으로 미뤘다(#486 비범위). 이 절이 그 조회다.
+
+### 재현 명령
+
+```bash
+REPO=shakystar/mori
+WF_ID=$(gh api "repos/${REPO}/actions/workflows" --jq \
+  '.workflows[] | select(.name=="Recheck open PRs") | .id')
+
+# 1) 대상 run 목록 (2026-08-01~08-14, pull_request 이벤트) — (a)의 77실행과 일치해야 한다
+gh api --paginate "repos/${REPO}/actions/workflows/${WF_ID}/runs?created=2026-08-01..2026-08-14&event=pull_request&per_page=100" \
+  | jq -s '[.[].workflow_runs[]?] | length'
+# => 77
+
+# 2) run 목록 자체의 run_attempt(최신 시도 번호) 분포 — rerun이 있었으면 2 이상이 섞인다
+gh api --paginate "repos/${REPO}/actions/workflows/${WF_ID}/runs?created=2026-08-01..2026-08-14&event=pull_request&per_page=100" \
+  | jq -s '[.[].workflow_runs[]?.run_attempt] | group_by(.) | map({attempt: .[0], count: length})'
+# => [{"attempt":1,"count":77}]  — 전부 attempt 1, run 단위 재시도 0건
+
+# 3) run별 jobs(filter=all)로 잡 수·잡별 run_attempt·매트릭스 펼침 여부를 모은다
+ids=$(gh api --paginate "repos/${REPO}/actions/workflows/${WF_ID}/runs?created=2026-08-01..2026-08-14&event=pull_request&per_page=100" \
+  | jq -s -r '[.[].workflow_runs[]?.id] | .[]')
+: > /tmp/job_names.tsv
+for id in $ids; do
+  gh api "repos/${REPO}/actions/runs/${id}/jobs?filter=all&per_page=100" \
+    | jq -r --arg id "$id" '.jobs[] | [$id, .name, .conclusion, .run_attempt] | @tsv' \
+    >> /tmp/job_names.tsv
+done
+
+wc -l /tmp/job_names.tsv                                     # => 308  (= 77 x 4)
+awk -F'\t' '{print $4}' /tmp/job_names.tsv | sort | uniq -c   # => "308 1" — 잡 단위도 재시도 0건
+awk -F'\t' '{n=$2; gsub(/\([0-9]+\)/,"(N)",n); print n"\t"$3}' /tmp/job_names.tsv \
+  | sort | uniq -c
+
+# 4) run별 Recheck PR* 잡 수 분포 — 매트릭스 2건 이상 run이 있는지 직접 센다.
+#    (잡이 0개인 run도 세야 하므로 run id 목록을 돌며 센다. tsv만 group-by 하면 0건 run이 빠진다.)
+for id in $ids; do
+  awk -F'\t' -v id="$id" '$1==id && $2 ~ /^Recheck PR/ {c++} END {print c+0}' /tmp/job_names.tsv
+done | sort | uniq -c
+# => "     77 1"  — 77개 run이 각각 정확히 1건. 2 이상이나 0이 하나라도 나오면 분해 표의
+#    「매트릭스 2건 이상」 버킷은 0이 아니며, 실제 분포에 맞춰 표를 고쳐야 한다.
+
+# 5) run별 report-discovery-failure 잡 수 분포 — 잔여분 77의 직접 근거.
+for id in $ids; do
+  awk -F'\t' -v id="$id" '$1==id && $2=="Report that PR selection failed" {c++} END {print c+0}' /tmp/job_names.tsv
+done | sort | uniq -c
+# => "     77 1"
+```
+
+세 번째 명령의 출력(2026-08-29 조회):
+
+```
+     1 Recheck PR	cancelled
+     1 Recheck PR	skipped
+     3 Recheck PR (N)	cancelled
+     6 Recheck PR (N)	failure
+    66 Recheck PR (N)	success
+     5 Report results on the PRs	cancelled
+     1 Report results on the PRs	skipped
+    71 Report results on the PRs	success
+     1 Report that PR selection failed	cancelled
+    76 Report that PR selection failed	skipped
+     1 Select open PRs	cancelled
+    76 Select open PRs	success
+```
+
+네 번째·다섯 번째 명령의 실제 출력(2026-08-30 재조회) — 각각 run별 `Recheck PR*`
+잡 수, run별 `report-discovery-failure` 잡 수 분포다:
+
+```
+     77 1
+```
+
+```
+     77 1
+```
+
+두 분포 모두 77개 run 전부 정확히 1건 — 0건이나 2건 이상인 run은 없다.
+
+### 분해
+
+| 항목                             |  잡 수 |
+| -------------------------------- | -----: |
+| 재시도분 (`run_attempt` ≥ 2)     |      0 |
+| 매트릭스 2건 이상으로 펼쳐진 run |      0 |
+| 잔여분                           |     77 |
+| **합계(= 초과분 77과 일치)**     | **77** |
+
+- **재시도분 = 0**: run 목록의 `run_attempt`(77건 전부 1)와 잡 목록의
+  `jobs[].run_attempt`(308건 전부 1) 양쪽 다 2 이상이 단 하나도 없다. (c)가 남긴
+  재시도 가설은 **기각**된다.
+- **매트릭스 2건 이상 = 0**: run별 `Recheck PR*` 잡 수 분포(위 네 번째 명령)가 77개 run
+  전부 정확히 1건이다 — 전역 합계(`Recheck PR`+`Recheck PR (N)`=77)가 run 수와 같다는
+  것만으로는 「한 run이 2건, 다른 run이 0건」인 상쇄를 배제할 수 없어 run 단위로 직접
+  센 결과다. 어떤 run도 2건 이상으로 펼쳐지지 않았다. `recheck-select.sh`가
+  `pull_request` 이벤트에서 트리거 PR 1건으로 후보를 고정한다는 (b)의 서술과 일치한다.
+- **잔여분 = 77**: run별 `report-discovery-failure` 잡 수 분포(위 다섯 번째 명령)도
+  77개 run 전부 정확히 1건이다(전역 합계로는 76 skipped + 1 cancelled = 77이었던 것과
+  같은 이유로, run 단위 분포를 별도로 확인했다). `report-discovery-failure`
+  (`recheck-open-prs.yml:326-354`)가 **run마다 예외 없이 1개씩** 등장한다. (b)의
+  모델은 discover·recheck·report 세 잡만 셌지만, 워크플로에는 네 번째 top-level 잡
+  `report-discovery-failure`(`if: !cancelled() && needs.discover.result == 'failure'`,
+  329행)가 항상 존재한다. discover가 성공하는 정상 경로(①)에서는 이 잡의 `if`가
+  거짓이라 `conclusion=skipped`로 끝나지만, `timing` API의 `billable.<os>.jobs`는
+  이 skipped 잡도 그대로 1잡으로 센다 — 예를 들어 run 31848253299의 `timing` 응답은
+  `billable.UBUNTU.jobs: 4`이고, `job_runs` 네 번째 항목(skip된
+  report-discovery-failure)의 `duration_ms`는 0이다(청구 **분**은 0이지만 청구
+  **잡 수**에는 그대로 잡힌다). 즉 **①의 상한은 3잡이 아니라 4잡**이었다.
+
+### 결론
+
+**초과 77잡은 재시도가 아니라 (b)의 모델이 빠뜨린 네 번째 잡
+(`report-discovery-failure`, discover 성공 시 매번 skipped로 끝나지만
+`billable.jobs`에는 그대로 집계됨) 때문이다 — 회당 4.0잡이 맞고, ①의 모델은
+discover(1) + recheck(1) + report(1) + report-discovery-failure(1) = **4잡**으로
+고쳐야 한다.**
+
+(b)의 결론 문단은 이 절의 결과에 맞춰 정정했다(모델 상한 3잡 → 4잡) — 틀린 결론을 그대로
+두고 링크만 거는 것보다 문서의 정확성을 높이는 방향이라 판단했다. 워크플로 YAML과
+`recheck-select.sh`는 이슈 비범위대로 이 조각에서 손대지 않았다.
+
+재시도가 원인이 아니므로 `.github/scripts/billed-usage-report.sh`의 헤더 주석·출력
+각주는 이 조각에서 손대지 않는다(완료 조건: "원인이 아니면 이 항목은 하지 않는다").
+
 # push:[main] paths-ignore 절감 실측 (#478 조각 4/N, #493)
 
 (a)의 깨끗한 구간(2026-08-01~08-14)에서 `Recheck open PRs × push`가 74실행/353잡으로
@@ -188,7 +324,7 @@ REPO=shakystar/mori bash .github/scripts/billed-usage-report.sh --since 2026-08-
 `paths-ignore: [docs/**, *.md]`를 추가했다 — 이 절은 그 필터가 **이미 지난** 74실행에
 소급 적용됐다면 몇 건이 발화하지 않았을지를 반사실로 센다.
 
-## (f) 재현 명령과 판정 방법
+## (g) 재현 명령과 판정 방법
 
 ```
 $ gh api "repos/shakystar/mori/actions/workflows/323326130/runs?event=push&created=2026-08-01..2026-08-14&per_page=100" \
@@ -211,7 +347,7 @@ $ while IFS=$'\t' read -r run_id sha; do
 수는 43건으로 commits API의 파일 목록 절단(300건) 임계값과 거리가 멀어 절단으로 인한
 오분류 위험은 없다.
 
-## (g) 결과
+## (h) 결과
 
 74실행 중 **5건**이 필터로 걸러졌을 것이다 — 전부 `docs/**` 또는 루트 `*.md`만 바꾼
 커밋이다:
@@ -241,7 +377,7 @@ $ for id in 31842770427 31377742099 31354476784 31121130757 30754133078; do
 절감 청구 잡 수 = 4+5+4+4+5 = **22잡** (14일 구간). 절감 벽시계 =
 189000+199000+20000+902000+83000 = 1,393,000ms ≈ **23.2분**.
 
-## (h) 절감 후 값
+## (i) 절감 후 값
 
 `Recheck open PRs × push`: 74실행/353잡/134.7분 → **69실행/331잡/111.5분**.
 `Recheck open PRs` 워크플로 합계: 151실행/661잡/322.4분 → **146실행/639잡/299.2분**.
@@ -251,7 +387,7 @@ $ for id in 31842770427 31377742099 31354476784 31121130757 30754133078; do
 월 환산 청구 잡 수 추정치 = 1098 / 14일 × 30일 = 2352.857... ≈ 2352.9
 ```
 
-## (i) 판정
+## (j) 판정
 
 **2352.9 > 1,500(#478 완료 기준) ⇒ "아니오" — 아직 추가 감축이 필요하다.**
 
@@ -277,8 +413,8 @@ $ for id in 31842770427 31377742099 31354476784 31121130757 30754133078; do
 방식. 2위는 `Recheck open PRs × pull_request`(308, #479가 이미 narrowing 완료 — 재조정은
 비범위), 3위는 `CI × pull_request`(152).
 
-## (j) 재현 데이터 위치
+## (k) 재현 데이터 위치
 
-이 절의 원자료(74건의 run_id·head_sha·변경 파일, 5건의 개별 timing 조회)는 위 (f)의
+이 절의 원자료(74건의 run_id·head_sha·변경 파일, 5건의 개별 timing 조회)는 위 (g)의
 명령을 그대로 재실행하면 재현된다 — 리포 run 보존 기간 내라면 결과가 안정적이다(2026-08-01
 ~08-14는 과금정지 이전 구간이라 재실행해도 값이 바뀌지 않는다, (a) 각주 참조).
