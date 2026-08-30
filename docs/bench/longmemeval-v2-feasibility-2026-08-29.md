@@ -59,7 +59,8 @@ $ wc -l questions.jsonl
 $ wc -l trajectories.jsonl
 1870 trajectories.jsonl
 
-$ node --max-old-space-size=1536 count-trajectories.mjs   # loadTrajectories(dataDir) 호출
+$ NODE_OPTIONS=--max-old-space-size=1536 MORI_BENCH_LMEV2_DATA_DIR="$HOME/.cache/mori/bench/longmemeval-v2" \
+    pnpm exec tsx packages/mori/src/bench/longmemeval-v2/print-trajectory-count.ts
 trajectories: 1870
 elapsed: 124.1s
 peak rss: 1521 MB
@@ -170,7 +171,7 @@ medium tier 451개 문항 전부를 실측(각 문항의 해시스택을 트라�
 `cache/bench-cache-dir.ts`의 `resolveBenchCacheDir`와 같은 관례), `loader.ts`(`questions.jsonl`
 / `trajectories.jsonl` 파싱, 세션 경계=트라젝토리 경계 검증), `fetch-dataset.ts`(취득 스크립트
 — HF `resolve/<revision>` URL에서 plain HTTPS로 받는다, `huggingface_hub` 불필요),
-`print-question-count.ts`(재현 명령). **`runner.ts`/`batch/`/`cache/`/`cost-ledger.ts`(#342)에는
+`print-question-count.ts`/`print-trajectory-count.ts`(재현 명령). **`runner.ts`/`batch/`/`cache/`/`cost-ledger.ts`(#342)에는
 아직 배선하지 않았다** — 이 로더는 순수 데이터 변환만 하고, LLM 호출·비용 기록·배치 제출은
 전혀 하지 않는다. 다음 조각(ingestion 실행)이 `createBenchRunner`의 `reader`로 트라젝토리
 텍스트(`accessibilityTree`/`thought`/`action`)를 흘려보내는 지점이 될 것이다 — 다만 "구조적
@@ -186,6 +187,11 @@ pnpm exec tsx packages/mori/src/bench/longmemeval-v2/fetch-dataset.ts --skip-tra
 # 재현 명령 (owner가 그대로 실행해 문항 수를 검산한다)
 MORI_BENCH_LMEV2_DATA_DIR="$HOME/.cache/mori/bench/longmemeval-v2" \
   pnpm exec tsx packages/mori/src/bench/longmemeval-v2/print-question-count.ts
+
+# 재현 명령 (궤적 수 검산 — trajectories.jsonl 1.1GB를 --skip-trajectories 없이 받아야 한다,
+# 힙 상한 지정이 없으면 OOM으로 죽는다)
+NODE_OPTIONS=--max-old-space-size=1536 MORI_BENCH_LMEV2_DATA_DIR="$HOME/.cache/mori/bench/longmemeval-v2" \
+  pnpm exec tsx packages/mori/src/bench/longmemeval-v2/print-trajectory-count.ts
 ```
 
 기대 출력 (§2 표와 동일):
@@ -197,6 +203,15 @@ total questions: 451
   workflow-knowledge: 74
   environment-gotchas: 29
   premise-awareness: 128
+```
+
+기대 출력 (§1과 동일 — 경과·피크 RSS는 실행 환경에 따라 달라질 수 있고, `trajectories` 수만
+`wc -l trajectories.jsonl`(1870)과 일치해야 한다):
+
+```
+trajectories: 1870
+elapsed: 124.1s
+peak rss: 1521 MB
 ```
 
 ## 완료 조건 대조
