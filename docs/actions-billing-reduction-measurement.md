@@ -226,6 +226,20 @@ wc -l /tmp/job_names.tsv                                     # => 308  (= 77 x 4
 awk -F'\t' '{print $4}' /tmp/job_names.tsv | sort | uniq -c   # => "308 1" — 잡 단위도 재시도 0건
 awk -F'\t' '{n=$2; gsub(/\([0-9]+\)/,"(N)",n); print n"\t"$3}' /tmp/job_names.tsv \
   | sort | uniq -c
+
+# 4) run별 Recheck PR* 잡 수 분포 — 매트릭스 2건 이상 run이 있는지 직접 센다.
+#    (잡이 0개인 run도 세야 하므로 run id 목록을 돌며 센다. tsv만 group-by 하면 0건 run이 빠진다.)
+for id in $ids; do
+  awk -F'\t' -v id="$id" '$1==id && $2 ~ /^Recheck PR/ {c++} END {print c+0}' /tmp/job_names.tsv
+done | sort | uniq -c
+# => "     77 1"  — 77개 run이 각각 정확히 1건. 2 이상이나 0이 하나라도 나오면 분해 표의
+#    「매트릭스 2건 이상」 버킷은 0이 아니며, 실제 분포에 맞춰 표를 고쳐야 한다.
+
+# 5) run별 report-discovery-failure 잡 수 분포 — 잔여분 77의 직접 근거.
+for id in $ids; do
+  awk -F'\t' -v id="$id" '$1==id && $2=="Report that PR selection failed" {c++} END {print c+0}' /tmp/job_names.tsv
+done | sort | uniq -c
+# => "     77 1"
 ```
 
 세 번째 명령의 출력(2026-08-29 조회):
@@ -245,6 +259,19 @@ awk -F'\t' '{n=$2; gsub(/\([0-9]+\)/,"(N)",n); print n"\t"$3}' /tmp/job_names.ts
     76 Select open PRs	success
 ```
 
+네 번째·다섯 번째 명령의 실제 출력(2026-08-30 재조회) — 각각 run별 `Recheck PR*`
+잡 수, run별 `report-discovery-failure` 잡 수 분포다:
+
+```
+     77 1
+```
+
+```
+     77 1
+```
+
+두 분포 모두 77개 run 전부 정확히 1건 — 0건이나 2건 이상인 run은 없다.
+
 ### 분해
 
 | 항목                             |  잡 수 |
@@ -257,15 +284,16 @@ awk -F'\t' '{n=$2; gsub(/\([0-9]+\)/,"(N)",n); print n"\t"$3}' /tmp/job_names.ts
 - **재시도분 = 0**: run 목록의 `run_attempt`(77건 전부 1)와 잡 목록의
   `jobs[].run_attempt`(308건 전부 1) 양쪽 다 2 이상이 단 하나도 없다. (c)가 남긴
   재시도 가설은 **기각**된다.
-- **매트릭스 2건 이상 = 0**: `Recheck PR` 계열 잡(매트릭스로 펼쳐지는 잡)은
-  `Recheck PR`(count=0 스킵 경로, 1+1=2건) + `Recheck PR (N)`(count=1 경로,
-  3+6+66=75건) = 77건 — run 수(77)와 정확히 같다. 어떤 run도 2건 이상으로 펼쳐지지
-  않았다. `recheck-select.sh`가 `pull_request` 이벤트에서 트리거 PR 1건으로 후보를
-  고정한다는 (b)의 서술과 일치한다.
-- **잔여분 = 77**: 위 표에서 `Report that PR selection failed`
-  (`report-discovery-failure` 잡, `recheck-open-prs.yml:326-354`)가 **run마다 예외
-  없이 1개씩** 등장한다(76 skipped + 1 cancelled = 77). (b)의 모델은 discover·recheck·
-  report 세 잡만 셌지만, 워크플로에는 네 번째 top-level 잡
+- **매트릭스 2건 이상 = 0**: run별 `Recheck PR*` 잡 수 분포(위 네 번째 명령)가 77개 run
+  전부 정확히 1건이다 — 전역 합계(`Recheck PR`+`Recheck PR (N)`=77)가 run 수와 같다는
+  것만으로는 「한 run이 2건, 다른 run이 0건」인 상쇄를 배제할 수 없어 run 단위로 직접
+  센 결과다. 어떤 run도 2건 이상으로 펼쳐지지 않았다. `recheck-select.sh`가
+  `pull_request` 이벤트에서 트리거 PR 1건으로 후보를 고정한다는 (b)의 서술과 일치한다.
+- **잔여분 = 77**: run별 `report-discovery-failure` 잡 수 분포(위 다섯 번째 명령)도
+  77개 run 전부 정확히 1건이다(전역 합계로는 76 skipped + 1 cancelled = 77이었던 것과
+  같은 이유로, run 단위 분포를 별도로 확인했다). `report-discovery-failure`
+  (`recheck-open-prs.yml:326-354`)가 **run마다 예외 없이 1개씩** 등장한다. (b)의
+  모델은 discover·recheck·report 세 잡만 셌지만, 워크플로에는 네 번째 top-level 잡
   `report-discovery-failure`(`if: !cancelled() && needs.discover.result == 'failure'`,
   329행)가 항상 존재한다. discover가 성공하는 정상 경로(①)에서는 이 잡의 `if`가
   거짓이라 `conclusion=skipped`로 끝나지만, `timing` API의 `billable.<os>.jobs`는
@@ -282,8 +310,9 @@ awk -F'\t' '{n=$2; gsub(/\([0-9]+\)/,"(N)",n); print n"\t"$3}' /tmp/job_names.ts
 discover(1) + recheck(1) + report(1) + report-discovery-failure(1) = **4잡**으로
 고쳐야 한다.**
 
-이 조각은 조회 전용이라 (b) 본문과 워크플로 YAML은 고치지 않는다 — 모델 정정 자체는
-이 조각의 범위 밖이며, 여기서는 초과분이 무엇으로 구성되는지를 수로 확정하는 것까지다.
+(b)의 결론 문단은 이 절의 결과에 맞춰 정정했다(모델 상한 3잡 → 4잡) — 틀린 결론을 그대로
+두고 링크만 거는 것보다 문서의 정확성을 높이는 방향이라 판단했다. 워크플로 YAML과
+`recheck-select.sh`는 이슈 비범위대로 이 조각에서 손대지 않았다.
 
 재시도가 원인이 아니므로 `.github/scripts/billed-usage-report.sh`의 헤더 주석·출력
 각주는 이 조각에서 손대지 않는다(완료 조건: "원인이 아니면 이 항목은 하지 않는다").
