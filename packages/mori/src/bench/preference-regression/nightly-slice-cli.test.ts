@@ -1,9 +1,21 @@
-import type { Usage } from "@earendil-works/pi-ai";
-import { describe, expect, it } from "vitest";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { StreamFn } from "@earendil-works/pi-agent-core";
+import type { Api, AssistantMessage, Model, Usage } from "@earendil-works/pi-ai";
+import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import type { RunCliDeps } from "../../cli/types.js";
+import type { CreateMoriSessionResult, MoriSessionTurn } from "../../session.js";
 import { KILL_SWITCH_GAP_THRESHOLD } from "./kill-switch.js";
-import { reportNightlySliceOutcome, runNightlySliceCli } from "./nightly-slice-cli.js";
+import {
+  reportNightlySliceOutcome,
+  runNightlySliceCli,
+  runNightlySliceWithPartialFlush,
+} from "./nightly-slice-cli.js";
 import type { NightlySliceReport } from "./nightly-slice.js";
-import type { ScenarioRunResult } from "./runner.js";
+import type { CreateSessionFn, ScenarioRunResult } from "./runner.js";
+import type { PreferenceRegressionScenario } from "./scenarios.js";
 
 const ZERO_USAGE: Usage = {
   input: 0,
@@ -37,6 +49,7 @@ function fixtureReport(
     total: ZERO_USAGE,
     byAxis: {},
     repeatsPerScenario: 10,
+    completedRepeats: 10,
     scenarios,
     axisRates: { injectionHitRate: 0, reDistillationRate: 0, reQuestionRate: 0 },
     rubricVersion: 2,
@@ -162,5 +175,138 @@ describe("runNightlySliceCli (#452: MORI_CONSOLIDATE_MODEL 미설정이면 memor
 
     expect(code).toBe(1);
     expect(stderr.join("")).toContain("MORI_CONSOLIDATE_MODEL");
+  });
+});
+
+function fixtureModel(): Model<Api> {
+  return {
+    id: "claude-sonnet-4-6",
+    name: "Claude Sonnet 4.6",
+    api: "anthropic-messages",
+    provider: "anthropic",
+    baseUrl: "https://api.anthropic.com",
+    reasoning: false,
+    input: ["text"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 200000,
+    maxTokens: 8192,
+  };
+}
+
+function fixtureUsage(): Usage {
+  return {
+    input: 10,
+    output: 5,
+    cacheRead: 0,
+    cacheWrite: 0,
+    totalTokens: 15,
+    cost: { input: 0.001, output: 0.002, cacheRead: 0, cacheWrite: 0, total: 0.003 },
+  };
+}
+
+/** Answers every prompt with a fixed judge verdict — see runner.test.ts's identical fixture. */
+function fakeJudgeStreamFn(): StreamFn {
+  return async () => {
+    const message: AssistantMessage = {
+      role: "assistant",
+      content: [{ type: "text", text: "예, 그렇다." }],
+      api: "anthropic-messages",
+      provider: "anthropic",
+      model: "claude-sonnet-4-6",
+      usage: fixtureUsage(),
+      stopReason: "stop",
+      timestamp: 0,
+    };
+    const stream = createAssistantMessageEventStream();
+    stream.push({ type: "start", partial: message });
+    stream.push({ type: "done", reason: "stop", message });
+    stream.end(message);
+    return stream;
+  };
+}
+
+function fixturePreferenceScenario(): PreferenceRegressionScenario {
+  return {
+    id: "solo",
+    title: "fixture-solo",
+    contextTurns: ["ctx-1"],
+    followUpPrompt: "follow-up prompt",
+    impliedPreference: "some preference — never surfaced to a judge prompt",
+    rubric: [
+      {
+        kind: "deterministic",
+        id: "nonempty",
+        description: "출력이 비어있지 않다",
+        check: (output) => output.length > 0,
+      },
+    ],
+  };
+}
+
+/** #512: `createSession` stub that fails the very first turn of any repeat whose scratch root
+ * contains `rep-1` (`nightly-slice.ts` joins `workRoot`/`memorizeRootBase` with `rep-<i>` per
+ * repeat) — mirrors `assertTurnOk`'s real failure shape (runner.ts:200) rather than throwing
+ * directly, so the test exercises the same "loud fail mid-loop" path #504 hit in production. */
+function fakeSessionFailingOnRepeat(repToFail: number): CreateSessionFn {
+  return (_env: NodeJS.ProcessEnv, deps: RunCliDeps): Promise<CreateMoriSessionResult> => {
+    const shouldFail = (deps.root ?? "").includes(`rep-${String(repToFail)}`);
+    return Promise.resolve({
+      ok: true,
+      session: {
+        async prompt(text: string): Promise<MoriSessionTurn> {
+          if (shouldFail) return { text: "", stopReason: "error", usage: fixtureUsage() };
+          return { text: `reply:${text}`, stopReason: "stop", usage: fixtureUsage() };
+        },
+        consolidate: () => Promise.resolve({ kind: "ok" as const }),
+        compact: () =>
+          Promise.resolve({ summary: "fixture compaction summary", usage: fixtureUsage() }),
+        close: () => Promise.resolve({ usage: fixtureUsage() }),
+      },
+    });
+  };
+}
+
+describe("runNightlySliceWithPartialFlush (#512: 회차 중간 체크포인트)", () => {
+  let cacheDir: string;
+  let workRoot: string;
+  let memorizeRootBase: string;
+  let out: string;
+
+  beforeEach(async () => {
+    cacheDir = await mkdtemp(join(tmpdir(), "mori-nightly-slice-cache-"));
+    workRoot = await mkdtemp(join(tmpdir(), "mori-nightly-slice-work-"));
+    memorizeRootBase = await mkdtemp(join(tmpdir(), "mori-nightly-slice-store-"));
+    out = join(await mkdtemp(join(tmpdir(), "mori-nightly-slice-out-")), "report.json");
+  });
+
+  afterEach(async () => {
+    await rm(cacheDir, { recursive: true, force: true });
+    await rm(workRoot, { recursive: true, force: true });
+    await rm(memorizeRootBase, { recursive: true, force: true });
+  });
+
+  it("flushes the partial report and rethrows when a repeat fails mid-loop", async () => {
+    const { io } = fakeIo();
+
+    await expect(
+      runNightlySliceWithPartialFlush(
+        {
+          model: fixtureModel(),
+          streamFn: fakeJudgeStreamFn(),
+          cacheDir,
+          workRoot,
+          memorizeRootBase,
+          scenarios: [fixturePreferenceScenario()],
+          conditions: ["memory-off"],
+          repeatsPerScenario: 3,
+          createSession: fakeSessionFailingOnRepeat(1),
+        },
+        out,
+        io,
+      ),
+    ).rejects.toThrow(/맥락 턴이 실패했다/);
+
+    const written = JSON.parse(await readFile(out, "utf8")) as NightlySliceReport;
+    expect(written.completedRepeats).toBe(1);
   });
 });

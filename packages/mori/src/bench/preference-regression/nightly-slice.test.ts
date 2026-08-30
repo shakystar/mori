@@ -14,6 +14,7 @@ import {
   resolveSliceRepeatsPerScenario,
   runNightlySlice,
 } from "./nightly-slice.js";
+import type { NightlySliceReport } from "./nightly-slice.js";
 import { PREFERENCE_REGRESSION_CONDITIONS } from "./runner.js";
 import type { CreateKernelFn, CreateSessionFn } from "./runner.js";
 import type { PreferenceRegressionScenario } from "./scenarios.js";
@@ -302,6 +303,35 @@ describe("runNightlySlice (#406)", () => {
     callCount = 0;
     await runOnce();
     expect(callCount).toBe(0);
+  });
+
+  // #512: a caller needs to see every intermediate repeat's report, not just the merged final
+  // one — that's the checkpoint the CLI overwrites `--out` with so a mid-run crash doesn't
+  // erase every already-completed repeat (#504's failure mode).
+  it("calls onRepeatComplete once per finished repeat, the last carrying completedRepeats === repeatsPerScenario", async () => {
+    const harness = fakeHarness();
+    const completedRepeatsSeen: number[] = [];
+    let lastPartial: NightlySliceReport | undefined;
+
+    const report = await runNightlySlice({
+      model: model(),
+      streamFn: fakeJudgeStreamFn(),
+      cacheDir,
+      workRoot,
+      memorizeRootBase,
+      scenarios: [fixtureScenario("solo")],
+      repeatsPerScenario: 3,
+      createSession: harness.createSession,
+      createKernel: harness.createKernel,
+      onRepeatComplete: (partial, completedRepeats) => {
+        completedRepeatsSeen.push(completedRepeats);
+        lastPartial = partial;
+      },
+    });
+
+    expect(completedRepeatsSeen).toEqual([1, 2, 3]);
+    expect(lastPartial?.completedRepeats).toBe(3);
+    expect(report.completedRepeats).toBe(3);
   });
 
   it("defaults repeatsPerScenario from MORI_BENCH_SLICE_REPEATS", async () => {
