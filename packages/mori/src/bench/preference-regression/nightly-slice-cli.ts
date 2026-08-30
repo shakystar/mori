@@ -172,8 +172,10 @@ export async function runNightlySliceWithPartialFlush(
     const report = await runNightlySlice({
       ...options,
       onRepeatComplete: async (partial) => {
-        lastPartial = partial;
         await writeCostReport(partial, out);
+        // write가 성공한 뒤에만 갱신한다 — `lastPartial`은 «out에 실제로 들어간 것»을 뜻해야
+        // catch의 「N/M 회차분을 남겼다」가 거짓 보고가 되지 않는다.
+        lastPartial = partial;
       },
     });
     await writeCostReport(report, out);

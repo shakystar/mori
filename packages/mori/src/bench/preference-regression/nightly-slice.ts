@@ -169,7 +169,7 @@ export async function runNightlySlice(options: NightlySliceOptions): Promise<Nig
     ...ledger.report(),
     repeatsPerScenario,
     completedRepeats,
-    scenarios: scenarioResults,
+    scenarios: [...scenarioResults],
     axisRates: computeAxisRates(scenarioResults),
     killSwitch: computeKillSwitchReport(scenarioResults),
     rubricVersion: PREFERENCE_REGRESSION_RUBRIC_VERSION,

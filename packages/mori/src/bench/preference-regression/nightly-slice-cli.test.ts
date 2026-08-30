@@ -1,3 +1,4 @@
+import { chmodSync } from "node:fs";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -249,12 +250,40 @@ function fixturePreferenceScenario(): PreferenceRegressionScenario {
  * directly, so the test exercises the same "loud fail mid-loop" path #504 hit in production. */
 function fakeSessionFailingOnRepeat(repToFail: number): CreateSessionFn {
   return (_env: NodeJS.ProcessEnv, deps: RunCliDeps): Promise<CreateMoriSessionResult> => {
-    const shouldFail = (deps.root ?? "").includes(`rep-${String(repToFail)}`);
+    const shouldFail = new RegExp(`(^|[/\\\\])rep-${String(repToFail)}([/\\\\]|$)`).test(
+      deps.root ?? "",
+    );
     return Promise.resolve({
       ok: true,
       session: {
         async prompt(text: string): Promise<MoriSessionTurn> {
           if (shouldFail) return { text: "", stopReason: "error", usage: fixtureUsage() };
+          return { text: `reply:${text}`, stopReason: "stop", usage: fixtureUsage() };
+        },
+        consolidate: () => Promise.resolve({ kind: "ok" as const }),
+        compact: () =>
+          Promise.resolve({ summary: "fixture compaction summary", usage: fixtureUsage() }),
+        close: () => Promise.resolve({ usage: fixtureUsage() }),
+      },
+    });
+  };
+}
+
+/** Every turn succeeds — used to isolate the "flush write itself fails" path from the
+ * "loop turn fails" path already covered by `fakeSessionFailingOnRepeat`. Calls `onRepeatStart`
+ * once, the first time a repeat whose scratch root contains `rep-${repToMark}` begins a session —
+ * i.e. before that repeat's own flush is attempted. */
+function fakeSessionAlwaysOk(repToMark: number, onRepeatStart: () => void): CreateSessionFn {
+  let marked = false;
+  return (_env: NodeJS.ProcessEnv, deps: RunCliDeps): Promise<CreateMoriSessionResult> => {
+    if (!marked && (deps.root ?? "").includes(`rep-${String(repToMark)}`)) {
+      marked = true;
+      onRepeatStart();
+    }
+    return Promise.resolve({
+      ok: true,
+      session: {
+        async prompt(text: string): Promise<MoriSessionTurn> {
           return { text: `reply:${text}`, stopReason: "stop", usage: fixtureUsage() };
         },
         consolidate: () => Promise.resolve({ kind: "ok" as const }),
@@ -308,5 +337,39 @@ describe("runNightlySliceWithPartialFlush (#512: 회차 중간 체크포인트)"
 
     const written = JSON.parse(await readFile(out, "utf8")) as NightlySliceReport;
     expect(written.completedRepeats).toBe(1);
+  });
+
+  it("reports the last write that actually succeeded, not a stale claim, when a later flush write fails", async () => {
+    const { io, stdout } = fakeIo();
+
+    await expect(
+      runNightlySliceWithPartialFlush(
+        {
+          model: fixtureModel(),
+          streamFn: fakeJudgeStreamFn(),
+          cacheDir,
+          workRoot,
+          memorizeRootBase,
+          scenarios: [fixturePreferenceScenario()],
+          conditions: ["memory-off"],
+          repeatsPerScenario: 2,
+          // repeat 1(두 번째 회차)이 시작하면, repeat 0이 방금 성공적으로 쓴 `out`을 읽기
+          // 전용으로 바꿔 그 회차의 flush write만 EACCES로 실패시킨다 — 기존에 쓰인 내용은
+          // 건드리지 않는다. `writeCostReport`가 성공한 뒤에만 `lastPartial`을 갱신해야
+          // catch의 「N/M 회차분을 남겼다」가 이번에 실패한 write를 성공으로 오보하지 않는다.
+          createSession: fakeSessionAlwaysOk(1, () => {
+            chmodSync(out, 0o400);
+          }),
+        },
+        out,
+        io,
+      ),
+    ).rejects.toThrow();
+
+    expect(stdout.join("")).toContain("1/2");
+    const written = JSON.parse(await readFile(out, "utf8")) as NightlySliceReport;
+    expect(written.completedRepeats).toBe(1);
+
+    chmodSync(out, 0o600);
   });
 });
