@@ -15,7 +15,11 @@ import { consolidateModelRequiredMessage, unauthenticatedMessage } from "../../c
 import { resolveConsolidatorConfig } from "../../external/consolidator/config.js";
 import { resolveBenchCacheDir } from "../cache/bench-cache-dir.js";
 import { writeCostReport } from "../cost-ledger.js";
-import { runNightlySlice, type NightlySliceReport } from "./nightly-slice.js";
+import {
+  runNightlySlice,
+  type NightlySliceOptions,
+  type NightlySliceReport,
+} from "./nightly-slice.js";
 
 export interface NightlySliceCliIO {
   stdout: (chunk: string) => void;
@@ -152,6 +156,40 @@ export function reportNightlySliceOutcome(
 }
 
 /**
+ * #512: `runNightlySlice`를 돌리면서 회차가 끝날 때마다 `out`에 부분 리포트를 덮어쓴다(별도
+ * 플래그 없는 기본 동작). 루프 도중 예외가 나도 마지막으로 완료된 회차분은 이미 `out`에 남은
+ * 채로 그 예외를 그대로 다시 던진다(flush 후 rethrow) — 실패를 성공으로 삼키지 않는다. auth·
+ * 모델 해석과 분리해 둔 이유는 이 흐름만 실 provider 없이 직접 테스트하기 위해서다
+ * (`reportNightlySliceOutcome`과 같은 이유).
+ */
+export async function runNightlySliceWithPartialFlush(
+  options: NightlySliceOptions,
+  out: string,
+  io: NightlySliceCliIO,
+): Promise<NightlySliceReport> {
+  let lastPartial: NightlySliceReport | undefined;
+  try {
+    const report = await runNightlySlice({
+      ...options,
+      onRepeatComplete: async (partial) => {
+        lastPartial = partial;
+        await writeCostReport(partial, out);
+      },
+    });
+    await writeCostReport(report, out);
+    return report;
+  } catch (error) {
+    if (lastPartial) {
+      io.stdout(
+        `mori bench: 부분 리포트 ${String(lastPartial.completedRepeats)}/` +
+          `${String(lastPartial.repeatsPerScenario)} 회차분을 ${out}에 남겼다\n`,
+      );
+    }
+    throw error;
+  }
+}
+
+/**
  * `mori-nightly-slice` — #406(#397 조각 2/3). 나이틀리/주간 크론이 부르는 진입점: 실 인증
  * (`FileCredentialStore`)과 실 provider 스트림(`models.streamSimple`)으로
  * `runNightlySlice`를 구동하고, 결과를 `writeCostReport`로 JSON에 남긴다. 인증/모델 해석은
@@ -222,18 +260,21 @@ export async function runNightlySliceCli(
     return streamSimple(streamModel, context, streamOptions);
   };
 
-  const report = await runNightlySlice({
-    model,
-    streamFn: countingStreamFn,
-    cacheDir,
-    workRoot,
-    memorizeRootBase,
-    env,
-    credentialStore,
-    ...(args.repeats === undefined ? {} : { repeatsPerScenario: args.repeats }),
-  });
+  const report = await runNightlySliceWithPartialFlush(
+    {
+      model,
+      streamFn: countingStreamFn,
+      cacheDir,
+      workRoot,
+      memorizeRootBase,
+      env,
+      credentialStore,
+      ...(args.repeats === undefined ? {} : { repeatsPerScenario: args.repeats }),
+    },
+    args.out,
+    io,
+  );
 
-  await writeCostReport(report, args.out);
   return reportNightlySliceOutcome(report, args.out, io, providerCalls);
 }
 

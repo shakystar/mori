@@ -54,10 +54,19 @@ export interface NightlySliceOptions {
   repeatsPerScenario?: number;
   createSession?: CreateSessionFn;
   createKernel?: CreateKernelFn;
+  /** #512: 회차 하나가 끝날 때마다(설정돼 있으면) 그 시점까지의 부분 리포트로 호출된다 —
+   * 루프 도중 예외가 나도 마지막으로 완료된 회차분은 호출자가 이미 손에 쥔 상태가 되게 한다. */
+  onRepeatComplete?: (
+    partial: NightlySliceReport,
+    completedRepeats: number,
+  ) => Promise<void> | void;
 }
 
 export interface NightlySliceReport extends CostReport {
   repeatsPerScenario: number;
+  /** #512: 실제로 끝까지 돈 회차 수. 완주 시 `repeatsPerScenario`와 같다 — 루프 도중 예외로
+   * 중단됐을 때 소비자가 부분/완주를 구분하는 유일한 필드다. */
+  completedRepeats: number;
   scenarios: readonly ScenarioRunResult[];
   axisRates: ReturnType<typeof computeAxisRates>;
   /** ORACLE−OFF 간격 킬 스위치 판정(#435) — milestone.ts의 `MilestoneReport.killSwitch`와 같은
@@ -156,6 +165,17 @@ export async function runNightlySlice(options: NightlySliceOptions): Promise<Nig
   const scenarioResults: ScenarioRunResult[] = [];
   const ledger = createCostLedger();
 
+  const buildReport = (completedRepeats: number): NightlySliceReport => ({
+    ...ledger.report(),
+    repeatsPerScenario,
+    completedRepeats,
+    scenarios: scenarioResults,
+    axisRates: computeAxisRates(scenarioResults),
+    killSwitch: computeKillSwitchReport(scenarioResults),
+    rubricVersion: PREFERENCE_REGRESSION_RUBRIC_VERSION,
+    sampleStats: computeSampleStats(scenarioResults),
+  });
+
   for (let rep = 0; rep < repeatsPerScenario; rep++) {
     const report = await runPreferenceRegression({
       model: options.model,
@@ -180,15 +200,9 @@ export async function runNightlySlice(options: NightlySliceOptions): Promise<Nig
     for (const [axis, usage] of Object.entries(report.byAxis)) {
       ledger.record(axis, usage);
     }
+    const completedRepeats = rep + 1;
+    await options.onRepeatComplete?.(buildReport(completedRepeats), completedRepeats);
   }
 
-  return {
-    ...ledger.report(),
-    repeatsPerScenario,
-    scenarios: scenarioResults,
-    axisRates: computeAxisRates(scenarioResults),
-    killSwitch: computeKillSwitchReport(scenarioResults),
-    rubricVersion: PREFERENCE_REGRESSION_RUBRIC_VERSION,
-    sampleStats: computeSampleStats(scenarioResults),
-  };
+  return buildReport(repeatsPerScenario);
 }
