@@ -124,6 +124,7 @@ export async function prepareAgent(
   try {
     agent = createMoriAgent(kernel, credentialStore, env, deps.streamFn, {
       ...(deps.root ? { root: deps.root } : {}),
+      ...(deps.confineBashWrites ? { confineBashWrites: true } : {}),
       models,
       session,
     });
