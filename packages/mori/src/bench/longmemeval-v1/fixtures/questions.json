@@ -1,0 +1,178 @@
+[
+  {
+    "question_id": "fx-q1",
+    "question_type": "single-session-user",
+    "question": "What instrument did I say I was learning?",
+    "question_date": "2023/05/30 (Tue) 10:00",
+    "answer": "The violin",
+    "answer_session_ids": ["fx-sess-a"],
+    "haystack_session_ids": ["fx-sess-a", "fx-sess-b"],
+    "haystack_dates": ["2023/05/20 (Sat) 09:00", "2023/05/21 (Sun) 09:00"],
+    "haystack_sessions": [
+      [
+        { "role": "user", "content": "I just started learning the violin this month.", "has_answer": true },
+        { "role": "assistant", "content": "That's great, the violin is a rewarding instrument to learn.", "has_answer": false }
+      ],
+      [
+        { "role": "user", "content": "What's a good recipe for lentil soup?" },
+        { "role": "assistant", "content": "Saute onions and garlic, add lentils and broth, simmer for 30 minutes." }
+      ]
+    ]
+  },
+  {
+    "question_id": "fx-q2_abs",
+    "question_type": "single-session-user",
+    "question": "What breed is my pet parrot?",
+    "question_date": "2023/05/30 (Tue) 11:00",
+    "answer": "You did not mention this information. You mentioned a pet cat but not a parrot.",
+    "answer_session_ids": ["fx-sess-c"],
+    "haystack_session_ids": ["fx-sess-c"],
+    "haystack_dates": ["2023/05/22 (Mon) 08:00"],
+    "haystack_sessions": [
+      [
+        { "role": "user", "content": "My cat Miso knocked a plant off the shelf again.", "has_answer": true },
+        { "role": "assistant", "content": "Miso sounds like a handful! Might be worth moving plants out of reach.", "has_answer": false }
+      ]
+    ]
+  },
+  {
+    "question_id": "fx-q3",
+    "question_type": "single-session-preference",
+    "question": "Would I prefer a window seat or an aisle seat on a flight?",
+    "question_date": "2023/05/30 (Tue) 12:00",
+    "answer": "A window seat",
+    "answer_session_ids": ["fx-sess-d"],
+    "haystack_session_ids": ["fx-sess-d", "fx-sess-e", "fx-sess-d"],
+    "haystack_dates": [
+      "2023/05/23 (Tue) 07:00",
+      "2023/05/24 (Wed) 07:00",
+      "2023/05/28 (Sun) 07:00"
+    ],
+    "haystack_sessions": [
+      [
+        { "role": "user", "content": "I always book a window seat so I can watch the clouds.", "has_answer": true },
+        { "role": "assistant", "content": "Window seats are great for that.", "has_answer": false }
+      ],
+      [
+        { "role": "user", "content": "Do you know a good stretch for a stiff neck?" },
+        { "role": "assistant", "content": "Slow neck rolls and a short walk usually help." }
+      ],
+      [
+        { "role": "user", "content": "I always book a window seat so I can watch the clouds.", "has_answer": true },
+        { "role": "assistant", "content": "Window seats are great for that.", "has_answer": false }
+      ]
+    ]
+  },
+  {
+    "question_id": "fx-q4",
+    "question_type": "multi-session",
+    "question": "Which two cities have I said I visited this year?",
+    "question_date": "2023/05/30 (Tue) 13:00",
+    "answer": "Lisbon and Kyoto",
+    "answer_session_ids": ["fx-sess-f", "fx-sess-g"],
+    "haystack_session_ids": ["fx-sess-f", "fx-sess-g"],
+    "haystack_dates": ["2023/05/24 (Wed) 09:00", "2023/05/27 (Sat) 09:00"],
+    "haystack_sessions": [
+      [
+        { "role": "user", "content": "Just got back from a week in Lisbon, the food was incredible.", "has_answer": true },
+        { "role": "assistant", "content": "Lisbon sounds wonderful, glad you had a good trip.", "has_answer": false }
+      ],
+      [
+        { "role": "user", "content": "Kyoto in the spring was unbelievably beautiful.", "has_answer": true },
+        { "role": "assistant", "content": "Kyoto's cherry blossoms are famous for a reason.", "has_answer": false }
+      ]
+    ]
+  },
+  {
+    "question_id": "fx-q5",
+    "question_type": "knowledge-update",
+    "question": "What city do I currently live in?",
+    "question_date": "2023/05/30 (Tue) 14:00",
+    "answer": "Austin",
+    "answer_session_ids": ["fx-sess-i"],
+    "haystack_session_ids": ["fx-sess-h", "fx-sess-i"],
+    "haystack_dates": ["2023/05/21 (Sun) 10:00", "2023/05/26 (Fri) 10:00"],
+    "haystack_sessions": [
+      [
+        { "role": "user", "content": "I live in Denver and it just started snowing." },
+        { "role": "assistant", "content": "Denver gets snow early in the season." }
+      ],
+      [
+        { "role": "user", "content": "Update: I moved to Austin last week for a new job.", "has_answer": true },
+        { "role": "assistant", "content": "Congrats on the move and the new job!", "has_answer": false }
+      ]
+    ]
+  },
+  {
+    "question_id": "fx-q6",
+    "question_type": "temporal-reasoning",
+    "question": "How many days after starting my new job did I mention moving to Austin?",
+    "question_date": "2023/05/30 (Tue) 15:00",
+    "answer": "5 days",
+    "answer_session_ids": ["fx-sess-h", "fx-sess-i"],
+    "haystack_session_ids": ["fx-sess-h", "fx-sess-i"],
+    "haystack_dates": ["2023/05/21 (Sun) 10:00", "2023/05/26 (Fri) 10:00"],
+    "haystack_sessions": [
+      [
+        { "role": "user", "content": "I start my new job on Monday.", "has_answer": true },
+        { "role": "assistant", "content": "Good luck on your first day!", "has_answer": false }
+      ],
+      [
+        { "role": "user", "content": "Update: I moved to Austin last week for the new job.", "has_answer": true },
+        { "role": "assistant", "content": "Congrats on the move!", "has_answer": false }
+      ]
+    ]
+  },
+  {
+    "question_id": "fx-q7",
+    "question_type": "single-session-assistant",
+    "question": "What stretch did the assistant recommend for a stiff neck?",
+    "question_date": "2023/05/30 (Tue) 16:00",
+    "answer": "Slow neck rolls and a short walk",
+    "answer_session_ids": ["fx-sess-e"],
+    "haystack_session_ids": ["fx-sess-e"],
+    "haystack_dates": ["2023/05/24 (Wed) 07:00"],
+    "haystack_sessions": [
+      [
+        { "role": "user", "content": "Do you know a good stretch for a stiff neck?", "has_answer": false },
+        { "role": "assistant", "content": "Slow neck rolls and a short walk usually help.", "has_answer": true }
+      ]
+    ]
+  },
+  {
+    "question_id": "fx-q8",
+    "question_type": "multi-session",
+    "question": "How many cities have I said I visited this year?",
+    "question_date": "2023/05/30 (Tue) 17:00",
+    "answer": 2,
+    "answer_session_ids": ["fx-sess-f", "fx-sess-g"],
+    "haystack_session_ids": ["fx-sess-f", "fx-sess-g"],
+    "haystack_dates": ["2023/05/24 (Wed) 09:00", "2023/05/27 (Sat) 09:00"],
+    "haystack_sessions": [
+      [
+        { "role": "user", "content": "Just got back from a week in Lisbon, the food was incredible.", "has_answer": true },
+        { "role": "assistant", "content": "Lisbon sounds wonderful, glad you had a good trip.", "has_answer": false }
+      ],
+      [
+        { "role": "user", "content": "Kyoto in the spring was unbelievably beautiful.", "has_answer": true },
+        { "role": "assistant", "content": "Kyoto's cherry blossoms are famous for a reason.", "has_answer": false }
+      ]
+    ]
+  },
+  {
+    "question_id": "fx-q9",
+    "question_type": "single-session-user",
+    "question": "What did I say right before mentioning my new bike?",
+    "question_date": "2023/05/30 (Tue) 18:00",
+    "answer": "Nothing (a blank message)",
+    "answer_session_ids": ["fx-sess-j"],
+    "haystack_session_ids": ["fx-sess-j"],
+    "haystack_dates": ["2023/05/25 (Thu) 08:00"],
+    "haystack_sessions": [
+      [
+        { "role": "user", "content": "", "has_answer": true },
+        { "role": "assistant", "content": "I just got a new bike.", "has_answer": false }
+      ]
+    ]
+  }
+]
