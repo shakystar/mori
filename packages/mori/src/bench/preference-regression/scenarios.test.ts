@@ -156,4 +156,66 @@ describe("PREFERENCE_REGRESSION_SCENARIOS (#386)", () => {
 
     expect(mixedScore.score).toBeLessThan(1);
   });
+
+  it("capped-options: scores 1 on a three-option output and less than 1 when more than three are listed", async () => {
+    const scenario = PREFERENCE_REGRESSION_SCENARIOS.find((s) => s.id === "capped-options");
+    if (!scenario) throw new Error("capped-options scenario missing");
+
+    const threeOptionOutput =
+      "1. 오늘 하루, 더 가볍게 시작하세요\n2. 놓치기 아까운 이야기, 여기 모았습니다\n3. 이번 주의 흐름을 한눈에";
+    const fiveOptionOutput =
+      "1. 오늘 하루, 더 가볍게 시작하세요\n" +
+      "2. 놓치기 아까운 이야기, 여기 모았습니다\n" +
+      "3. 이번 주의 흐름을 한눈에\n" +
+      "4. 잠깐, 이건 보고 가세요\n" +
+      "5. 지금 이 순간의 소식";
+
+    const threeScore = await scoreBehavioralAdaptation(
+      scenario,
+      threeOptionOutput,
+      ALWAYS_TRUE_JUDGE,
+    );
+    const fiveScore = await scoreBehavioralAdaptation(
+      scenario,
+      fiveOptionOutput,
+      ALWAYS_TRUE_JUDGE,
+    );
+
+    expect(threeScore.score).toBe(1);
+    expect(fiveScore.score).toBeLessThan(1);
+  });
+
+  it("capped-options: never uses development vocabulary or code fences in its text fields (#522, #457 요구 3)", () => {
+    const scenario = PREFERENCE_REGRESSION_SCENARIOS.find((s) => s.id === "capped-options");
+    if (!scenario) throw new Error("capped-options scenario missing");
+
+    const bannedTerms = [
+      "코드",
+      "함수",
+      "타입",
+      "커밋",
+      "리포",
+      "빌드",
+      "테스트",
+      "CI",
+      "npm",
+      "pnpm",
+      "TypeScript",
+      "React",
+      "git",
+      "API",
+    ];
+    const text = [
+      ...scenario.contextTurns,
+      scenario.followUpPrompt,
+      scenario.impliedPreference,
+      ...scenario.rubric.map((c) => c.description),
+      ...scenario.rubric.flatMap((c) => (c.kind === "llm-judge" ? [c.question] : [])),
+    ].join("\n");
+
+    expect(text).not.toContain("```");
+    for (const term of bannedTerms) {
+      expect(text.toLowerCase()).not.toContain(term.toLowerCase());
+    }
+  });
 });

@@ -163,8 +163,48 @@ const PNPM_WORKFLOW_SCENARIO: PreferenceRegressionScenario = {
   ],
 };
 
+// #522(#457 요구 3): 기존 3건은 전부 개발 도메인이라, capture 원료뿐 아니라 이 벤치 자체가
+// 개발 편향을 재는 자로 쓰기 어려웠다. 도메인은 뉴스레터 문구 기획(대화 발화만으로 진행되고
+// 산출물이 옵션 나열 형태를 자연히 띠어 "개수 절제"라는 행동 습관을 측정하기 좋다)을 골랐다.
+const CAPPED_OPTIONS_SCENARIO: PreferenceRegressionScenario = {
+  id: "capped-options",
+  title: "제안 옵션 3개 이하 유지",
+  contextTurns: [
+    "이번 뉴스레터 제목 후보를 넉넉히 뽑아줘.",
+    "고마워, 그 중에서 내가 세 개만 추려봤어:\n\n1. 이번 주, 받은편지함이 달라집니다\n2. 오늘의 소식을 3분 안에\n3. 놓치면 아쉬운 이번 주 이야기\n\n이 정도 개수로 계속 가자.",
+    "오프닝 문구도 후보를 만들어줬으면 하는데, 이번에도 아까처럼 추려서 줘.",
+    "고마워, 딱 좋아.",
+  ],
+  followUpPrompt: "이번엔 뉴스레터 마무리에 넣을 구독 유도 문구 초안을 만들어줘.",
+  impliedPreference: "제안 옵션은 항상 3개 이하로만 제시한다",
+  rubric: [
+    {
+      kind: "deterministic",
+      id: "at-most-three-options",
+      description: "번호·기호로 나열된 옵션이 있다면 그 개수가 3개를 넘지 않는다",
+      check: (output) => {
+        const optionLines = output
+          .split("\n")
+          .filter((line) => /^\s*(?:[0-9]+[.)]|[-*•])\s+\S/.test(line));
+        // 나열 자체가 없는 산문형 응답은 잴 대상이 없다 — tabs-indentation과 같은 이유로
+        // "위반"이 아니라 "판정 불가"로 뺀다(#475 선례).
+        if (optionLines.length === 0) return "inconclusive";
+        return optionLines.length <= 3;
+      },
+    },
+    {
+      kind: "llm-judge",
+      id: "restrained-option-count",
+      description: "전반적으로 대안을 절제된 개수로 제시하는 습관과 일치하는가",
+      question:
+        "이 응답이, 옵션을 늘어놓을 때마다 무한정 나열하지 않고 늘 소수로 추려서 제시해 온 사람의 습관과 일치하게 절제된 개수로 제시하는가?",
+    },
+  ],
+};
+
 export const PREFERENCE_REGRESSION_SCENARIOS: readonly PreferenceRegressionScenario[] = [
   TABS_INDENTATION_SCENARIO,
   CONCISE_RESPONSES_SCENARIO,
   PNPM_WORKFLOW_SCENARIO,
+  CAPPED_OPTIONS_SCENARIO,
 ];
