@@ -2,22 +2,60 @@
 
 Memory-native agent harness. Sessions die; memory remains.
 
-## Quickstart
+AI 에이전트의 세션을 넘어 작업 맥락을 보존하기 위한 하네스와 SQLite 메모리 커널.
+[`mori-nest`](https://github.com/shakystar/mori-nest)는 공유 기억 프로토콜과 서버를 다루는 연관 프로젝트다.
 
-Run it once with `npx`, no install required:
+## 프로젝트 상태
 
-```bash
-export ANTHROPIC_API_KEY=sk-ant-...
-npx @shakystar/mori "hi"
+군 복무 중 개인 프로젝트로 개발했다. 모델 API 사용과 반복 평가에 드는 비용, 복무 중 확보할 수 있는 개발 시간, 관련 도구의 등장을 함께 고려해 추가 개발을 종료했다. 구현한 코드와 검증 기록을 보존하며, 신규 기능 개발과 정기 유지보수는 계획하지 않는다.
+
+라이선스는 [MIT](LICENSE)다. 구현·검증 범위는 [최종 상태](docs/final-status.md),
+중요한 설계 판단과 평가 결과는 [프로젝트 사례](docs/case-study.md)에 정리했다.
+기존 설계·평가 문서는 각 작성 시점의 기록으로 보존한다.
+
+## 구현의 중심
+
+- **메모리 처리:** 관측·대화 수집, 증류, 검색, 턴별 컨텍스트 주입을 하네스 생명주기에 연결했다.
+- **일관성:** 이벤트 로그를 기준으로 프로젝션을 재구성하고, compare-and-append와 증거 바인딩으로 오래된 판단의 커밋을 거부한다.
+- **압축 경계:** 같은 Session의 append-only entry log를 읽는 어댑터로 압축 이전 대화를 증류 경로에 전달한다.
+- **평가:** memory-on/off/oracle 비교, 호출 비용 기록, 캐시 재생 및 오염·변동성 분석 자료를 남겼다.
+
+```mermaid
+flowchart TD
+  A["CLI · REPL · 세션 API"] --> B["AgentHarness · Session"]
+  B --> C["관측 및 대화 수집"]
+  C --> D["SQLite 이벤트 로그"]
+  D --> E["증류 · 프로젝션 · 검색"]
+  E --> F["턴별 컨텍스트 주입"]
+  F --> B
 ```
 
-Or install it globally:
+이 그림은 로컬 실행 경로다. mori-nest와의 자동 동기화·종단 간 서비스 운영까지 완료했다는 뜻은 아니다.
+메모리 사용의 일반적인 성능 우위도 확정하지 않았다. [검증 결과와 한계](docs/final-status.md)를 함께 참고한다.
+
+## Quickstart — 소스에서 실행
+
+확인한 도구체인은 **Node 22.23.1 · pnpm 10.30.3**이다. pnpm을 준비한 뒤:
 
 ```bash
-npm install -g @shakystar/mori
-export ANTHROPIC_API_KEY=sk-ant-...
-mori "hi"
+git clone https://github.com/shakystar/mori.git
+cd mori
+pnpm install --frozen-lockfile
+pnpm build
 ```
+
+실제 모델을 사용하는 다음 명령은 해당 제공자의 API 비용이 발생한다.
+
+```bash
+export ANTHROPIC_API_KEY=YOUR_API_KEY
+pnpm --filter @shakystar/mori exec node dist/index.js "hi"
+```
+
+아래 사용 설명의 `mori`는 위 소스 빌드에서는
+`pnpm --filter @shakystar/mori exec node dist/index.js`로 실행할 수 있다.
+npm 배포 상태에 의존하지 않고 소스 실행을 재현 경로로 삼는다.
+
+실제 모델을 호출하지 않는 검증 명령과 Linux 환경 조건은 [최종 상태](docs/final-status.md#재현-명령)에 있다.
 
 ### REPL
 
@@ -179,8 +217,9 @@ memories. It is off by default — set `MORI_CONSOLIDATE_MODEL` to the model it 
 export MORI_CONSOLIDATE_MODEL=claude-opus-5
 ```
 
-With it set, two things trigger a boundary:
+With it set, explicit/session-end boundaries and the post-compaction boundary are available:
 
+- **After compaction** — the harness publishes a `session_compact` event and starts consolidation in the background; it does not await distillation in the compaction observer.
 - **Session end** — automatic, once, right before `mori` or the REPL exits. A boundary
   failure here is reported to stderr and otherwise ignored: it never changes the exit code
   or interrupts a running turn, because the next session's session-end boundary retries the
@@ -189,7 +228,7 @@ With it set, two things trigger a boundary:
   the automatic one, a failure here is reported to you directly, since you asked for it by
   name.
 
-`MORI_CONSOLIDATE_MODEL` unset means both triggers quietly do nothing — no error, no
+`MORI_CONSOLIDATE_MODEL` unset means these LLM-backed boundaries quietly do nothing — no error, no
 warning. The same applies when nothing has been captured yet: a session-end boundary over a
 store that was never created (a session that only read files) is skipped rather than being
 the thing that creates it, so the "no trace on disk" guarantee above holds whether or not
@@ -216,7 +255,7 @@ await session.close(); // settles observations + runs the session-end consolidat
 
 Each `prompt()` call reports the turn's reply text, its `stopReason`, and its token/cost
 `usage` (summed across every provider round-trip the turn made, in case of a tool-call
-loop). `consolidate()` and `close()` are the same two triggers described above, reachable
+loop). `consolidate()` and `close()` are the triggers described above, reachable
 without a REPL session around them.
 
 ## Tools
